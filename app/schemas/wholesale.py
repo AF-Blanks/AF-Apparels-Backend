@@ -46,7 +46,7 @@ class WholesaleApplicationOut(BaseModel):
 
 
 class ApproveApplicationRequest(BaseModel):
-    pricing_tier_id: uuid.UUID
+    pricing_tier_id: uuid.UUID | None = None
     shipping_tier_id: uuid.UUID | None = None
     discount_group_id: uuid.UUID | None = None
     admin_notes: str | None = None
