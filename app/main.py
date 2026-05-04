@@ -232,6 +232,24 @@ async def _ensure_content_tables() -> None:
                     updated_at TIMESTAMPTZ DEFAULT now()
                 )
             """))
+            # Add tax columns to orders if missing (idempotent)
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='orders' AND column_name='tax_rate'
+                    ) THEN
+                        ALTER TABLE orders ADD COLUMN tax_rate NUMERIC(6,4);
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='orders' AND column_name='tax_region'
+                    ) THEN
+                        ALTER TABLE orders ADD COLUMN tax_region VARCHAR(10);
+                    END IF;
+                END$$;
+            """))
         print("Content tables: OK")
     except Exception as exc:
         print(f"Content tables warning (non-fatal): {exc}")

@@ -75,12 +75,6 @@ class OrderService:
                 raise NotFoundError(f"Variant {cart_item.variant_id} not found")
             variant, product = row
 
-            # MOQ check
-            if cart_item.quantity < product.moq:
-                raise ValidationError(
-                    f"SKU {variant.sku}: minimum {product.moq} units required"
-                )
-
             # Stock check — only enforce when inventory records exist.
             # COALESCE returns 0 when no records found; treat 0 as unlimited.
             stock_result = await self.db.execute(
@@ -115,13 +109,6 @@ class OrderService:
                 "unit_price": unit_price,
                 "line_total": line_total,
             })
-
-        # 4. MOV check
-        mov_amount = Decimal(str(getattr(settings, "MOV_AMOUNT", "0")))
-        if subtotal < mov_amount:
-            raise ValidationError(
-                f"Minimum order value of ${mov_amount} not met (current: ${subtotal})"
-            )
 
         # 5. Calculate shipping
         shipping_method = confirm.shipping_method or "standard"
@@ -213,6 +200,8 @@ class OrderService:
             subtotal=subtotal,
             shipping_cost=shipping_cost,
             tax_amount=tax_amount_val,
+            tax_rate=confirm.tax_rate,
+            tax_region=getattr(confirm, "tax_region", None),
             total=total,
             shipping_method=shipping_method,
             shipping_address_id=confirm.address_id if confirm.address_id else None,

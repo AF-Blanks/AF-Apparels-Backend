@@ -43,6 +43,8 @@ class GuestCheckoutRequest(BaseModel):
     qb_token: str
     order_notes: str | None = None
     tax_amount: Decimal | None = None
+    tax_rate: float | None = None
+    tax_region: str | None = None
 
 
 class GuestOrderOut(BaseModel):
@@ -183,6 +185,8 @@ async def guest_checkout(
         subtotal=subtotal,
         shipping_cost=shipping_cost,
         tax_amount=tax_amount_val,
+        tax_rate=payload.tax_rate,
+        tax_region=payload.tax_region,
         total=total,
         shipping_method=method,
         shipping_address_snapshot=address_snapshot,

@@ -63,6 +63,7 @@ class CheckoutConfirmRequest(BaseModel):
     discount_code: str | None = None
     tax_amount: Decimal | None = None
     tax_rate: float | None = None
+    tax_region: str | None = None
 
 
 # ---------------------------------------------------------------------------
