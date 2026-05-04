@@ -200,8 +200,6 @@ class OrderService:
             subtotal=subtotal,
             shipping_cost=shipping_cost,
             tax_amount=tax_amount_val,
-            tax_rate=confirm.tax_rate,
-            tax_region=getattr(confirm, "tax_region", None),
             total=total,
             shipping_method=shipping_method,
             shipping_address_id=confirm.address_id if confirm.address_id else None,
@@ -209,6 +207,22 @@ class OrderService:
         )
         self.db.add(order)
         await self.db.flush()
+
+        # Save tax_rate / tax_region via raw SQL — columns may not exist in older deployments.
+        # This is a best-effort update; failure does not block order creation.
+        _tax_rate_val = confirm.tax_rate
+        _tax_region_val = getattr(confirm, "tax_region", None)
+        if _tax_rate_val is not None or _tax_region_val is not None:
+            try:
+                from sqlalchemy import text as _text
+                await self.db.execute(
+                    _text(
+                        "UPDATE orders SET tax_rate = :tr, tax_region = :trg WHERE id = :oid"
+                    ),
+                    {"tr": _tax_rate_val, "trg": _tax_region_val, "oid": str(order.id)},
+                )
+            except Exception as _tax_exc:
+                logger.warning("Could not save tax_rate/tax_region on order %s (columns may be missing): %s", order.id, _tax_exc)
 
         # 9. Create OrderItem records
         for item_data in order_items_data:

@@ -1,5 +1,7 @@
+import logging
+import traceback
 from decimal import Decimal
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -11,6 +13,7 @@ from app.services.payment_service import PaymentService
 from app.api.v1.discounts import validate_discount_code, compute_discount_amount
 from app.models.discount import DiscountUsage
 
+_log = logging.getLogger(__name__)
 router = APIRouter(prefix="/checkout", tags=["checkout"])
 
 
@@ -139,9 +142,23 @@ async def confirm_checkout(
 
     Note: card auto-save happens at POST /checkout/tokenize (not here).
     """
-    import logging as _logging
-    _log = _logging.getLogger(__name__)
+    try:
+        return await _confirm_checkout_inner(payload, request, db)
+    except (ForbiddenError, ValidationError, HTTPException):
+        raise  # let framework handle these as-is
+    except Exception as exc:
+        _log.exception("confirm_checkout UNHANDLED ERROR — payload fields: %s", getattr(payload, "__fields_set__", None))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Order creation failed: {type(exc).__name__}: {exc}",
+        ) from exc
 
+
+async def _confirm_checkout_inner(
+    payload: CheckoutConfirmRequest,
+    request: Request,
+    db: AsyncSession,
+):
     company_id = getattr(request.state, "company_id", None)
     user_id = getattr(request.state, "user_id", None)
     if not company_id:
