@@ -366,7 +366,7 @@ async def health_check() -> dict:
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-from app.api.v1 import auth, products, cart, checkout, orders, account, webhooks, reviews, discounts, guest, contact  # noqa: E402
+from app.api.v1 import auth, products, cart, checkout, orders, account, webhooks, reviews, discounts, guest, contact, style_sheets, product_specs, upload  # noqa: E402
 from app.api.v1.admin import (  # noqa: E402
     customers,
     pricing as admin_pricing,
@@ -383,6 +383,8 @@ from app.api.v1.admin import (  # noqa: E402
     users as admin_users,
     analytics as admin_analytics,
     taxes as admin_taxes,
+    style_sheets as admin_style_sheets,
+    product_specs as admin_product_specs,
 )
 
 _cors_origins = list({settings.FRONTEND_URL, *settings.allowed_origins_list} - {""})
@@ -409,6 +411,9 @@ app.include_router(webhooks.router, prefix=_V1)
 app.include_router(discounts.router, prefix=_V1)
 app.include_router(guest.router, prefix=_V1)
 app.include_router(contact.router, prefix=_V1)
+app.include_router(style_sheets.router, prefix=_V1)
+app.include_router(product_specs.router, prefix=_V1)
+app.include_router(upload.router, prefix=_V1)
 
 app.include_router(customers.router, prefix=f"{_V1}/admin")
 app.include_router(admin_pricing.router, prefix=_V1)
@@ -425,6 +430,8 @@ app.include_router(admin_discounts.router, prefix=_V1)
 app.include_router(admin_users.router, prefix=_V1)
 app.include_router(admin_analytics.router, prefix=_V1)
 app.include_router(admin_taxes.router, prefix=_V1)
+app.include_router(admin_style_sheets.router, prefix=_V1)
+app.include_router(admin_product_specs.router, prefix=_V1)
 
 # Static files
 os.makedirs("/app/media", exist_ok=True)
