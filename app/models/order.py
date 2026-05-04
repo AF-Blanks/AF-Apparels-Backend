@@ -90,6 +90,15 @@ class Order(BaseModel):
     )
     qb_invoice_id: Mapped[str | None] = mapped_column(String(255))
 
+    # Payment method + ACH details (added after initial deployment — saved via raw SQL)
+    payment_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ach_bank_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ach_account_holder: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ach_routing_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ach_account_last4: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    ach_account_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ach_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
+
     # ── Schema compatibility aliases ────────────────────────────────────────────
     @property
     def order_notes(self) -> str | None:

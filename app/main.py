@@ -250,6 +250,33 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            # Add payment_method + ACH columns to orders if missing (idempotent)
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='payment_method') THEN
+                        ALTER TABLE orders ADD COLUMN payment_method VARCHAR(20);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='ach_bank_name') THEN
+                        ALTER TABLE orders ADD COLUMN ach_bank_name VARCHAR(255);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='ach_account_holder') THEN
+                        ALTER TABLE orders ADD COLUMN ach_account_holder VARCHAR(255);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='ach_routing_number') THEN
+                        ALTER TABLE orders ADD COLUMN ach_routing_number VARCHAR(20);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='ach_account_last4') THEN
+                        ALTER TABLE orders ADD COLUMN ach_account_last4 VARCHAR(4);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='ach_account_type') THEN
+                        ALTER TABLE orders ADD COLUMN ach_account_type VARCHAR(20);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='ach_verified') THEN
+                        ALTER TABLE orders ADD COLUMN ach_verified BOOLEAN DEFAULT false;
+                    END IF;
+                END$$;
+            """))
         print("Content tables: OK")
     except Exception as exc:
         print(f"Content tables warning (non-fatal): {exc}")

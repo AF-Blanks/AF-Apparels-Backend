@@ -224,6 +224,28 @@ class OrderService:
             except Exception as _tax_exc:
                 logger.warning("Could not save tax_rate/tax_region on order %s (columns may be missing): %s", order.id, _tax_exc)
 
+        # Save payment_method + ACH details via raw SQL (columns added after initial deploy)
+        _pm = getattr(confirm, "payment_method", None)
+        _ach_bank = getattr(confirm, "ach_bank_name", None)
+        _ach_holder = getattr(confirm, "ach_account_holder", None)
+        _ach_routing = getattr(confirm, "ach_routing_number", None)
+        _ach_last4 = getattr(confirm, "ach_account_last4", None)
+        _ach_type = getattr(confirm, "ach_account_type", None)
+        if _pm or _ach_bank:
+            try:
+                from sqlalchemy import text as _text2
+                await self.db.execute(
+                    _text2(
+                        "UPDATE orders SET payment_method=:pm, ach_bank_name=:ab, "
+                        "ach_account_holder=:ah, ach_routing_number=:ar, "
+                        "ach_account_last4=:al, ach_account_type=:at WHERE id=:oid"
+                    ),
+                    {"pm": _pm, "ab": _ach_bank, "ah": _ach_holder,
+                     "ar": _ach_routing, "al": _ach_last4, "at": _ach_type, "oid": str(order.id)},
+                )
+            except Exception as _ach_exc:
+                logger.warning("Could not save payment_method/ACH on order %s: %s", order.id, _ach_exc)
+
         # 9. Create OrderItem records
         for item_data in order_items_data:
             order_item = OrderItem(

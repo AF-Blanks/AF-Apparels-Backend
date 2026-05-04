@@ -64,6 +64,13 @@ class CheckoutConfirmRequest(BaseModel):
     tax_amount: Decimal | None = None
     tax_rate: float | None = None
     tax_region: str | None = None
+    # ACH payment
+    payment_method: str | None = None  # "card" | "ach"
+    ach_bank_name: str | None = None
+    ach_account_holder: str | None = None
+    ach_routing_number: str | None = None
+    ach_account_last4: str | None = None
+    ach_account_type: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +172,12 @@ class AdminOrderDetail(OrderOut):
     guest_email: str | None = None
     guest_name: str | None = None
     guest_phone: str | None = None
+    # ACH payment details (admin view)
+    ach_bank_name: str | None = None
+    ach_account_holder: str | None = None
+    ach_account_last4: str | None = None
+    ach_account_type: str | None = None
+    ach_verified: bool | None = None
 
     model_config = {"from_attributes": True}
 

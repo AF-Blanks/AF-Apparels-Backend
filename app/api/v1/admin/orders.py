@@ -484,7 +484,32 @@ async def get_admin_order(order_id: UUID, db: AsyncSession = Depends(get_db)):
         guest_email=order.guest_email,
         guest_name=order.guest_name,
         guest_phone=order.guest_phone,
+        payment_method=getattr(order, "payment_method", None),
+        ach_bank_name=getattr(order, "ach_bank_name", None),
+        ach_account_holder=getattr(order, "ach_account_holder", None),
+        ach_account_last4=getattr(order, "ach_account_last4", None),
+        ach_account_type=getattr(order, "ach_account_type", None),
+        ach_verified=getattr(order, "ach_verified", None),
     )
+
+
+@router.post("/orders/{order_id}/verify-ach", status_code=200)
+async def verify_ach_payment(order_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """Mark an ACH order as payment verified (admin confirms bank transfer received)."""
+    from sqlalchemy import text as _text
+    result = await db.execute(select(Order).where(Order.id == order_id))
+    order = result.scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+    try:
+        await db.execute(
+            _text("UPDATE orders SET ach_verified=true, payment_status='paid' WHERE id=:oid"),
+            {"oid": str(order_id)},
+        )
+        await db.commit()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"status": "verified", "order_id": str(order_id)}
 
 
 @router.post("/orders/{order_id}/items", status_code=201)

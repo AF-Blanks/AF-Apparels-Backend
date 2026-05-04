@@ -179,9 +179,10 @@ async def _confirm_checkout_inner(
     # Validate: at least one payment method supplied
     has_qb = bool(payload.qb_token or payload.saved_card_id)
     has_stripe = bool(payload.payment_intent_id)
-    if not has_qb and not has_stripe:
+    has_ach = payload.payment_method == "ach"
+    if not has_qb and not has_stripe and not has_ach:
         raise ValidationError(
-            "Payment required: supply qb_token, saved_card_id, or payment_intent_id"
+            "Payment required: supply qb_token, saved_card_id, payment_intent_id, or payment_method=ach"
         )
 
     discount_percent = getattr(request.state, "tier_discount_percent", Decimal("0"))
