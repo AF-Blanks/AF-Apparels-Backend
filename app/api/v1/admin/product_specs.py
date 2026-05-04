@@ -59,8 +59,11 @@ async def list_product_specs(
     _: None = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    rows = (await db.execute(select(ProductSpec).order_by(ProductSpec.sort_order, ProductSpec.title))).scalars().all()
-    return [_row(p) for p in rows]
+    try:
+        rows = (await db.execute(select(ProductSpec).order_by(ProductSpec.sort_order, ProductSpec.title))).scalars().all()
+        return [_row(p) for p in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"product_specs query failed: {exc}")
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

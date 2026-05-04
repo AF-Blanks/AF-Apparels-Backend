@@ -59,8 +59,11 @@ async def list_style_sheets(
     _: None = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    rows = (await db.execute(select(StyleSheet).order_by(StyleSheet.sort_order, StyleSheet.style_number))).scalars().all()
-    return [_row(s) for s in rows]
+    try:
+        rows = (await db.execute(select(StyleSheet).order_by(StyleSheet.sort_order, StyleSheet.style_number))).scalars().all()
+        return [_row(s) for s in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"style_sheets query failed: {exc}")
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

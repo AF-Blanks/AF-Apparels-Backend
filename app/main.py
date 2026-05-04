@@ -201,6 +201,42 @@ if settings.SENTRY_DSN:
     )
 
 
+# ── Content tables (migration fallback) ──────────────────────────────────────
+async def _ensure_content_tables() -> None:
+    """Create style_sheets and product_specs if they don't exist (Alembic fallback)."""
+    from sqlalchemy import text
+    from app.core.database import engine
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS style_sheets (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    style_number VARCHAR(50) NOT NULL,
+                    image_url VARCHAR(500),
+                    pdf_url VARCHAR(500),
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+            """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS product_specs (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    title VARCHAR(200) NOT NULL,
+                    description TEXT,
+                    pdf_url VARCHAR(500),
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+            """))
+        print("Content tables: OK")
+    except Exception as exc:
+        print(f"Content tables warning (non-fatal): {exc}")
+
+
 # ── Email templates seed ──────────────────────────────────────────────────────
 async def _seed_email_templates() -> None:
     """Insert default email templates if they don't exist."""
@@ -303,6 +339,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     assert await check_db_connection(), "Database connection failed on startup"
     assert await check_redis_connection(), "Redis connection failed on startup"
+
+    # Ensure content tables exist (fallback in case Alembic migration didn't run)
+    await _ensure_content_tables()
 
     # Seed email templates
     await _seed_email_templates()
@@ -432,6 +471,12 @@ app.include_router(admin_analytics.router, prefix=_V1)
 app.include_router(admin_taxes.router, prefix=_V1)
 app.include_router(admin_style_sheets.router, prefix=_V1)
 app.include_router(admin_product_specs.router, prefix=_V1)
+
+# ── Debug: log all registered routes at import time ──────────────────────────
+for _route in app.routes:
+    _path = getattr(_route, "path", "?")
+    _methods = getattr(_route, "methods", None)
+    print(f"[ROUTE] {','.join(_methods) if _methods else 'MOUNT'} {_path}")
 
 # Static files
 os.makedirs("/app/media", exist_ok=True)
