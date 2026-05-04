@@ -76,7 +76,7 @@ async def create_style_sheet(
     return _row(s)
 
 
-@router.put("/{sheet_id}")
+@router.patch("/{sheet_id}")
 async def update_style_sheet(
     sheet_id: uuid.UUID,
     payload: StyleSheetUpdate,

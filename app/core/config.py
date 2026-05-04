@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     APP_ENV: Literal["development", "test", "staging", "production"] = "development"
     APP_SECRET_KEY: str = "dev-secret-key-change-in-production"
     DEBUG: bool = False
-    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:3001,https://af-apparel.vercel.app"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:3001,https://af-apparel.vercel.app,https://af-apparel-sigma.vercel.app"
 
     @property
     def allowed_origins_list(self) -> list[str]:

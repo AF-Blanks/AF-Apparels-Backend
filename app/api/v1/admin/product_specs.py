@@ -76,7 +76,7 @@ async def create_product_spec(
     return _row(p)
 
 
-@router.put("/{spec_id}")
+@router.patch("/{spec_id}")
 async def update_product_spec(
     spec_id: uuid.UUID,
     payload: ProductSpecUpdate,
