@@ -458,7 +458,7 @@ class CartService:
                 logger.error("cart shipping estimate failed for company %s: %s", company_id, exc, exc_info=True)
 
         return CartValidation(
-            is_valid=not moq_violations and not mov_violation,
+            is_valid=True,
             moq_violations=moq_violations,
             mov_violation=mov_violation,
             mov_required=mov_required,

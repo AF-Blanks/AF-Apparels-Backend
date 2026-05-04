@@ -34,9 +34,6 @@ async def create_payment_intent(
     if not cart.items:
         raise ValidationError("Cart is empty")
 
-    if not cart.validation.is_valid:
-        raise ValidationError("Cart validation failed — check MOQ and MOV requirements")
-
     total = cart.subtotal + cart.validation.estimated_shipping
     payment_svc = PaymentService(db)
     intent = await payment_svc.create_payment_intent(
@@ -186,8 +183,6 @@ async def confirm_checkout(
         cart = await cart_svc.get_cart_with_pricing(company_id, discount_percent)
         if not cart.items:
             raise ValidationError("Cart is empty")
-        if not cart.validation.is_valid:
-            raise ValidationError("Cart validation failed — check MOQ and MOV requirements")
 
         if payload.shipping_method == "will_call":
             base_shipping = Decimal("0.00")
