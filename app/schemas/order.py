@@ -61,6 +61,8 @@ class CheckoutConfirmRequest(BaseModel):
     po_number: str | None = None
     order_notes: str | None = None
     discount_code: str | None = None
+    tax_amount: Decimal | None = None
+    tax_rate: float | None = None
 
 
 # ---------------------------------------------------------------------------

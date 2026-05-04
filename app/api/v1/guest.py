@@ -42,6 +42,7 @@ class GuestCheckoutRequest(BaseModel):
     shipping_method: str = "standard"  # standard | expedited | will_call
     qb_token: str
     order_notes: str | None = None
+    tax_amount: Decimal | None = None
 
 
 class GuestOrderOut(BaseModel):
@@ -127,7 +128,8 @@ async def guest_checkout(
     else:
         shipping_cost = GUEST_SHIPPING_STANDARD
 
-    total = subtotal + shipping_cost
+    tax_amount_val = payload.tax_amount or Decimal("0")
+    total = subtotal + shipping_cost + tax_amount_val
 
     # 3. Charge card via QB Payments
     qb_pay = QBPaymentsService()
@@ -180,7 +182,7 @@ async def guest_checkout(
         qb_payment_status=qb_payment_status,
         subtotal=subtotal,
         shipping_cost=shipping_cost,
-        tax_amount=Decimal("0"),
+        tax_amount=tax_amount_val,
         total=total,
         shipping_method=method,
         shipping_address_snapshot=address_snapshot,

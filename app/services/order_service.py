@@ -183,7 +183,8 @@ class OrderService:
             if shipping_method == "expedited":
                 shipping_cost += Decimal("45.00")
 
-        total = subtotal + shipping_cost - coupon_discount_amount
+        tax_amount_val = Decimal(str(confirm.tax_amount or 0))
+        total = subtotal + shipping_cost + tax_amount_val - coupon_discount_amount
 
         # 6. Resolve shipping address
         shipping_address = await self._resolve_address(confirm, company_id)
@@ -211,7 +212,7 @@ class OrderService:
             qb_payment_status=qb_payment_status,
             subtotal=subtotal,
             shipping_cost=shipping_cost,
-            tax_amount=Decimal("0"),
+            tax_amount=tax_amount_val,
             total=total,
             shipping_method=shipping_method,
             shipping_address_id=confirm.address_id if confirm.address_id else None,
