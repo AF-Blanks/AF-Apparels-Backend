@@ -65,7 +65,6 @@ async def guest_checkout(
 ) -> GuestOrderOut:
     """Place an order as a guest (retail pricing, no account required)."""
     from app.core.config import get_settings
-    from app.core.redis import redis_increment
     from app.services.qb_payments_service import QBPaymentsService
 
     settings = get_settings()
@@ -148,14 +147,24 @@ async def guest_checkout(
     qb_payment_status = charge_resp.get("status", "UNKNOWN")
     _payment_status = "paid" if qb_payment_status == "CAPTURED" else "pending"
 
-    # 4. Generate order number
-    _ORDER_COUNTER_KEY = "order:counter"
+    # 4. Generate order number — query DB for max to avoid Redis-reset collisions
+    from sqlalchemy import text as _text
     try:
-        counter = await redis_increment(_ORDER_COUNTER_KEY)
+        _num_result = await db.execute(_text(
+            "SELECT order_number FROM orders "
+            "WHERE order_number LIKE 'AF-%' "
+            "ORDER BY SUBSTRING(order_number FROM 4)::INTEGER DESC "
+            "LIMIT 1"
+        ))
+        _num_row = _num_result.fetchone()
+        if _num_row and _num_row[0]:
+            _counter = int(_num_row[0].split("-", 1)[-1]) + 1
+        else:
+            _counter = 1
     except Exception:
         import random
-        counter = random.randint(10000, 99999)
-    order_number = f"AF-{counter:06d}"
+        _counter = random.randint(10000, 99999)
+    order_number = f"AF-{_counter:06d}"
 
     # 5. Create Order record
     address_snapshot = json.dumps({

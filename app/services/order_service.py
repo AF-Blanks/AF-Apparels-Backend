@@ -471,10 +471,21 @@ class OrderService:
         return {}
 
     async def _generate_order_number(self) -> str:
-        from app.core.redis import redis_increment
+        from sqlalchemy import text as _text
         try:
-            counter = await redis_increment(_ORDER_COUNTER_KEY)
-        except Exception:
+            result = await self.db.execute(_text(
+                "SELECT order_number FROM orders "
+                "WHERE order_number LIKE 'AF-%' "
+                "ORDER BY SUBSTRING(order_number FROM 4)::INTEGER DESC "
+                "LIMIT 1"
+            ))
+            row = result.fetchone()
+            if row and row[0]:
+                counter = int(row[0].split("-", 1)[-1]) + 1
+            else:
+                counter = 1
+        except Exception as _exc:
+            logger.warning("order number DB query failed, using random fallback: %s", _exc)
             import random
             counter = random.randint(10000, 99999)
         return f"AF-{counter:06d}"
