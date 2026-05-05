@@ -40,7 +40,13 @@ class GuestCheckoutRequest(BaseModel):
     items: list[GuestCartItem]
     shipping_address: AddressIn
     shipping_method: str = "standard"  # standard | expedited | will_call
-    qb_token: str
+    payment_method: str = "card"  # card | ach
+    qb_token: str | None = None
+    ach_bank_name: str | None = None
+    ach_account_holder: str | None = None
+    ach_routing_number: str | None = None
+    ach_account_last4: str | None = None
+    ach_account_type: str | None = None
     order_notes: str | None = None
     tax_amount: Decimal | None = None
     tax_rate: float | None = None
@@ -65,7 +71,6 @@ async def guest_checkout(
 ) -> GuestOrderOut:
     """Place an order as a guest (retail pricing, no account required)."""
     from app.core.config import get_settings
-    from app.services.qb_payments_service import QBPaymentsService
 
     settings = get_settings()
 
@@ -132,20 +137,28 @@ async def guest_checkout(
     tax_amount_val = payload.tax_amount or Decimal("0")
     total = subtotal + shipping_cost + tax_amount_val
 
-    # 3. Charge card via QB Payments
-    qb_pay = QBPaymentsService()
-    try:
-        charge_resp = qb_pay.charge_card(
-            token=payload.qb_token,
-            amount=float(total),
-            description=f"AF Apparels guest order — {payload.guest_email}",
-        )
-    except RuntimeError as exc:
-        raise ValidationError(f"Payment failed: {exc}") from exc
+    # 3. Charge card via QB Payments (skip for ACH — verified manually)
+    if payload.payment_method == "ach":
+        qb_charge_id = None
+        qb_payment_status = "ACH_PENDING"
+        _payment_status = "pending"
+    else:
+        if not payload.qb_token:
+            raise ValidationError("Card token is required for card payments")
+        from app.services.qb_payments_service import QBPaymentsService
+        qb_pay = QBPaymentsService()
+        try:
+            charge_resp = qb_pay.charge_card(
+                token=payload.qb_token,
+                amount=float(total),
+                description=f"AF Apparels guest order — {payload.guest_email}",
+            )
+        except RuntimeError as exc:
+            raise ValidationError(f"Payment failed: {exc}") from exc
 
-    qb_charge_id = charge_resp.get("id")
-    qb_payment_status = charge_resp.get("status", "UNKNOWN")
-    _payment_status = "paid" if qb_payment_status == "CAPTURED" else "pending"
+        qb_charge_id = charge_resp.get("id")
+        qb_payment_status = charge_resp.get("status", "UNKNOWN")
+        _payment_status = "paid" if qb_payment_status == "CAPTURED" else "pending"
 
     # 4. Generate order number — query DB for max to avoid Redis-reset collisions
     from sqlalchemy import text as _text
@@ -191,6 +204,12 @@ async def guest_checkout(
         notes=payload.order_notes,
         qb_payment_charge_id=qb_charge_id,
         qb_payment_status=qb_payment_status,
+        payment_method=payload.payment_method,
+        ach_bank_name=payload.ach_bank_name if payload.payment_method == "ach" else None,
+        ach_account_holder=payload.ach_account_holder if payload.payment_method == "ach" else None,
+        ach_routing_number=payload.ach_routing_number if payload.payment_method == "ach" else None,
+        ach_account_last4=payload.ach_account_last4 if payload.payment_method == "ach" else None,
+        ach_account_type=payload.ach_account_type if payload.payment_method == "ach" else None,
         subtotal=subtotal,
         shipping_cost=shipping_cost,
         tax_amount=tax_amount_val,

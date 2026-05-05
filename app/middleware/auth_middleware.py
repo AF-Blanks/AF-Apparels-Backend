@@ -165,4 +165,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Card tokenization — guests need this too (card-save is skipped when no company_id)
         if path == "/api/v1/checkout/tokenize":
             return True
+        # Public content pages — no auth required
+        if path.startswith("/api/v1/style-sheets"):
+            return True
+        if path.startswith("/api/v1/product-specs"):
+            return True
+        # Tax rate — needed for guest checkout address step
+        if path.startswith("/api/v1/tax-rate"):
+            return True
         return False
