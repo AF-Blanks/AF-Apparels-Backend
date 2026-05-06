@@ -282,4 +282,28 @@ async def _confirm_checkout_inner(
         db.add(usage)
 
     await db.commit()
+
+    # ── Send order confirmation email ─────────────────────────────────────────
+    try:
+        from sqlalchemy import select as _sel
+        from sqlalchemy.orm import selectinload as _sil
+        from app.models.order import Order as _Order
+        from app.models.user import User as _User
+        from app.services.email_service import EmailService as _EmailSvc
+
+        _order_full = (await db.execute(
+            _sel(_Order).options(_sil(_Order.items)).where(_Order.id == order.id)
+        )).scalar_one_or_none()
+
+        if _order_full and user_id:
+            _user = (await db.execute(
+                _sel(_User).where(_User.id == user_id)
+            )).scalar_one_or_none()
+            if _user:
+                _email_svc = _EmailSvc(db)
+                _email_svc.send_order_confirmation(_order_full, _user.email)
+                _email_svc.send_admin_new_order_alert(_order_full)
+    except Exception as _exc:
+        _log.warning("Order confirmation email failed: %s", _exc)
+
     return order

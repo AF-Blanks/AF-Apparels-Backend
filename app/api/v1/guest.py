@@ -255,49 +255,14 @@ async def guest_checkout(
     )
     order = result.scalar_one()
 
-    # 8. Send guest confirmation email
+    # 8. Send guest confirmation email + admin alert
     try:
         from app.services.email_service import EmailService
-        email_svc = EmailService(db)
-        email_svc.send_raw(
-            to_email=payload.guest_email,
-            subject=f"Order Confirmed — {order.order_number}",
-            body_html=f"""
-                <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
-                  <div style="background:#080808;padding:24px;text-align:center">
-                    <span style="font-size:36px;font-weight:900;color:#1A5CFF">A</span>
-                    <span style="font-size:36px;font-weight:900;color:#E8242A">F</span>
-                    <span style="color:#fff;font-size:14px;margin-left:8px">APPARELS</span>
-                  </div>
-                  <div style="padding:32px;background:#fff">
-                    <h2 style="color:#2A2830">Order Confirmed!</h2>
-                    <p>Hi {payload.guest_name},</p>
-                    <p>Your order <b>{order.order_number}</b> has been received and is being processed.</p>
-                    <p><b>Total Charged:</b> ${float(order.total):.2f}</p>
-                    <p><b>Items:</b></p>
-                    <ul>
-                      {"".join(f"<li>{i.product_name} — {i.color or ''} {i.size or ''} x{i.quantity} @ ${float(i.unit_price):.2f}</li>" for i in order.items)}
-                    </ul>
-                    <p style="margin-top:20px">Questions? Call (214) 272-7213 or reply to this email.</p>
-                    <p>— AF Apparels Team</p>
-                  </div>
-                </div>
-            """,
-        )
+        _email_svc = EmailService(db)
+        _email_svc.send_order_confirmation(order, order.guest_email)
+        _email_svc.send_admin_new_order_alert(order)
     except Exception as exc:
-        logger.warning("Guest confirmation email failed: %s", exc)
-
-    # 9. Admin notification
-    try:
-        if settings.ADMIN_NOTIFICATION_EMAIL:
-            from app.services.email_service import EmailService as _ES
-            _ES(db).send_raw(
-                to_email=settings.ADMIN_NOTIFICATION_EMAIL,
-                subject=f"New Guest Order — {order.order_number} (${float(order.total):.2f})",
-                body_html=f"<h2>New Guest Order</h2><p><b>Order:</b> {order.order_number}</p><p><b>Guest:</b> {payload.guest_name} &lt;{payload.guest_email}&gt;</p><p><b>Total:</b> ${float(order.total):.2f}</p>",
-            )
-    except Exception as exc:
-        logger.warning("Admin guest order notification failed: %s", exc)
+        logger.warning("Order confirmation email failed: %s", exc)
 
     await db.commit()
 

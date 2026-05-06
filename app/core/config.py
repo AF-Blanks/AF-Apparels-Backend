@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     SHOPIFY_STORE_DOMAIN: str = ""
     SHOPIFY_ADMIN_API_TOKEN: str = ""
 
+    # ── Brand / notifications ─────────────────────────────────────────────────
+    LOGO_URL: str = ""
+    LOW_STOCK_THRESHOLD: int = 10
+
     # ── reCAPTCHA ─────────────────────────────────────────────────────────────
     RECAPTCHA_SECRET_KEY: str = ""
 

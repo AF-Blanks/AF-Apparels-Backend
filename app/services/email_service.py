@@ -1,5 +1,6 @@
 #backend/app/services/email_service.py
 """EmailService — DB-stored Jinja2 templates + Resend delivery."""
+import base64
 import json
 import logging
 from uuid import UUID
@@ -83,6 +84,7 @@ class EmailService:
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
         reply_to: str | None = None,
+        attachments: list[dict] | None = None,
     ) -> bool:
         """Send an ad-hoc email without requiring a DB template."""
         return self._send_via_resend(
@@ -93,6 +95,7 @@ class EmailService:
             cc=cc,
             bcc=bcc,
             reply_to=reply_to,
+            attachments=attachments,
         )
 
     def _send_via_resend(
@@ -104,6 +107,7 @@ class EmailService:
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
         reply_to: str | None = None,
+        attachments: list[dict] | None = None,
     ) -> bool:
         if not settings.RESEND_API_KEY:
             logger.warning("RESEND_API_KEY not set — skipping email to %s", to_email)
@@ -131,6 +135,16 @@ class EmailService:
             params["bcc"] = bcc
         if reply_to:
             params["reply_to"] = [reply_to]
+        if attachments:
+            params["attachments"] = [
+                {
+                    "filename": a["filename"],
+                    "content": base64.b64encode(a["content"]).decode()
+                    if isinstance(a["content"], bytes)
+                    else a["content"],
+                }
+                for a in attachments
+            ]
 
         try:
             result = resend.Emails.send(params)
@@ -140,6 +154,308 @@ class EmailService:
         except Exception as exc:
             logger.error("Resend exception for %s: %s", recipient, exc)
             return False
+
+    # ── Branded template wrapper ───────────────────────────────────────────────
+
+    @staticmethod
+    def _base_template(content_html: str, footer_note: str = "") -> str:
+        """AF Apparels navy-branded HTML email wrapper."""
+        note_html = (
+            f'<p style="color:#9ca3af;font-size:12px;margin:4px 0 0">{footer_note}</p>'
+            if footer_note else ""
+        )
+        return (
+            '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\','
+            'Helvetica,Arial,sans-serif;max-width:600px;margin:0 auto;background:#ffffff">'
+            '<div style="background:#1B3A5C;padding:24px 32px;text-align:center;'
+            'border-bottom:3px solid #E8242A">'
+            '<span style="font-size:28px;font-weight:900;color:#ffffff;'
+            'letter-spacing:-.5px">AF</span>'
+            '<span style="color:rgba(255,255,255,.55);font-size:13px;margin-left:8px;'
+            'letter-spacing:.18em;text-transform:uppercase;font-weight:600">APPARELS</span>'
+            '</div>'
+            '<div style="padding:32px">'
+            + content_html
+            + '<div style="border-top:1px solid #e5e7eb;margin-top:28px;padding-top:20px">'
+            '<p style="color:#9ca3af;font-size:12px;margin:0 0 4px">'
+            'Questions? Call <a href="tel:2142727213" style="color:#1B3A5C;font-weight:700">'
+            '(214)\xa0272-7213</a> or '
+            '<a href="mailto:info.afapparel@gmail.com" style="color:#1B3A5C">'
+            'info.afapparel@gmail.com</a></p>'
+            f'{note_html}'
+            '<p style="color:#9ca3af;font-size:12px;margin:4px 0 0">'
+            '— AF Apparels Wholesale Team</p>'
+            '</div>'
+            '</div>'
+            '</div>'
+        )
+
+    # ── High-level transactional senders ──────────────────────────────────────
+
+    def send_order_confirmation(self, order: "Order", to_email: str) -> bool:  # type: ignore[name-defined]
+        """Branded order confirmation with order-confirmation PDF attached."""
+        from app.core.config import settings as _s
+        from app.services.pdf_service import PDFService
+
+        name = getattr(order, "guest_name", None) or "Valued Customer"
+        order_url = f"{_s.FRONTEND_URL}/account/orders/{order.id}"
+
+        rows_html = "".join(
+            f'<tr>'
+            f'<td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #f3f4f6">'
+            f'{item.product_name}</td>'
+            f'<td style="padding:9px 12px;font-size:12px;color:#6b7280;font-family:monospace;'
+            f'border-bottom:1px solid #f3f4f6">{item.sku}</td>'
+            f'<td style="padding:9px 12px;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6">'
+            f'{item.color or "—"} / {item.size or "—"}</td>'
+            f'<td style="padding:9px 12px;font-size:13px;font-weight:700;text-align:right;'
+            f'border-bottom:1px solid #f3f4f6">{item.quantity}</td>'
+            f'<td style="padding:9px 12px;font-size:13px;text-align:right;'
+            f'border-bottom:1px solid #f3f4f6">${float(item.unit_price):.2f}</td>'
+            f'<td style="padding:9px 12px;font-size:13px;font-weight:700;text-align:right;'
+            f'border-bottom:1px solid #f3f4f6">${float(item.line_total):.2f}</td>'
+            f'</tr>'
+            for item in order.items
+        )
+
+        tax_row = (
+            f'<tr><td style="padding:4px 0;font-size:13px;color:#6b7280">Tax</td>'
+            f'<td style="padding:4px 0;font-size:13px;color:#6b7280;text-align:right">'
+            f'${float(order.tax_amount):.2f}</td></tr>'
+            if getattr(order, "tax_amount", None) and float(order.tax_amount) > 0 else ""
+        )
+
+        cta = (
+            f'<p style="margin:20px 0 0">'
+            f'<a href="{order_url}" style="background:#E8242A;color:#fff;padding:12px 28px;'
+            f'border-radius:6px;font-weight:700;text-decoration:none;font-size:14px;'
+            f'display:inline-block">View Order →</a></p>'
+            if not getattr(order, "is_guest_order", False) else ""
+        )
+
+        content_html = (
+            f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
+            f'Order Confirmed!</h2>'
+            f'<p style="color:#374151;margin:0 0 24px">Hi {name}, your order has been received '
+            f'and is now being processed.</p>'
+            f'<div style="background:#F9F8F4;border-radius:8px;padding:16px 20px;margin-bottom:20px">'
+            f'<table style="width:100%"><tr>'
+            f'<td><div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;'
+            f'color:#6b7280">Order Number</div>'
+            f'<div style="font-size:20px;font-weight:800;color:#1B3A5C;margin-top:2px">'
+            f'{order.order_number}</div></td>'
+            f'<td style="text-align:right">'
+            f'<div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;'
+            f'color:#6b7280">Order Total</div>'
+            f'<div style="font-size:20px;font-weight:800;color:#059669;margin-top:2px">'
+            f'${float(order.total):.2f}</div></td>'
+            f'</tr></table></div>'
+            f'<table style="width:100%;border-collapse:collapse;margin-bottom:20px">'
+            f'<thead><tr style="background:#1B3A5C">'
+            f'<th style="padding:8px 12px;color:#fff;text-align:left;font-size:11px;'
+            f'font-weight:700;letter-spacing:.06em">PRODUCT</th>'
+            f'<th style="padding:8px 12px;color:#fff;text-align:left;font-size:11px;'
+            f'font-weight:700;letter-spacing:.06em">SKU</th>'
+            f'<th style="padding:8px 12px;color:#fff;text-align:left;font-size:11px;'
+            f'font-weight:700;letter-spacing:.06em">VARIANT</th>'
+            f'<th style="padding:8px 12px;color:#fff;text-align:right;font-size:11px;'
+            f'font-weight:700;letter-spacing:.06em">QTY</th>'
+            f'<th style="padding:8px 12px;color:#fff;text-align:right;font-size:11px;'
+            f'font-weight:700;letter-spacing:.06em">UNIT</th>'
+            f'<th style="padding:8px 12px;color:#fff;text-align:right;font-size:11px;'
+            f'font-weight:700;letter-spacing:.06em">TOTAL</th>'
+            f'</tr></thead>'
+            f'<tbody>{rows_html}</tbody></table>'
+            f'<table style="width:100%;margin-bottom:20px">'
+            f'<tr><td style="padding:4px 0;font-size:13px;color:#6b7280">Subtotal</td>'
+            f'<td style="padding:4px 0;font-size:13px;color:#6b7280;text-align:right">'
+            f'${float(order.subtotal):.2f}</td></tr>'
+            f'<tr><td style="padding:4px 0;font-size:13px;color:#6b7280">Shipping</td>'
+            f'<td style="padding:4px 0;font-size:13px;color:#6b7280;text-align:right">'
+            f'${float(order.shipping_cost):.2f}</td></tr>'
+            f'{tax_row}'
+            f'<tr><td style="padding:8px 0 0;font-size:17px;font-weight:800;color:#1B3A5C;'
+            f'border-top:2px solid #e5e7eb">Total</td>'
+            f'<td style="padding:8px 0 0;font-size:17px;font-weight:800;color:#1B3A5C;'
+            f'text-align:right;border-top:2px solid #e5e7eb">${float(order.total):.2f}</td>'
+            f'</tr></table>'
+            f'{cta}'
+        )
+
+        attachments = None
+        try:
+            pdf_bytes = PDFService().generate_order_confirmation(order)
+            attachments = [{"filename": f"order-{order.order_number}.pdf", "content": pdf_bytes}]
+        except Exception as _exc:
+            logger.warning("PDF generation failed (order confirmation): %s", _exc)
+
+        return self._send_via_resend(
+            to_email=to_email,
+            subject=f"Order Confirmed — {order.order_number} | AF Apparels",
+            body_html=self._base_template(content_html),
+            attachments=attachments,
+        )
+
+    def send_invoice(self, order: "Order", to_email: str) -> bool:  # type: ignore[name-defined]
+        """Send invoice PDF email to customer."""
+        from app.services.pdf_service import PDFService
+
+        content_html = (
+            f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
+            f'Invoice for Order {order.order_number}</h2>'
+            f'<p style="color:#374151;margin:0 0 20px">'
+            f'Please find your invoice attached. Payment is due within 30 days (Net 30).</p>'
+            f'<div style="background:#F9F8F4;border-radius:8px;padding:16px 20px;margin-bottom:20px">'
+            f'<table style="width:100%"><tr>'
+            f'<td><div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;'
+            f'color:#6b7280">Order</div>'
+            f'<div style="font-size:18px;font-weight:800;color:#1B3A5C;margin-top:2px">'
+            f'{order.order_number}</div></td>'
+            f'<td style="text-align:right">'
+            f'<div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;'
+            f'color:#6b7280">Amount Due</div>'
+            f'<div style="font-size:18px;font-weight:800;color:#E8242A;margin-top:2px">'
+            f'${float(order.total):.2f}</div></td>'
+            f'</tr></table></div>'
+            f'<p style="color:#6b7280;font-size:13px;margin:0">'
+            f'To pay, please reference your order number. For questions about this invoice '
+            f'contact your account manager.</p>'
+        )
+
+        attachments = None
+        try:
+            pdf_bytes = PDFService().generate_invoice(order)
+            attachments = [{"filename": f"invoice-{order.order_number}.pdf", "content": pdf_bytes}]
+        except Exception as _exc:
+            logger.warning("PDF generation failed (invoice): %s", _exc)
+
+        return self._send_via_resend(
+            to_email=to_email,
+            subject=f"Invoice — {order.order_number} | AF Apparels",
+            body_html=self._base_template(
+                content_html,
+                footer_note="Payment terms: Net 30. Please remit referencing your order number.",
+            ),
+            attachments=attachments,
+        )
+
+    def send_admin_new_order_alert(self, order: "Order") -> bool:  # type: ignore[name-defined]
+        """Notify admin of a new order placement."""
+        from app.core.config import settings as _s
+        if not _s.ADMIN_NOTIFICATION_EMAIL:
+            return False
+        order_url = f"{_s.FRONTEND_URL}/admin/orders/{order.id}"
+        is_guest = getattr(order, "is_guest_order", False)
+        customer = (
+            f"{order.guest_name} ({order.guest_email})"
+            if is_guest
+            else f"Wholesale order"
+        )
+        content_html = (
+            f'<h2 style="color:#1B3A5C;font-size:20px;font-weight:800;margin:0 0 8px">'
+            f'New Order Received</h2>'
+            f'<div style="background:#F9F8F4;border-radius:8px;padding:16px 20px;margin-bottom:20px">'
+            f'<table style="width:100%">'
+            f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Order</td>'
+            f'<td style="font-size:13px;font-weight:700;color:#1B3A5C;text-align:right">'
+            f'{order.order_number}</td></tr>'
+            f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Customer</td>'
+            f'<td style="font-size:13px;color:#374151;text-align:right">{customer}</td></tr>'
+            f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Total</td>'
+            f'<td style="font-size:16px;font-weight:800;color:#059669;text-align:right">'
+            f'${float(order.total):.2f}</td></tr>'
+            f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Payment</td>'
+            f'<td style="font-size:13px;color:#374151;text-align:right">'
+            f'{getattr(order, "payment_method", "card").upper()}</td></tr>'
+            f'</table></div>'
+            f'<p style="margin:0"><a href="{order_url}" '
+            f'style="background:#1B3A5C;color:#fff;padding:12px 24px;border-radius:6px;'
+            f'font-weight:700;text-decoration:none;font-size:14px;display:inline-block">'
+            f'View Order →</a></p>'
+        )
+        return self._send_via_resend(
+            to_email=_s.ADMIN_NOTIFICATION_EMAIL,
+            subject=f"New Order {order.order_number} — ${float(order.total):.2f} | AF Apparels",
+            body_html=self._base_template(content_html),
+        )
+
+    def send_admin_low_stock_alert(
+        self, product_name: str, sku: str, qty: int
+    ) -> bool:
+        """Notify admin when a SKU drops below LOW_STOCK_THRESHOLD."""
+        from app.core.config import settings as _s
+        if not _s.ADMIN_NOTIFICATION_EMAIL:
+            return False
+        content_html = (
+            f'<h2 style="color:#D97706;font-size:20px;font-weight:800;margin:0 0 8px">'
+            f'⚠️ Low Stock Alert</h2>'
+            f'<p style="color:#374151;margin:0 0 20px">A SKU has dropped below the '
+            f'threshold of {_s.LOW_STOCK_THRESHOLD} units.</p>'
+            f'<div style="background:#fff8f0;border:1.5px solid #fed7aa;border-radius:8px;'
+            f'padding:16px 20px;margin-bottom:20px">'
+            f'<div style="font-size:16px;font-weight:800;color:#1B3A5C;margin-bottom:6px">'
+            f'{product_name}</div>'
+            f'<div style="font-size:13px;color:#6b7280;margin-bottom:4px">'
+            f'SKU: <span style="font-family:monospace;color:#374151">{sku}</span></div>'
+            f'<div style="font-size:20px;font-weight:900;color:#D97706">'
+            f'{qty} units remaining</div>'
+            f'</div>'
+            f'<p style="margin:0"><a href="{_s.FRONTEND_URL}/admin/products" '
+            f'style="background:#D97706;color:#fff;padding:12px 24px;border-radius:6px;'
+            f'font-weight:700;text-decoration:none;font-size:14px;display:inline-block">'
+            f'Manage Inventory →</a></p>'
+        )
+        return self._send_via_resend(
+            to_email=_s.ADMIN_NOTIFICATION_EMAIL,
+            subject=f"Low Stock: {sku} ({qty} left) | AF Apparels",
+            body_html=self._base_template(content_html),
+        )
+
+    def send_application_approved(
+        self, to_email: str, first_name: str, company_name: str
+    ) -> bool:
+        """Notify applicant their wholesale account has been approved."""
+        from app.core.config import settings as _s
+        content_html = (
+            f'<h2 style="color:#059669;font-size:22px;font-weight:800;margin:0 0 8px">'
+            f'Application Approved! ✅</h2>'
+            f'<p style="color:#374151;margin:0 0 20px">Hi {first_name},</p>'
+            f'<p style="color:#374151;margin:0 0 16px">'
+            f'Great news — your wholesale application for <b>{company_name}</b> has been '
+            f'<b style="color:#059669">approved</b>. Your account is now active and you can '
+            f'start placing orders.</p>'
+            f'<p style="margin:0"><a href="{_s.FRONTEND_URL}/login" '
+            f'style="background:#059669;color:#fff;padding:12px 28px;border-radius:6px;'
+            f'font-weight:700;text-decoration:none;font-size:14px;display:inline-block">'
+            f'Log In to Your Account →</a></p>'
+        )
+        return self._send_via_resend(
+            to_email=to_email,
+            subject="Your AF Apparels Wholesale Account is Approved!",
+            body_html=self._base_template(content_html),
+        )
+
+    def send_application_rejected(
+        self, to_email: str, first_name: str, company_name: str
+    ) -> bool:
+        """Notify applicant their wholesale application was not approved."""
+        content_html = (
+            f'<h2 style="color:#374151;font-size:22px;font-weight:800;margin:0 0 8px">'
+            f'Application Update</h2>'
+            f'<p style="color:#374151;margin:0 0 16px">Hi {first_name},</p>'
+            f'<p style="color:#374151;margin:0 0 16px">'
+            f'Thank you for applying to the AF Apparels wholesale program. After reviewing your '
+            f'application for <b>{company_name}</b>, we are unable to approve it at this time.</p>'
+            f'<p style="color:#374151;margin:0 0 16px">'
+            f'If you believe this is an error or would like more information, please contact us '
+            f'at <a href="tel:2142727213" style="color:#1B3A5C">(214)\xa0272-7213</a> and we '
+            f'will be happy to assist.</p>'
+        )
+        return self._send_via_resend(
+            to_email=to_email,
+            subject="AF Apparels Wholesale Application Update",
+            body_html=self._base_template(content_html),
+        )
 
     @staticmethod
     def get_available_variables(tpl: EmailTemplate) -> list[str]:

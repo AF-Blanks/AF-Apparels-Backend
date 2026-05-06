@@ -664,6 +664,40 @@ async def cancel_admin_order(
     return {"message": "Order cancelled"}
 
 
+@router.post("/orders/{order_id}/resend-invoice", response_model=dict)
+async def resend_invoice_email(order_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Generate and email the invoice PDF to the customer (or admin in dev)."""
+    from sqlalchemy.orm import selectinload
+    from app.services.email_service import EmailService
+
+    result = await db.execute(
+        select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+    )
+    order = result.scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+
+    # Resolve customer email
+    to_email: str | None = None
+    if order.is_guest_order:
+        to_email = order.guest_email
+    elif order.placed_by_id:
+        user_row = (await db.execute(
+            select(User).where(User.id == order.placed_by_id)
+        )).scalar_one_or_none()
+        if user_row:
+            to_email = user_row.email
+
+    if not to_email:
+        raise HTTPException(status_code=422, detail="No customer email found for this order")
+
+    ok = EmailService(db).send_invoice(order, to_email)
+    if not ok:
+        raise HTTPException(status_code=502, detail="Invoice email failed to send")
+
+    return {"message": f"Invoice emailed to {to_email}"}
+
+
 @router.post("/orders/{order_id}/sync-quickbooks", response_model=dict)
 async def sync_order_to_quickbooks(order_id: UUID, db: AsyncSession = Depends(get_db)):
     from app.tasks.quickbooks_tasks import sync_order_to_qb

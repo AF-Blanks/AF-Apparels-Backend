@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from reportlab.lib import colors
@@ -250,18 +250,140 @@ class PDFService:
         return buf.getvalue()
 
     def generate_invoice(self, order: "Order") -> bytes:
+        import json as _json
+
         buf = io.BytesIO()
         doc = _doc(buf)
-        extra = []
+
+        now = order.created_at if order.created_at else datetime.utcnow()
+        year = now.year
         if order.qb_invoice_id:
-            extra.append(["Invoice #", order.qb_invoice_id])
+            inv_num = f"INV-{year}-{order.qb_invoice_id}"
+        else:
+            suffix = order.order_number.rsplit("-", 1)[-1] if order.order_number else "0001"
+            inv_num = f"INV-{year}-{suffix}"
+
+        invoice_date = now.strftime("%B %d, %Y")
+        due_date = (now + timedelta(days=30)).strftime("%B %d, %Y")
+
+        extra = [
+            ["Invoice #", inv_num],
+            ["Invoice Date", invoice_date],
+            ["Due Date", due_date],
+        ]
+        if order.po_number:
+            extra.append(["PO Number", order.po_number])
+
+        # ── Bill To block ──────────────────────────────────────────────────────
+        bill_to: list = [Paragraph("Bill To", _h2)]
+        addr = None
+        if order.shipping_address_snapshot:
+            try:
+                addr = _json.loads(order.shipping_address_snapshot)
+            except Exception:
+                addr = None
+        if addr:
+            lines = [
+                addr.get("full_name") or "",
+                addr.get("line1") or addr.get("address_line1") or "",
+                addr.get("line2") or addr.get("address_line2") or "",
+                ", ".join(filter(None, [
+                    addr.get("city", ""), addr.get("state", ""),
+                    addr.get("postal_code", ""),
+                ])),
+                addr.get("country", "US"),
+            ]
+            for ln in lines:
+                if ln and ln.strip().strip(","):
+                    bill_to.append(Paragraph(ln.strip(), _body))
+        else:
+            bill_to.append(Paragraph("Billing address on file", _body))
+        bill_to.append(Spacer(1, 12))
+
+        # ── Items table (Style # column) ───────────────────────────────────────
+        header_row = ["Style #", "Product Name", "Color", "Size", "Qty", "Unit Price", "Total"]
+        data = [header_row]
+        for item in order.items:
+            data.append([
+                item.sku,
+                item.product_name,
+                item.color or "—",
+                item.size or "—",
+                str(item.quantity),
+                f"${float(item.unit_price):.2f}",
+                f"${float(item.line_total):.2f}",
+            ])
+
+        col_widths = [1.0 * inch, 2.2 * inch, 0.8 * inch, 0.6 * inch,
+                      0.5 * inch, 0.85 * inch, 0.85 * inch]
+        items_tbl = Table(data, colWidths=col_widths, repeatRows=1)
+        items_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), BRAND_BLUE),
+            ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 9),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 1), (-1, -1), 9),
+            ("TEXTCOLOR", (0, 1), (-1, -1), DARK_GRAY),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, LIGHT_GRAY]),
+            ("ALIGN", (4, 0), (-1, -1), "RIGHT"),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.5, BRAND_BLUE),
+            ("LINEBELOW", (0, -1), (-1, -1), 0.5, MID_GRAY),
+        ]))
+
+        # ── Summary block with discount + tax ─────────────────────────────────
+        subtotal_val = float(order.subtotal)
+        shipping_val = float(order.shipping_cost)
+        tax_val = float(order.tax_amount) if order.tax_amount else 0.0
+        discount_val = float(getattr(order, "discount_amount", 0) or 0)
+        total_val = float(order.total)
+
+        summary_rows: list = [["", "Subtotal:", f"${subtotal_val:.2f}"]]
+        if discount_val > 0:
+            summary_rows.append(["", "Discount:", f"−${discount_val:.2f}"])
+        summary_rows.append(["", "Shipping:", f"${shipping_val:.2f}"])
+        if tax_val > 0:
+            summary_rows.append(["", "Tax:", f"${tax_val:.2f}"])
+        summary_rows.append(["", "TOTAL DUE:", f"${total_val:.2f}"])
+
+        sum_tbl = Table(summary_rows, colWidths=[4.85 * inch, 1.3 * inch, 0.85 * inch])
+        sum_tbl.setStyle(TableStyle([
+            ("FONTNAME", (1, 0), (1, -2), "Helvetica"),
+            ("FONTNAME", (1, -1), (2, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -2), 9),
+            ("FONTSIZE", (1, -1), (2, -1), 10),
+            ("TEXTCOLOR", (1, 0), (1, -2), MID_GRAY),
+            ("TEXTCOLOR", (1, -1), (2, -1), DARK_GRAY),
+            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LINEABOVE", (1, -1), (2, -1), 1, DARK_GRAY),
+        ]))
+
+        # ── Payment terms ──────────────────────────────────────────────────────
+        terms: list = [
+            Paragraph("Payment Terms", _h2),
+            Paragraph(
+                "Payment due within <b>30 days</b> of invoice date (Net&nbsp;30). "
+                "Please remit payment referencing your order number and invoice number. "
+                "Late payments may be subject to a 1.5%/month finance charge.",
+                _body,
+            ),
+            Spacer(1, 20),
+        ]
+
         story = (
             _header("Invoice")
-            + _order_meta(order, extra_rows=extra or None)
-            + _address_block(order)
-            + _items_table(order)
-            + _totals_block(order)
-            + _footer("Payment terms: Net 30. Please remit payment referencing your order number.")
+            + _order_meta(order, extra_rows=extra)
+            + bill_to
+            + [items_tbl, Spacer(1, 10)]
+            + [sum_tbl, Spacer(1, 20)]
+            + terms
+            + _footer(f"Invoice {inv_num} · Due {due_date} · AF Apparels Wholesale Division")
         )
         doc.build(story)
         return buf.getvalue()
