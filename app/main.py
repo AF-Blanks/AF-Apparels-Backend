@@ -277,6 +277,38 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS page_seo (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    page_slug VARCHAR(100) UNIQUE NOT NULL,
+                    meta_title VARCHAR(60),
+                    meta_description VARCHAR(160),
+                    keywords TEXT,
+                    og_image_url TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+            """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS blog_posts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    title VARCHAR(255) NOT NULL,
+                    slug VARCHAR(255) UNIQUE NOT NULL,
+                    cover_image_url TEXT,
+                    published_date DATE,
+                    read_time VARCHAR(50),
+                    excerpt TEXT,
+                    article_body JSONB,
+                    faq JSONB,
+                    tags TEXT[],
+                    status VARCHAR(20) NOT NULL DEFAULT 'draft',
+                    meta_title VARCHAR(60),
+                    meta_description VARCHAR(160),
+                    keywords TEXT,
+                    og_image_url TEXT,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+            """))
         print("Content tables: OK")
     except Exception as exc:
         print(f"Content tables warning (non-fatal): {exc}")
@@ -450,7 +482,7 @@ async def health_check() -> dict:
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-from app.api.v1 import auth, products, cart, checkout, orders, account, webhooks, reviews, discounts, guest, contact, style_sheets, product_specs, upload, tax_rate  # noqa: E402
+from app.api.v1 import auth, products, cart, checkout, orders, account, webhooks, reviews, discounts, guest, contact, style_sheets, product_specs, upload, tax_rate, pages_seo, blog_posts  # noqa: E402
 from app.api.v1.admin import (  # noqa: E402
     customers,
     pricing as admin_pricing,
@@ -469,6 +501,8 @@ from app.api.v1.admin import (  # noqa: E402
     taxes as admin_taxes,
     style_sheets as admin_style_sheets,
     product_specs as admin_product_specs,
+    pages_seo as admin_pages_seo,
+    blog_posts as admin_blog_posts,
 )
 
 _cors_origins = list({settings.FRONTEND_URL, *settings.allowed_origins_list} - {""})
@@ -517,6 +551,10 @@ app.include_router(admin_analytics.router, prefix=_V1)
 app.include_router(admin_taxes.router, prefix=_V1)
 app.include_router(admin_style_sheets.router, prefix=_V1)
 app.include_router(admin_product_specs.router, prefix=_V1)
+app.include_router(pages_seo.router, prefix=_V1)
+app.include_router(blog_posts.router, prefix=_V1)
+app.include_router(admin_pages_seo.router, prefix=_V1)
+app.include_router(admin_blog_posts.router, prefix=_V1)
 
 # ── Debug: log all registered routes at import time ──────────────────────────
 for _route in app.routes:
