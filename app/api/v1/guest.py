@@ -275,6 +275,47 @@ async def guest_checkout(
 
 
 # ---------------------------------------------------------------------------
+# GET /api/v1/guest/shipping-estimate
+# ---------------------------------------------------------------------------
+
+@router.get("/shipping-estimate")
+async def guest_shipping_estimate(
+    units: int = Query(0, ge=0),
+    subtotal: float = Query(0.0, ge=0.0),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return standard shipping cost for a guest cart (uses platform standard_shipping setting)."""
+    from app.models.system import Settings
+
+    try:
+        std_row = (await db.execute(
+            select(Settings).where(Settings.key == "standard_shipping")
+        )).scalar_one_or_none()
+
+        if std_row and std_row.value:
+            cfg = json.loads(std_row.value)
+            shipping_type = cfg.get("shipping_type", "store_default")
+
+            if shipping_type == "store_default":
+                return {"estimated_shipping": float(cfg.get("shipping_amount", 9.99))}
+
+            if shipping_type == "flat_rate" and cfg.get("brackets"):
+                calc_type = cfg.get("calc_type", "order_value")
+                value = units if calc_type == "units" else subtotal
+                for bracket in cfg["brackets"]:
+                    min_k = "min_units" if calc_type == "units" else "min_order_value"
+                    max_k = "max_units" if calc_type == "units" else "max_order_value"
+                    min_val = bracket.get(min_k) or 0
+                    max_val = bracket.get(max_k)
+                    if value >= min_val and (max_val is None or value <= max_val):
+                        return {"estimated_shipping": float(bracket.get("cost", 9.99))}
+    except Exception:
+        pass
+
+    return {"estimated_shipping": float(GUEST_SHIPPING_STANDARD)}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/v1/guest/orders/{order_number}?email={email}
 # ---------------------------------------------------------------------------
 
