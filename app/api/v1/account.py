@@ -411,6 +411,54 @@ async def delete_payment_method(
 
 
 # ---------------------------------------------------------------------------
+# ACH / bank account on file
+# ---------------------------------------------------------------------------
+
+@router.get("/ach-method")
+async def get_ach_method(request: Request, db: AsyncSession = Depends(get_db)):
+    company_id = getattr(request.state, "company_id", None)
+    if not company_id:
+        raise ForbiddenError("Company account required")
+    from app.models.company import Company
+    company = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if not company:
+        raise ForbiddenError("Company account required")
+    return company.ach_account or {}
+
+
+@router.put("/ach-method")
+async def save_ach_method(request: Request, db: AsyncSession = Depends(get_db)):
+    company_id = getattr(request.state, "company_id", None)
+    if not company_id:
+        raise ForbiddenError("Company account required")
+    from app.models.company import Company
+    body = await request.json()
+
+    allowed_fields = {"bank_name", "account_holder", "routing_last4", "account_last4", "account_type"}
+    ach = {k: str(v).strip() for k, v in body.items() if k in allowed_fields and v is not None}
+
+    company = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if not company:
+        raise ForbiddenError("Company account required")
+
+    company.ach_account = ach or None
+    await db.commit()
+    return company.ach_account or {}
+
+
+@router.delete("/ach-method", status_code=204)
+async def delete_ach_method(request: Request, db: AsyncSession = Depends(get_db)):
+    company_id = getattr(request.state, "company_id", None)
+    if not company_id:
+        raise ForbiddenError("Company account required")
+    from app.models.company import Company
+    company = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if company:
+        company.ach_account = None
+        await db.commit()
+
+
+# ---------------------------------------------------------------------------
 # Profile (T144 — US-7)
 # ---------------------------------------------------------------------------
 
@@ -1642,34 +1690,61 @@ async def list_abandoned_carts(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Return unrecovered abandoned carts for this company."""
+    """Return abandoned cart items (live CartItems inactive > 1h) for this company."""
+    from datetime import timedelta
+    from app.models.order import CartItem
+    from app.models.product import ProductVariant, Product
+
     company_id = getattr(request.state, "company_id", None)
     if not company_id:
         raise ForbiddenError("Company account required")
 
-    from app.models.order import AbandonedCart
-
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
     result = await db.execute(
-        select(AbandonedCart)
-        .where(
-            AbandonedCart.company_id == company_id,
-            AbandonedCart.is_recovered.is_(False),
-        )
-        .order_by(AbandonedCart.abandoned_at.desc())
+        select(CartItem)
+        .where(CartItem.company_id == company_id, CartItem.updated_at < cutoff)
+        .order_by(CartItem.updated_at.desc())
     )
-    carts = result.scalars().all()
+    items = result.scalars().all()
 
-    return [
-        {
-            "id": str(c.id),
-            "abandoned_at": c.abandoned_at,
-            "total": float(c.total),
-            "item_count": c.item_count,
-            "items": __import__("json").loads(c.items_snapshot),
-            "is_recovered": c.is_recovered,
-        }
-        for c in carts
-    ]
+    if not items:
+        return []
+
+    details = []
+    total = 0.0
+    for ci in items:
+        variant = (await db.execute(
+            select(ProductVariant).where(ProductVariant.id == ci.variant_id)
+        )).scalar_one_or_none()
+        product_name = ""
+        if variant:
+            prod = (await db.execute(
+                select(Product).where(Product.id == variant.product_id)
+            )).scalar_one_or_none()
+            product_name = prod.name if prod else ""
+        unit = float(ci.unit_price or 0)
+        line = unit * ci.quantity
+        total += line
+        details.append({
+            "variant_id": str(ci.variant_id),
+            "product_name": product_name,
+            "sku": variant.sku if variant else "",
+            "color": variant.color if variant else "",
+            "size": variant.size if variant else "",
+            "quantity": ci.quantity,
+            "unit_price": unit,
+            "line_total": line,
+        })
+
+    abandoned_at = max(ci.updated_at for ci in items)
+    return [{
+        "id": str(company_id),
+        "abandoned_at": abandoned_at.isoformat(),
+        "total": round(total, 2),
+        "item_count": len(items),
+        "items": details,
+        "is_recovered": False,
+    }]
 
 
 @router.post("/abandoned-carts/{cart_id}/recover")
@@ -1678,48 +1753,21 @@ async def recover_abandoned_cart(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Restore abandoned cart items back into the company's active cart."""
+    """Recover abandoned cart — touches cart item timestamps so they're no longer stale."""
+    from datetime import timezone as _tz
+    from sqlalchemy import update as sa_update
+    from app.models.order import CartItem
+
     company_id = getattr(request.state, "company_id", None)
     if not company_id:
         raise ForbiddenError("Company account required")
 
-    import json as _json
-    from datetime import datetime, timezone
-    from sqlalchemy import delete as sa_delete
-    from app.models.order import AbandonedCart, CartItem
-    from app.models.product import ProductVariant
-
-    cart = (await db.execute(
-        select(AbandonedCart).where(
-            AbandonedCart.id == cart_id,
-            AbandonedCart.company_id == company_id,
-        )
-    )).scalar_one_or_none()
-    if not cart:
-        raise NotFoundError("Cart not found")
-
-    items = _json.loads(cart.items_snapshot)
-
-    # Clear the current active cart first
-    await db.execute(sa_delete(CartItem).where(CartItem.company_id == company_id))
-
-    # Re-add each item if the variant still exists
-    for item in items:
-        variant = (await db.execute(
-            select(ProductVariant).where(
-                ProductVariant.id == _uuid.UUID(item["variant_id"])
-            )
-        )).scalar_one_or_none()
-        if variant:
-            db.add(CartItem(
-                company_id=company_id,
-                variant_id=_uuid.UUID(item["variant_id"]),
-                quantity=item["quantity"],
-                unit_price=item["unit_price"],
-            ))
-
-    cart.is_recovered = True
-    cart.recovered_at = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(_tz.utc)
+    await db.execute(
+        sa_update(CartItem)
+        .where(CartItem.company_id == company_id)
+        .values(updated_at=now)
+    )
     await db.commit()
     return {"message": "Cart recovered successfully"}
 
@@ -1730,19 +1778,15 @@ async def delete_abandoned_cart(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    """Clear abandoned cart items for this company."""
+    from sqlalchemy import delete as sa_delete
+    from app.models.order import CartItem
+
     company_id = getattr(request.state, "company_id", None)
     if not company_id:
         raise ForbiddenError("Company account required")
 
-    from sqlalchemy import delete as sa_delete
-    from app.models.order import AbandonedCart
-
-    await db.execute(
-        sa_delete(AbandonedCart).where(
-            AbandonedCart.id == cart_id,
-            AbandonedCart.company_id == company_id,
-        )
-    )
+    await db.execute(sa_delete(CartItem).where(CartItem.company_id == company_id))
     await db.commit()
 
 

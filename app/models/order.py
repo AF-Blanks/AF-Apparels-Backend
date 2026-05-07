@@ -127,8 +127,8 @@ class OrderItem(BaseModel):
         UUID(as_uuid=True), ForeignKey("orders.id", ondelete="CASCADE"),
         nullable=False, index=True
     )
-    variant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("product_variants.id", ondelete="RESTRICT"), nullable=False
+    variant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("product_variants.id", ondelete="SET NULL"), nullable=True
     )
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     unit_price: Mapped[float] = mapped_column(
@@ -143,7 +143,7 @@ class OrderItem(BaseModel):
     size: Mapped[str | None] = mapped_column(String(50))
 
     order: Mapped["Order"] = relationship("Order", back_populates="items")
-    variant: Mapped["ProductVariant"] = relationship("ProductVariant")
+    variant: Mapped[Optional["ProductVariant"]] = relationship("ProductVariant")
 
 
 # class CartItem(BaseModel):

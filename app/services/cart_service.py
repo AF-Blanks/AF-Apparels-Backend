@@ -454,6 +454,37 @@ class CartService:
                             _override(company),
                             order_subtotal=subtotal,
                         )
+                    else:
+                        # Fallback: use standard_shipping platform setting for untiered users
+                        try:
+                            import json as _json
+                            from app.models.system import Settings as _PlatformSettings
+                            std_row = (await self.db.execute(
+                                select(_PlatformSettings).where(_PlatformSettings.key == "standard_shipping")
+                            )).scalar_one_or_none()
+                            if std_row and std_row.value:
+                                cfg = _json.loads(std_row.value)
+                                if cfg.get("shipping_type") == "flat_rate" and cfg.get("brackets"):
+                                    brackets_json = _json.dumps(cfg["brackets"])
+                                    estimated_shipping = svc.calculate_dg_shipping_cost(
+                                        total_units,
+                                        "flat_rate",
+                                        cfg.get("shipping_amount", 0),
+                                        cfg.get("calc_type", "order_value"),
+                                        brackets_json,
+                                        _override(company),
+                                        order_subtotal=subtotal,
+                                    )
+                                    has_shipping_tier = True
+                                elif cfg.get("shipping_type") == "store_default":
+                                    amt = Decimal(str(cfg.get("shipping_amount", 0)))
+                                    if _override(company) is not None:
+                                        estimated_shipping = _override(company)
+                                    else:
+                                        estimated_shipping = amt
+                                    has_shipping_tier = True
+                        except Exception:
+                            pass
             except Exception as exc:
                 logger.error("cart shipping estimate failed for company %s: %s", company_id, exc, exc_info=True)
 

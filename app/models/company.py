@@ -79,6 +79,9 @@ class Company(BaseModel):
     admin_notes: Mapped[str | None] = mapped_column(Text)
     tags: Mapped[list | None] = mapped_column(JSONB, default=list, server_default="'[]'::jsonb")
 
+    # ACH/bank account on file (informational — for reference, not live processing)
+    ach_account: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     # ── Relationships ─────────────────────────────────────────────────────────
     users: Mapped[list["CompanyUser"]] = relationship(
         "CompanyUser", back_populates="company", cascade="all, delete-orphan"

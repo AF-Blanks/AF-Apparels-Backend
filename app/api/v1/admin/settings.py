@@ -108,7 +108,7 @@ async def update_platform_settings(
 
     ALLOWED_KEYS = {
         "mov", "moq", "guest_pricing_mode", "tax_rate",
-        "low_stock_threshold", "notification_email",
+        "low_stock_threshold", "notification_email", "standard_shipping",
     }
 
     updated = {}
