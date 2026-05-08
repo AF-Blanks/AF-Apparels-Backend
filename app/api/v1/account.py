@@ -1691,7 +1691,7 @@ async def list_abandoned_carts(
     db: AsyncSession = Depends(get_db),
 ):
     """Return abandoned cart items (live CartItems inactive > 1h) for this company."""
-    from datetime import timedelta
+    from datetime import datetime, timedelta, timezone
     from app.models.order import CartItem
     from app.models.product import ProductVariant, Product
 
@@ -1890,12 +1890,20 @@ async def get_sales_history(
         ]
     else:
         from collections import defaultdict
-        grouped: dict = defaultdict(lambda: {"product_name": "", "units_sold": 0, "total_revenue": 0.0})
+        grouped: dict = defaultdict(lambda: {"product_name": "", "units_sold": 0, "total_revenue": 0.0, "_variants": {}})
         for r in rows:
             key = r[0].product_name
             grouped[key]["product_name"] = r[0].product_name
             grouped[key]["units_sold"] += r[0].quantity
             grouped[key]["total_revenue"] += float(r[0].line_total)
-        result_items = list(grouped.values())
+            vkey = f"{r[0].color or '—'} / {r[0].size or '—'}"
+            if vkey not in grouped[key]["_variants"]:
+                grouped[key]["_variants"][vkey] = {"color": r[0].color or "—", "size": r[0].size or "—", "units_sold": 0, "total_revenue": 0.0}
+            grouped[key]["_variants"][vkey]["units_sold"] += r[0].quantity
+            grouped[key]["_variants"][vkey]["total_revenue"] += float(r[0].line_total)
+        result_items = []
+        for g in grouped.values():
+            variants = sorted(g.pop("_variants").values(), key=lambda v: (v["color"], v["size"]))
+            result_items.append({**g, "variants": variants})
 
     return {"items": result_items, "year": year, "display": display}

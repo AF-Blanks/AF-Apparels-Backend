@@ -281,6 +281,36 @@ async def _confirm_checkout_inner(
         )
         db.add(usage)
 
+    # ── Statement transactions ────────────────────────────────────────────────
+    from datetime import date as _date
+    from uuid import UUID as _UUID
+    from app.models.statement import StatementTransaction
+
+    _today = _date.today().isoformat()
+    _company_uuid = _UUID(str(company_id))
+    _order_total = float(order.total)
+
+    db.add(StatementTransaction(
+        company_id=_company_uuid,
+        transaction_date=_today,
+        description=f"Order {order.order_number}",
+        transaction_type="charge",
+        amount=_order_total,
+        reference_number=order.order_number,
+        order_id=order.id,
+    ))
+
+    if qb_payment_status == "CAPTURED" and qb_charge_id:
+        db.add(StatementTransaction(
+            company_id=_company_uuid,
+            transaction_date=_today,
+            description=f"Card payment for Order {order.order_number}",
+            transaction_type="payment",
+            amount=_order_total,
+            reference_number=qb_charge_id,
+            order_id=order.id,
+        ))
+
     await db.commit()
 
     # ── Send order confirmation email ─────────────────────────────────────────
