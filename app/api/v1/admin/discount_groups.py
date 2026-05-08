@@ -7,7 +7,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.models.discount_group import DiscountGroup, VariantPricingOverride
+from app.models.discount_group import DiscountGroup, VariantPricingOverride, VariantLevelPricingOverride
 
 router = APIRouter(prefix="/admin", tags=["admin", "discount-groups"])
 
@@ -180,6 +180,59 @@ async def save_variant_pricing(body: VariantPricingIn, db: AsyncSession = Depend
                     tier_id=tier_id,
                     price=price,
                     discount_percent=discount,
+                ))
+
+    await db.commit()
+    return {"ok": True}
+
+
+# ── Variant-Level Pricing Overrides ───────────────────────────────────────────
+
+class VariantLevelPricingIn(BaseModel):
+    overrides: dict  # variantId → groupId → {"price": "12.50"}
+
+
+@router.get("/variant-level-pricing")
+async def get_variant_level_pricing(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(VariantLevelPricingOverride))
+    rows = result.scalars().all()
+    out: dict = {}
+    for row in rows:
+        vid = row.variant_id
+        gid = row.group_id
+        if vid not in out:
+            out[vid] = {}
+        out[vid][gid] = str(row.price) if row.price is not None else ""
+    return out
+
+
+@router.post("/variant-level-pricing")
+async def save_variant_level_pricing(body: VariantLevelPricingIn, db: AsyncSession = Depends(get_db)):
+    for variant_id, group_map in body.overrides.items():
+        for group_id, price_str in group_map.items():
+            price_val = (price_str or "").strip()
+            price = float(price_val) if price_val else None
+
+            result = await db.execute(
+                select(VariantLevelPricingOverride).where(
+                    and_(
+                        VariantLevelPricingOverride.variant_id == variant_id,
+                        VariantLevelPricingOverride.group_id == group_id,
+                    )
+                )
+            )
+            existing = result.scalar_one_or_none()
+
+            if price is None:
+                if existing:
+                    await db.delete(existing)
+            elif existing:
+                existing.price = price
+            else:
+                db.add(VariantLevelPricingOverride(
+                    variant_id=variant_id,
+                    group_id=group_id,
+                    price=price,
                 ))
 
     await db.commit()

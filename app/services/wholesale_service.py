@@ -68,6 +68,7 @@ class WholesaleService:
             pricing_tier_id=data.pricing_tier_id,
             shipping_tier_id=data.shipping_tier_id,
             admin_notes=data.admin_notes,
+            tax_exempt=data.tax_exempt,
             # Copy extended registration fields from application
             phone=getattr(application, "phone", None),
             fax=getattr(application, "fax", None),

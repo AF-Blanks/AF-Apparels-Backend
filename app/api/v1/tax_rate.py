@@ -1,6 +1,6 @@
 """Public — calculate sales tax via TaxJar (fallback: manual tax_rates table)."""
 import logging
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +12,7 @@ router = APIRouter(prefix="/tax-rate")
 
 @router.get("")
 async def get_tax_rate(
+    request: Request,
     region: str = Query(..., description="Two-letter US state code"),
     zip_code: str = Query("", description="Shipping ZIP code for zip-level accuracy"),
     city: str = Query("", description="Shipping city"),
@@ -20,6 +21,14 @@ async def get_tax_rate(
     db: AsyncSession = Depends(get_db),
 ):
     state = region.upper()
+
+    # ── Tax-exempt companies pay no tax ──────────────────────────────────────
+    company_id = getattr(request.state, "company_id", None)
+    if company_id:
+        from app.models.company import Company
+        company = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
+        if company and company.tax_exempt:
+            return {"rate": 0.0, "tax_amount": 0.0, "region": state, "source": "exempt"}
 
     # ── TaxJar: use when API key is configured and we have enough address data ──
     if zip_code and subtotal > 0:

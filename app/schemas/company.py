@@ -65,6 +65,7 @@ class CompanyDetail(BaseModel):
     admin_notes: str | None = None
     tags: list[str] = []
     discount_percent: Decimal | None = None
+    tax_exempt: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -87,6 +88,7 @@ class CompanyUpdate(BaseModel):
     status: str | None = None
     admin_notes: str | None = None
     tags: list[str] | None = None
+    tax_exempt: bool | None = None
 
 
 class SuspendRequest(BaseModel):

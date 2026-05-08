@@ -82,6 +82,9 @@ class Company(BaseModel):
     # ACH/bank account on file (informational — for reference, not live processing)
     ach_account: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
+    # Tax exemption flag — when True, no tax is charged or shown at checkout
+    tax_exempt: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
+
     # ── Relationships ─────────────────────────────────────────────────────────
     users: Mapped[list["CompanyUser"]] = relationship(
         "CompanyUser", back_populates="company", cascade="all, delete-orphan"

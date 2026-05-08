@@ -29,3 +29,13 @@ class VariantPricingOverride(BaseModel):
     tier_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     price: Mapped[float | None] = mapped_column(Numeric(10, 2))
     discount_percent: Mapped[float | None] = mapped_column(Numeric(5, 2))
+
+
+class VariantLevelPricingOverride(BaseModel):
+    """Per-variant, per-group price override — supersedes product-level override for the specific variant."""
+
+    __tablename__ = "variant_level_pricing_overrides"
+
+    variant_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    group_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    price: Mapped[float | None] = mapped_column(Numeric(10, 2))

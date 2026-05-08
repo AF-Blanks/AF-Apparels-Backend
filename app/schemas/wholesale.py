@@ -50,6 +50,7 @@ class ApproveApplicationRequest(BaseModel):
     shipping_tier_id: uuid.UUID | None = None
     discount_group_id: uuid.UUID | None = None
     admin_notes: str | None = None
+    tax_exempt: bool = False
 
 
 class RejectApplicationRequest(BaseModel):
