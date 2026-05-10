@@ -313,7 +313,7 @@ async def update_variant(
         raise NotFoundError("Variant not found")
 
     # Numeric fields that need type coercion
-    numeric_float = {"retail_price", "compare_price", "msrp"}
+    numeric_float = {"retail_price", "compare_price", "msrp", "cost_per_item"}
     numeric_int = {"sort_order"}
     skip_fields = {"stock_quantity"}  # handled separately via inventory records
 
