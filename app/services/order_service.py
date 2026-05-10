@@ -28,6 +28,32 @@ class OrderService:
         self.db = db
 
     # ------------------------------------------------------------------
+    # Price snapshot helper
+    # ------------------------------------------------------------------
+
+    async def _snapshot_price(
+        self,
+        variant: "ProductVariant",
+        discount_percent: Decimal,
+        group_id: str | None,
+    ) -> Decimal:
+        """Return unit price for an order snapshot: VariantLevelPricingOverride > tier discount."""
+        from decimal import ROUND_HALF_UP
+        if group_id:
+            from app.models.discount_group import VariantLevelPricingOverride
+            vlp_result = await self.db.execute(
+                select(VariantLevelPricingOverride).where(
+                    VariantLevelPricingOverride.variant_id == str(variant.id),
+                    VariantLevelPricingOverride.group_id == group_id,
+                )
+            )
+            vlp = vlp_result.scalar_one_or_none()
+            if vlp and vlp.price is not None:
+                return Decimal(str(vlp.price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        from app.services.pricing_service import PricingService
+        return PricingService(self.db).calculate_effective_price(variant.retail_price, discount_percent)
+
+    # ------------------------------------------------------------------
     # Create order (US-6)
     # ------------------------------------------------------------------
 
@@ -40,6 +66,7 @@ class OrderService:
         qb_charge_id: str | None = None,
         qb_payment_status: str | None = None,
         coupon_discount_amount: Decimal = Decimal("0"),
+        group_id: str | None = None,
     ) -> Order:
         settings = get_settings()
 
@@ -89,12 +116,8 @@ class OrderService:
                 )
             # available == 0 means no inventory records → unlimited stock, skip check
 
-            # Price snapshot
-            from app.services.pricing_service import PricingService
-            pricing_svc = PricingService(self.db)
-            unit_price = pricing_svc.calculate_effective_price(
-                variant.retail_price, discount_percent
-            )
+            # Price snapshot — check VariantLevelPricingOverride first
+            unit_price = await self._snapshot_price(variant, discount_percent, group_id)
             line_total = unit_price * cart_item.quantity
             subtotal += line_total
             total_units += cart_item.quantity
@@ -169,6 +192,10 @@ class OrderService:
 
             if shipping_method == "expedited":
                 shipping_cost += Decimal("45.00")
+
+        # If server-side calculation yielded $0 and client sent a shipping_cost, use it
+        if shipping_cost == Decimal("0") and confirm.shipping_cost and confirm.shipping_cost > 0:
+            shipping_cost = Decimal(str(confirm.shipping_cost))
 
         tax_amount_val = Decimal(str(confirm.tax_amount or 0))
         total = subtotal + shipping_cost + tax_amount_val - coupon_discount_amount

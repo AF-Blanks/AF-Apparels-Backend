@@ -28,8 +28,9 @@ class CartService:
         self,
         company_id: UUID,
         discount_percent: Decimal = Decimal("0"),
+        group_id: str | None = None,
     ) -> CartResponse:
-        items = await self._load_cart_items(company_id, discount_percent)
+        items = await self._load_cart_items(company_id, discount_percent, group_id)
         subtotal = sum(i.line_total for i in items)
         total_units = sum(i.quantity for i in items)
         validation = await self._validate(items, total_units, subtotal, company_id)
@@ -51,6 +52,7 @@ class CartService:
         company_id: UUID,
         payload: MatrixAddRequest,
         discount_percent: Decimal = Decimal("0"),
+        group_id: str | None = None,
     ) -> CartResponse:
         from app.services.pricing_service import PricingService
 
@@ -64,8 +66,8 @@ class CartService:
             if not variant:
                 raise NotFoundError(f"Variant {add_item.variant_id} not found")
 
-            effective_price = pricing_svc.calculate_effective_price(
-                variant.retail_price, discount_percent
+            effective_price = await self._effective_price(
+                variant, discount_percent, group_id
             )
 
             # Upsert: add to existing quantity if item already in cart
@@ -90,7 +92,7 @@ class CartService:
                 self.db.add(cart_item)
 
         await self.db.flush()
-        return await self.get_cart_with_pricing(company_id, discount_percent)
+        return await self.get_cart_with_pricing(company_id, discount_percent, group_id)
 
     # ------------------------------------------------------------------
     # Update item quantity
@@ -102,6 +104,7 @@ class CartService:
         item_id: UUID,
         quantity: int,
         discount_percent: Decimal = Decimal("0"),
+        group_id: str | None = None,
     ) -> CartResponse:
         result = await self.db.execute(
             select(CartItem).where(
@@ -114,7 +117,7 @@ class CartService:
 
         item.quantity = quantity
         await self.db.flush()
-        return await self.get_cart_with_pricing(company_id, discount_percent)
+        return await self.get_cart_with_pricing(company_id, discount_percent, group_id)
 
     # ------------------------------------------------------------------
     # Remove item
@@ -125,6 +128,7 @@ class CartService:
         company_id: UUID,
         item_id: UUID,
         discount_percent: Decimal = Decimal("0"),
+        group_id: str | None = None,
     ) -> CartResponse:
         await self.db.execute(
             delete(CartItem).where(
@@ -132,7 +136,7 @@ class CartService:
             )
         )
         await self.db.flush()
-        return await self.get_cart_with_pricing(company_id, discount_percent)
+        return await self.get_cart_with_pricing(company_id, discount_percent, group_id)
 
     # ------------------------------------------------------------------
     # Clear cart
@@ -232,11 +236,9 @@ class CartService:
         company_id: UUID,
         valid_items: list[dict],
         discount_percent: Decimal = Decimal("0"),
+        group_id: str | None = None,
     ) -> int:
         """Upsert all valid items into cart. Returns count of items added."""
-        from app.services.pricing_service import PricingService
-        pricing_svc = PricingService(self.db)
-
         added = 0
         for item in valid_items:
             variant_id = UUID(item["variant_id"]) if isinstance(item["variant_id"], str) else item["variant_id"]
@@ -247,7 +249,7 @@ class CartService:
             )
             variant = variant_result.scalar_one_or_none()
             effective_price = (
-                pricing_svc.calculate_effective_price(variant.retail_price, discount_percent)
+                await self._effective_price(variant, discount_percent, group_id)
                 if variant else Decimal("0")
             )
 
@@ -275,10 +277,33 @@ class CartService:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    async def _effective_price(
+        self,
+        variant: "ProductVariant",
+        discount_percent: Decimal,
+        group_id: str | None,
+    ) -> Decimal:
+        """Return price for variant: VariantLevelPricingOverride > tier discount."""
+        from decimal import ROUND_HALF_UP
+        if group_id:
+            from app.models.discount_group import VariantLevelPricingOverride
+            vlp_result = await self.db.execute(
+                select(VariantLevelPricingOverride).where(
+                    VariantLevelPricingOverride.variant_id == str(variant.id),
+                    VariantLevelPricingOverride.group_id == group_id,
+                )
+            )
+            vlp = vlp_result.scalar_one_or_none()
+            if vlp and vlp.price is not None:
+                return Decimal(str(vlp.price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        from app.services.pricing_service import PricingService
+        return PricingService(self.db).calculate_effective_price(variant.retail_price, discount_percent)
+
     async def _load_cart_items(
         self,
         company_id: UUID,
         discount_percent: Decimal = Decimal("0"),
+        group_id: str | None = None,
     ) -> list[CartItemOut]:
         result = await self.db.execute(
             select(CartItem).where(CartItem.company_id == company_id)
@@ -306,13 +331,8 @@ class CartService:
             )
             stock = stock_result.scalar_one()
 
-            # Re-apply discount from retail_price so the cart always reflects
-            # the current tier — even if items were added before a tier was assigned.
-            from app.services.pricing_service import PricingService
-            pricing_svc = PricingService(self.db)
-            effective_price = pricing_svc.calculate_effective_price(
-                variant.retail_price, discount_percent
-            )
+            # Re-apply pricing so cart always reflects current tier/override.
+            effective_price = await self._effective_price(variant, discount_percent, group_id)
             line_total = effective_price * item.quantity
             moq_satisfied = item.quantity >= product.moq
 

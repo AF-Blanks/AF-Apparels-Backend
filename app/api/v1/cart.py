@@ -23,11 +23,15 @@ def _discount(request: Request) -> Decimal:
     return getattr(request.state, "tier_discount_percent", Decimal("0"))
 
 
+def _group_id(request: Request) -> str | None:
+    return getattr(request.state, "discount_group_id", None)
+
+
 @router.get("", response_model=CartResponse)
 async def get_cart(request: Request, db: AsyncSession = Depends(get_db)):
     company_id = _require_company(request)
     svc = CartService(db)
-    return await svc.get_cart_with_pricing(company_id, _discount(request))
+    return await svc.get_cart_with_pricing(company_id, _discount(request), _group_id(request))
 
 
 @router.post("/add-matrix", response_model=CartResponse, status_code=status.HTTP_200_OK)
@@ -38,7 +42,7 @@ async def add_matrix(
 ):
     company_id = _require_company(request)
     svc = CartService(db)
-    result = await svc.add_matrix_items(company_id, payload, _discount(request))
+    result = await svc.add_matrix_items(company_id, payload, _discount(request), _group_id(request))
     await db.commit()
     return result
 
@@ -53,7 +57,7 @@ async def update_item(
     company_id = _require_company(request)
     svc = CartService(db)
     result = await svc.update_item_quantity(
-        company_id, item_id, quantity, _discount(request)
+        company_id, item_id, quantity, _discount(request), _group_id(request)
     )
     await db.commit()
     return result
@@ -67,7 +71,7 @@ async def remove_item(
 ):
     company_id = _require_company(request)
     svc = CartService(db)
-    result = await svc.remove_item(company_id, item_id, _discount(request))
+    result = await svc.remove_item(company_id, item_id, _discount(request), _group_id(request))
     await db.commit()
     return result
 
@@ -84,7 +88,7 @@ async def quick_order(
     validation = await svc.validate_sku_list([{"sku": i.sku, "quantity": i.quantity} for i in payload.items])
 
     # Bulk-add valid items
-    added = await svc.bulk_add_validated_items(company_id, validation["valid"], _discount(request))
+    added = await svc.bulk_add_validated_items(company_id, validation["valid"], _discount(request), _group_id(request))
     if added:
         await db.commit()
 

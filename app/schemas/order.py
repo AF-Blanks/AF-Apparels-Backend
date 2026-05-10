@@ -64,6 +64,7 @@ class CheckoutConfirmRequest(BaseModel):
     tax_amount: Decimal | None = None
     tax_rate: float | None = None
     tax_region: str | None = None
+    shipping_cost: Decimal | None = None  # client-provided fallback when tier calc returns 0
     # ACH payment
     payment_method: str | None = None  # "card" | "ach"
     ach_bank_name: str | None = None

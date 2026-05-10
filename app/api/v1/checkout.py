@@ -186,6 +186,7 @@ async def _confirm_checkout_inner(
         )
 
     discount_percent = getattr(request.state, "tier_discount_percent", Decimal("0"))
+    group_id = getattr(request.state, "discount_group_id", None)
 
     # ── QB Payments flow ──────────────────────────────────────────────────────
     qb_charge_id: str | None = None
@@ -198,7 +199,7 @@ async def _confirm_checkout_inner(
         from app.services.qb_payments_service import QBPaymentsService
 
         cart_svc = _CartService(db)
-        cart = await cart_svc.get_cart_with_pricing(company_id, discount_percent)
+        cart = await cart_svc.get_cart_with_pricing(company_id, discount_percent, group_id)
         if not cart.items:
             raise ValidationError("Cart is empty")
 
@@ -269,6 +270,7 @@ async def _confirm_checkout_inner(
         qb_charge_id=qb_charge_id,
         qb_payment_status=qb_payment_status,
         coupon_discount_amount=coupon_discount_amount,
+        group_id=group_id,
     )
 
     # Record coupon usage after order is created

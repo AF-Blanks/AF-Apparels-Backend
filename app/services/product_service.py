@@ -236,7 +236,7 @@ class ProductService:
             for variant_id, total_qty in stock_result.all():
                 stock_map[variant_id] = int(total_qty or 0)
 
-        # Batch-load VariantPricingOverride for this discount group (keyed by product_id string)
+        # Batch-load VariantPricingOverride (product-level) for this discount group
         override_map: dict = {}
         if discount_group_id:
             from app.models.discount_group import VariantPricingOverride
@@ -253,9 +253,23 @@ class ProductService:
             for row in ov_result.scalars().all():
                 override_map[row.product_id] = row
 
+        # Batch-load VariantLevelPricingOverride (per-variant) for this discount group
+        vlp_map: dict = {}
+        if discount_group_id:
+            from app.models.discount_group import VariantLevelPricingOverride
+            vlp_result = await self.db.execute(
+                select(VariantLevelPricingOverride).where(
+                    VariantLevelPricingOverride.variant_id.in_([str(vid) for vid in variant_ids]),
+                    VariantLevelPricingOverride.group_id == discount_group_id,
+                )
+            )
+            for row in vlp_result.scalars().all():
+                vlp_map[row.variant_id] = row
+
         for product in products:
             ov = override_map.get(str(product.id))
             for variant in product.variants:
+                vlp = vlp_map.get(str(variant.id))
                 if is_guest:
                     # Guests see MSRP; fall back to retail_price if msrp not set
                     msrp = getattr(variant, "msrp", None)
@@ -264,8 +278,13 @@ class ProductService:
                         if msrp is not None
                         else Decimal(str(variant.retail_price))
                     )
+                elif vlp is not None and vlp.price is not None:
+                    # Per-variant price override has highest priority
+                    variant.effective_price = Decimal(str(vlp.price)).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
                 elif ov is not None and ov.price is not None:
-                    # Absolute price override
+                    # Absolute product-level price override
                     variant.effective_price = Decimal(str(ov.price)).quantize(
                         Decimal("0.01"), rounding=ROUND_HALF_UP
                     )
