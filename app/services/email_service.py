@@ -165,7 +165,7 @@ class EmailService:
             f'<p style="color:#9ca3af;font-size:12px;margin:4px 0 0">{footer_note}</p>'
             if footer_note else ""
         )
-        logo_url = _cfg.LOGO_URL
+        logo_url = _cfg.LOGO_URL or f"{_cfg.FRONTEND_URL}/Af-apparel%20logo.png"
         if logo_url:
             logo_html = (
                 f'<img src="{logo_url}" alt="AF Apparels" '
@@ -291,7 +291,7 @@ class EmailService:
             f'{discount_row}'
             f'<tr><td style="padding:4px 0;font-size:13px;color:#6b7280">Shipping</td>'
             f'<td style="padding:4px 0;font-size:13px;color:#6b7280;text-align:right">'
-            f'${float(order.shipping_cost):.2f}</td></tr>'
+            f'${float(order.shipping_cost or 0):.2f}</td></tr>'
             f'{tax_row}'
             f'<tr><td style="padding:8px 0 0;font-size:17px;font-weight:800;color:#1B3A5C;'
             f'border-top:2px solid #e5e7eb">Total</td>'

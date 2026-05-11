@@ -218,7 +218,7 @@ def _totals_block(order: "Order") -> list:
     rows: list = [["", "Subtotal:", f"${float(order.subtotal):.2f}"]]
     if discount_val > 0:
         rows.append(["", "Discount:", f"−${discount_val:.2f}"])
-    rows.append(["", "Shipping:", f"${float(order.shipping_cost):.2f}"])
+    rows.append(["", "Shipping:", f"${float(order.shipping_cost or 0):.2f}"])
     if tax_val > 0:
         rows.append(["", "Tax:", f"${tax_val:.2f}"])
     rows.append(["", "TOTAL:", f"${float(order.total):.2f}"])
@@ -359,7 +359,7 @@ class PDFService:
 
         # ── Summary block with discount + tax ─────────────────────────────────
         subtotal_val = float(order.subtotal)
-        shipping_val = float(order.shipping_cost)
+        shipping_val = float(order.shipping_cost or 0)
         tax_val = float(order.tax_amount) if order.tax_amount else 0.0
         discount_val = float(getattr(order, "discount_amount", 0) or 0)
         total_val = float(order.total)
