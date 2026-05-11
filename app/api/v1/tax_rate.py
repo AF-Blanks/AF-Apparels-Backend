@@ -31,7 +31,7 @@ async def get_tax_rate(
         if company and company.tax_exempt:
             return {"rate": 0.0, "tax_amount": 0.0, "region": state, "source": "exempt"}
 
-    # Taxable merchandise amount after discount (discount applied to subtotal first)
+    # Taxable amount = merchandise only (subtotal − discount); shipping is not taxed
     taxable_subtotal = max(0.0, subtotal - discount)
 
     # ── TaxJar: use when API key is configured and we have enough address data ──
@@ -43,7 +43,7 @@ async def get_tax_rate(
                 to_zip=zip_code,
                 to_city=city,
                 subtotal=taxable_subtotal,
-                shipping=shipping,
+                shipping=0,  # shipping not taxed
             )
             if result.get("source") == "taxjar":
                 logger.info(
@@ -63,7 +63,7 @@ async def get_tax_rate(
 
     if r:
         rate = float(r.rate)
-        taxable_amount = max(0.0, subtotal + shipping - discount)
+        taxable_amount = max(0.0, subtotal - discount)  # shipping not taxed
         return {
             "rate": rate,
             "tax_amount": round(taxable_amount * rate / 100, 2),
