@@ -283,10 +283,12 @@ class CartService:
         discount_percent: Decimal,
         group_id: str | None,
     ) -> Decimal:
-        """Return price for variant: VariantLevelPricingOverride > tier discount."""
+        """Return price: VariantLevelPricingOverride > product-level VariantPricingOverride > tier discount."""
         from decimal import ROUND_HALF_UP
         if group_id:
-            from app.models.discount_group import VariantLevelPricingOverride
+            from app.models.discount_group import VariantLevelPricingOverride, VariantPricingOverride
+
+            # Step 1: per-variant override (highest priority)
             vlp_result = await self.db.execute(
                 select(VariantLevelPricingOverride).where(
                     VariantLevelPricingOverride.variant_id == str(variant.id),
@@ -296,6 +298,21 @@ class CartService:
             vlp = vlp_result.scalar_one_or_none()
             if vlp and vlp.price is not None:
                 return Decimal(str(vlp.price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+            # Step 2: product-level override (tier_id stores group_id per existing convention)
+            ov_result = await self.db.execute(
+                select(VariantPricingOverride).where(
+                    VariantPricingOverride.product_id == str(variant.product_id),
+                    VariantPricingOverride.tier_id == group_id,
+                )
+            )
+            ov = ov_result.scalar_one_or_none()
+            if ov is not None and ov.price is not None:
+                return Decimal(str(ov.price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if ov is not None and ov.discount_percent is not None:
+                multiplier = Decimal("1") - (Decimal(str(ov.discount_percent)) / Decimal("100"))
+                return (variant.retail_price * multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
         from app.services.pricing_service import PricingService
         return PricingService(self.db).calculate_effective_price(variant.retail_price, discount_percent)
 
