@@ -226,7 +226,8 @@ async def _confirm_checkout_inner(
                 compute_discount_amount(coupon_discount_dc, cart_total_for_coupon)
             ))
 
-        total_float = float(cart.subtotal + base_shipping + expedited_surcharge - coupon_discount_amount)
+        tax_amount_dc = Decimal(str(payload.tax_amount or 0))
+        total_float = float(cart.subtotal + base_shipping + expedited_surcharge + tax_amount_dc - coupon_discount_amount)
 
         qb_pay = QBPaymentsService()
         try:
