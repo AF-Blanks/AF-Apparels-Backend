@@ -50,20 +50,44 @@ async def list_orders(
 
 @router.get("/{order_id}", response_model=OrderOut)
 async def get_order(
-    order_id: UUID,
+    order_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    import uuid as _uuid
+    from sqlalchemy.orm import selectinload as _sil
+
     company_id = getattr(request.state, "company_id", None)
     user_id = getattr(request.state, "user_id", None)
     account_type = getattr(request.state, "account_type", "wholesale")
 
     svc = OrderService(db)
 
+    # Support order_number (AF-XXXXXX) or UUID in URL
+    if order_id.upper().startswith("AF-"):
+        order_num = order_id.upper()
+        if account_type == "retail" and user_id:
+            result = await db.execute(
+                select(Order).options(_sil(Order.items))
+                .where(Order.order_number == order_num, Order.placed_by_id == _uuid.UUID(user_id))
+            )
+        elif company_id:
+            result = await db.execute(
+                select(Order).options(_sil(Order.items))
+                .where(Order.order_number == order_num, Order.company_id == _uuid.UUID(str(company_id)))
+            )
+        else:
+            raise ForbiddenError("Company account required")
+        order = result.scalar_one_or_none()
+        if not order:
+            raise NotFoundError(f"Order {order_id} not found")
+        return order
+
+    oid = _uuid.UUID(order_id)
     if account_type == "retail" and user_id:
-        return await svc.get_order_for_retail_user(order_id, user_id)
+        return await svc.get_order_for_retail_user(oid, user_id)
     elif company_id:
-        return await svc.get_order(order_id, company_id)
+        return await svc.get_order(oid, company_id)
     else:
         raise ForbiddenError("Company account required")
 
@@ -102,11 +126,13 @@ def _pdf_response(pdf_bytes: bytes, filename: str) -> StreamingResponse:
 
 
 async def _load_order_for_company(order_id: UUID, company_id, db: AsyncSession) -> Order:
+    import uuid as _uuid
     from sqlalchemy.orm import selectinload
+    company_uuid = _uuid.UUID(str(company_id)) if not isinstance(company_id, _uuid.UUID) else company_id
     result = await db.execute(
         select(Order)
         .options(selectinload(Order.items))
-        .where(Order.id == order_id, Order.company_id == company_id)
+        .where(Order.id == order_id, Order.company_id == company_uuid)
     )
     order = result.scalar_one_or_none()
     if not order:
@@ -204,14 +230,22 @@ async def list_order_comments(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    import uuid as _uuid
     company_id = getattr(request.state, "company_id", None)
-    if not company_id:
-        raise ForbiddenError("Company account required")
+    user_id = getattr(request.state, "user_id", None)
+    account_type = getattr(request.state, "account_type", "wholesale")
 
-    # Verify order belongs to company
-    order = (await db.execute(
-        select(Order).where(Order.id == order_id, Order.company_id == company_id)
-    )).scalar_one_or_none()
+    # Verify order ownership: retail via placed_by_id, wholesale via company_id
+    if account_type == "retail" and user_id:
+        order = (await db.execute(
+            select(Order).where(Order.id == order_id, Order.placed_by_id == _uuid.UUID(user_id))
+        )).scalar_one_or_none()
+    elif company_id:
+        order = (await db.execute(
+            select(Order).where(Order.id == order_id, Order.company_id == _uuid.UUID(str(company_id)))
+        )).scalar_one_or_none()
+    else:
+        raise ForbiddenError("Company account required")
     if not order:
         raise NotFoundError(f"Order {order_id} not found")
 
@@ -243,14 +277,22 @@ async def add_order_comment(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    import uuid as _uuid
     company_id = getattr(request.state, "company_id", None)
     user_id = getattr(request.state, "user_id", None)
-    if not company_id:
-        raise ForbiddenError("Company account required")
+    account_type = getattr(request.state, "account_type", "wholesale")
 
-    order = (await db.execute(
-        select(Order).where(Order.id == order_id, Order.company_id == company_id)
-    )).scalar_one_or_none()
+    # Verify order ownership: retail via placed_by_id, wholesale via company_id
+    if account_type == "retail" and user_id:
+        order = (await db.execute(
+            select(Order).where(Order.id == order_id, Order.placed_by_id == _uuid.UUID(user_id))
+        )).scalar_one_or_none()
+    elif company_id:
+        order = (await db.execute(
+            select(Order).where(Order.id == order_id, Order.company_id == _uuid.UUID(str(company_id)))
+        )).scalar_one_or_none()
+    else:
+        raise ForbiddenError("Company account required")
     if not order:
         raise NotFoundError(f"Order {order_id} not found")
 

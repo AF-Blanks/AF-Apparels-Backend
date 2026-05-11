@@ -413,13 +413,15 @@ class OrderService:
     # Get / list orders
     # ------------------------------------------------------------------
 
-    async def get_order(self, order_id: UUID, company_id: UUID) -> Order:
+    async def get_order(self, order_id: UUID, company_id) -> Order:
         from sqlalchemy.orm import selectinload
+        import uuid as _uuid
 
+        company_uuid = _uuid.UUID(str(company_id)) if not isinstance(company_id, _uuid.UUID) else company_id
         result = await self.db.execute(
             select(Order)
             .options(selectinload(Order.items))
-            .where(Order.id == order_id, Order.company_id == company_id)
+            .where(Order.id == order_id, Order.company_id == company_uuid)
         )
         order = result.scalar_one_or_none()
         if not order:
@@ -473,7 +475,8 @@ class OrderService:
     ) -> tuple[list[Order], int]:
         from sqlalchemy.orm import selectinload
 
-        base = select(Order).where(Order.placed_by_id == user_id)
+        import uuid as _uuid
+        base = select(Order).where(Order.placed_by_id == _uuid.UUID(user_id))
         if q:
             base = base.where(Order.order_number.ilike(f"%{q}%"))
         if status:
@@ -496,11 +499,12 @@ class OrderService:
     async def get_order_for_retail_user(self, order_id: UUID, user_id: str) -> Order:
         from sqlalchemy.orm import selectinload
         from app.core.exceptions import NotFoundError
+        import uuid as _uuid
 
         result = await self.db.execute(
             select(Order)
             .options(selectinload(Order.items))
-            .where(Order.id == order_id, Order.placed_by_id == user_id)
+            .where(Order.id == order_id, Order.placed_by_id == _uuid.UUID(user_id))
         )
         order = result.scalar_one_or_none()
         if not order:

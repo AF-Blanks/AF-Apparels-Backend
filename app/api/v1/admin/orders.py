@@ -406,19 +406,27 @@ async def export_orders_csv(
 
 
 @router.get("/orders/{order_id}", response_model=AdminOrderDetail)
-async def get_admin_order(order_id: UUID, db: AsyncSession = Depends(get_db)):
+async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
+    import uuid as _uuid
     from sqlalchemy import outerjoin
+
+    # Accept order_number (AF-...) or UUID
+    if order_id.upper().startswith("AF-"):
+        where_clause = Order.order_number == order_id.upper()
+    else:
+        where_clause = Order.id == _uuid.UUID(order_id)
+
     result = await db.execute(
         select(Order, Company.name.label("company_name"))
         .select_from(outerjoin(Order, Company, Order.company_id == Company.id))
-        .where(Order.id == order_id)
+        .where(where_clause)
     )
     row = result.one_or_none()
     if not row:
         raise NotFoundError(f"Order {order_id} not found")
     order, company_name = row
 
-    items_result = await db.execute(select(OrderItem).where(OrderItem.order_id == order_id))
+    items_result = await db.execute(select(OrderItem).where(OrderItem.order_id == order.id))
     items = items_result.scalars().all()
 
     # Enrich with customer contact — from placing user or guest fields
