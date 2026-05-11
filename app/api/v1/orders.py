@@ -32,10 +32,10 @@ async def list_orders(
 
     svc = OrderService(db)
 
-    if company_id:
-        orders, total = await svc.list_orders_for_company(company_id, page, page_size, q=q, status=status)
-    elif account_type == "retail" and user_id:
+    if account_type == "retail" and user_id:
         orders, total = await svc.list_orders_for_retail_user(user_id, page, page_size, q=q, status=status)
+    elif company_id:
+        orders, total = await svc.list_orders_for_company(company_id, page, page_size, q=q, status=status)
     else:
         raise ForbiddenError("Company account required")
 
@@ -60,10 +60,10 @@ async def get_order(
 
     svc = OrderService(db)
 
-    if company_id:
-        return await svc.get_order(order_id, company_id)
-    elif account_type == "retail" and user_id:
+    if account_type == "retail" and user_id:
         return await svc.get_order_for_retail_user(order_id, user_id)
+    elif company_id:
+        return await svc.get_order(order_id, company_id)
     else:
         raise ForbiddenError("Company account required")
 
@@ -75,7 +75,10 @@ async def reorder(
     db: AsyncSession = Depends(get_db),
 ):
     company_id = getattr(request.state, "company_id", None)
-    if not company_id:
+    user_id = getattr(request.state, "user_id", None)
+    account_type = getattr(request.state, "account_type", "wholesale")
+
+    if account_type != "retail" and not company_id:
         raise ForbiddenError("Company account required")
 
     from decimal import Decimal

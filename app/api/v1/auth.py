@@ -169,11 +169,12 @@ async def activate_account(
 ) -> dict:
     """Submit wholesale application form from a retail activation link.
 
-    Sets the user's password and creates a WholesaleApplication for admin review.
-    User stays inactive until admin approves.
+    Sets the user's password, creates a Company + CompanyUser (owner), and creates
+    a WholesaleApplication for admin review. User is activated immediately as retail.
     """
     from app.models.user import User
     from app.models.wholesale import WholesaleApplication
+    from app.models.company import Company, CompanyUser
 
     if payload.password != payload.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
@@ -197,6 +198,36 @@ async def activate_account(
     user.is_active = True  # retail activation — direct login, no admin approval required
     user.activation_token = None
     user.activation_token_expires = None
+
+    # Create Company record so retail user has company_id and can use account features
+    company = Company(
+        name=payload.company_name,
+        tax_id=payload.tax_id,
+        business_type=payload.business_type,
+        website=payload.website,
+        phone=payload.phone,
+        status="active",
+        company_email=payload.company_email,
+        address_line1=payload.address_line1,
+        address_line2=payload.address_line2,
+        city=payload.city,
+        state_province=payload.state_province,
+        postal_code=payload.postal_code,
+        country=payload.country,
+        how_heard=payload.how_heard,
+        secondary_business=payload.secondary_business,
+        num_employees=payload.num_employees,
+        num_sales_reps=payload.num_sales_reps,
+    )
+    db.add(company)
+    await db.flush()  # get company.id before creating CompanyUser
+
+    company_user = CompanyUser(
+        company_id=company.id,
+        user_id=user.id,
+        role="owner",
+    )
+    db.add(company_user)
 
     # Create WholesaleApplication so it appears in the admin approval queue
     application = WholesaleApplication(
@@ -277,7 +308,14 @@ async def activate_account(
         except Exception:
             pass
 
-    access_token = create_access_token(str(user.id), extra_claims={"account_type": "retail", "is_admin": False})
+    access_token = create_access_token(
+        str(user.id),
+        extra_claims={
+            "account_type": "retail",
+            "is_admin": False,
+            "company_id": str(company.id),
+        },
+    )
     refresh_token = create_refresh_token(str(user.id))
     return {
         "access_token": access_token,

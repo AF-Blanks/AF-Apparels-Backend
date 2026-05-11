@@ -73,15 +73,16 @@ class CompanyService:
         owner_map: dict = {}
         if company_ids:
             owner_result = await self.db.execute(
-                select(CompanyUser.company_id, User.email, User.first_name, User.last_name, User.phone)
+                select(CompanyUser.company_id, User.email, User.first_name, User.last_name, User.phone, User.account_type)
                 .join(User, CompanyUser.user_id == User.id)
                 .where(CompanyUser.company_id.in_(company_ids), CompanyUser.role == "owner", CompanyUser.is_active == True)
             )
-            for comp_id, email, first, last, phone in owner_result.all():
+            for comp_id, email, first, last, phone, acct_type in owner_result.all():
                 owner_map[comp_id] = {
                     "email": email,
                     "phone": phone,
                     "contact_name": f"{first} {last}".strip() or None,
+                    "account_type": acct_type or "wholesale",
                 }
 
         # Fetch last order date per company
@@ -111,14 +112,19 @@ class CompanyService:
                 "contact_name": owner.get("contact_name"),
                 "last_order_date": last_order_map.get(company.id),
                 "tags": company.tags or [],
-                "account_type": "wholesale",
+                "account_type": owner.get("account_type", "wholesale"),
             })
 
-        # Include retail users (no company record) — only when no company-specific filters applied
+        # Include retail users who have no company record — only when no company-specific filters applied
         if not q and not status:
+            # Exclude retail users who already have a Company (created during activation)
+            retail_with_company = select(CompanyUser.user_id).where(CompanyUser.role == "owner").subquery()
             retail_result = await self.db.execute(
-                select(User).where(User.account_type == "retail", User.is_active == True)
-                .order_by(User.created_at.desc())
+                select(User).where(
+                    User.account_type == "retail",
+                    User.is_active == True,
+                    User.id.not_in(retail_with_company),
+                ).order_by(User.created_at.desc())
             )
             retail_users = retail_result.scalars().all()
 

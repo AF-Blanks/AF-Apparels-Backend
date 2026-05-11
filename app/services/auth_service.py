@@ -74,7 +74,7 @@ class AuthService:
         # Check company status for non-admin users
         membership: CompanyUser | None = None
         is_retail = getattr(user, "account_type", "wholesale") == "retail"
-        if not user.is_admin and not is_retail:
+        if not user.is_admin:
             mem_result = await self.db.execute(
                 select(CompanyUser)
                 .where(CompanyUser.user_id == user.id, CompanyUser.is_active == True)
@@ -84,10 +84,10 @@ class AuthService:
             if membership:
                 await self.db.refresh(membership, ["company"])
                 company: Company = membership.company
-                if company.status == "suspended":
+                if not is_retail and company.status == "suspended":
                     raise AccountSuspendedError()
-            else:
-                # No company membership — check if they have a wholesale application
+            elif not is_retail:
+                # No company membership for wholesale — check wholesale application status
                 app_result = await self.db.execute(
                     select(WholesaleApplication)
                     .where(WholesaleApplication.email == user.email)
