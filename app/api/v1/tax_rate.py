@@ -18,6 +18,7 @@ async def get_tax_rate(
     city: str = Query("", description="Shipping city"),
     subtotal: float = Query(0.0, description="Cart subtotal for TaxJar calculation"),
     shipping: float = Query(0.0, description="Shipping cost for TaxJar calculation"),
+    discount: float = Query(0.0, description="Coupon/discount amount already applied"),
     db: AsyncSession = Depends(get_db),
 ):
     state = region.upper()
@@ -30,6 +31,9 @@ async def get_tax_rate(
         if company and company.tax_exempt:
             return {"rate": 0.0, "tax_amount": 0.0, "region": state, "source": "exempt"}
 
+    # Taxable merchandise amount after discount (discount applied to subtotal first)
+    taxable_subtotal = max(0.0, subtotal - discount)
+
     # ── TaxJar: use when API key is configured and we have enough address data ──
     if zip_code and subtotal > 0:
         from app.services.taxjar_service import calculate_tax, get_taxjar_client
@@ -38,13 +42,13 @@ async def get_tax_rate(
                 to_state=state,
                 to_zip=zip_code,
                 to_city=city,
-                subtotal=subtotal,
+                subtotal=taxable_subtotal,
                 shipping=shipping,
             )
             if result.get("source") == "taxjar":
                 logger.info(
-                    "TaxJar: %s %s → rate=%.4f%% amount=$%.2f",
-                    state, zip_code, result["rate"], result["tax_amount"],
+                    "TaxJar: %s %s → rate=%.4f%% amount=$%.2f (discount=$%.2f applied)",
+                    state, zip_code, result["rate"], result["tax_amount"], discount,
                 )
                 return result
 
@@ -59,9 +63,10 @@ async def get_tax_rate(
 
     if r:
         rate = float(r.rate)
+        taxable_amount = max(0.0, subtotal + shipping - discount)
         return {
             "rate": rate,
-            "tax_amount": round(subtotal * rate / 100, 2),
+            "tax_amount": round(taxable_amount * rate / 100, 2),
             "region": r.region,
             "source": "manual",
         }

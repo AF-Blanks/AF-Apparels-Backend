@@ -212,9 +212,10 @@ async def _confirm_checkout_inner(
 
         # Validate and apply discount code if provided
         if payload.discount_code:
+            cart_total_for_coupon = float(cart.subtotal + base_shipping + expedited_surcharge)
             coupon_discount_dc, coupon_error = await validate_discount_code(
                 payload.discount_code,
-                float(cart.subtotal),
+                cart_total_for_coupon,
                 user_id,
                 "wholesale",
                 db,
@@ -222,7 +223,7 @@ async def _confirm_checkout_inner(
             if coupon_error:
                 raise ValidationError(f"Discount code invalid: {coupon_error}")
             coupon_discount_amount = Decimal(str(
-                compute_discount_amount(coupon_discount_dc, float(cart.subtotal))
+                compute_discount_amount(coupon_discount_dc, cart_total_for_coupon)
             ))
 
         total_float = float(cart.subtotal + base_shipping + expedited_surcharge - coupon_discount_amount)
