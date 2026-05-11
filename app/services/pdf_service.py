@@ -84,15 +84,31 @@ def _doc(buf: io.BytesIO) -> SimpleDocTemplate:
 
 
 def _header(doc_title: str) -> list:
-    return [
-        Paragraph("AF Apparels", _h1),
-        Paragraph("Wholesale Division · afapparels.com", _small),
+    from app.core.config import settings as _cfg
+    logo_element = None
+    logo_url = _cfg.LOGO_URL
+    if logo_url:
+        try:
+            import io as _io
+            import urllib.request as _req
+            with _req.urlopen(logo_url, timeout=5) as resp:
+                img_data = resp.read()
+            from reportlab.platypus import Image as _RLImage
+            logo_element = _RLImage(_io.BytesIO(img_data), width=1.5 * inch, height=0.5 * inch)
+        except Exception:
+            logo_element = None
+
+    elements: list = [logo_element if logo_element else Paragraph("AF Apparels", _h1)]
+    if not logo_element:
+        elements.append(Paragraph("Wholesale Division · afapparels.com", _small))
+    elements += [
         Spacer(1, 6),
         HRFlowable(width="100%", thickness=2, color=BRAND_BLUE),
         Spacer(1, 4),
         Paragraph(doc_title, _h2),
         Spacer(1, 8),
     ]
+    return elements
 
 
 def _order_meta(order: "Order", extra_rows: list[tuple[str, str]] | None = None) -> list:
@@ -195,12 +211,18 @@ def _items_table(order: "Order") -> list:
 
 
 def _totals_block(order: "Order") -> list:
-    """Right-aligned subtotal / shipping / total block."""
-    rows = [
-        ["", "Subtotal:", f"${float(order.subtotal):.2f}"],
-        ["", "Shipping:", f"${float(order.shipping_cost):.2f}"],
-        ["", "TOTAL:", f"${float(order.total):.2f}"],
-    ]
+    """Right-aligned subtotal / discount / shipping / tax / total block."""
+    discount_val = float(getattr(order, "discount_amount", 0) or 0)
+    tax_val = float(getattr(order, "tax_amount", 0) or 0)
+
+    rows: list = [["", "Subtotal:", f"${float(order.subtotal):.2f}"]]
+    if discount_val > 0:
+        rows.append(["", "Discount:", f"−${discount_val:.2f}"])
+    rows.append(["", "Shipping:", f"${float(order.shipping_cost):.2f}"])
+    if tax_val > 0:
+        rows.append(["", "Tax:", f"${tax_val:.2f}"])
+    rows.append(["", "TOTAL:", f"${float(order.total):.2f}"])
+
     tbl = Table(rows, colWidths=[4.85 * inch, 1.3 * inch, 0.85 * inch])
     tbl.setStyle(TableStyle([
         ("FONTNAME", (1, 0), (1, -2), "Helvetica"),

@@ -160,19 +160,30 @@ class EmailService:
     @staticmethod
     def _base_template(content_html: str, footer_note: str = "") -> str:
         """AF Apparels navy-branded HTML email wrapper."""
+        from app.core.config import settings as _cfg
         note_html = (
             f'<p style="color:#9ca3af;font-size:12px;margin:4px 0 0">{footer_note}</p>'
             if footer_note else ""
         )
+        logo_url = _cfg.LOGO_URL
+        if logo_url:
+            logo_html = (
+                f'<img src="{logo_url}" alt="AF Apparels" '
+                f'style="height:44px;width:auto;display:block;margin:0 auto" />'
+            )
+        else:
+            logo_html = (
+                '<span style="font-size:28px;font-weight:900;color:#ffffff;'
+                'letter-spacing:-.5px">AF</span>'
+                '<span style="color:rgba(255,255,255,.55);font-size:13px;margin-left:8px;'
+                'letter-spacing:.18em;text-transform:uppercase;font-weight:600">APPARELS</span>'
+            )
         return (
             '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\','
             'Helvetica,Arial,sans-serif;max-width:600px;margin:0 auto;background:#ffffff">'
             '<div style="background:#1B3A5C;padding:24px 32px;text-align:center;'
             'border-bottom:3px solid #E8242A">'
-            '<span style="font-size:28px;font-weight:900;color:#ffffff;'
-            'letter-spacing:-.5px">AF</span>'
-            '<span style="color:rgba(255,255,255,.55);font-size:13px;margin-left:8px;'
-            'letter-spacing:.18em;text-transform:uppercase;font-weight:600">APPARELS</span>'
+            + logo_html +
             '</div>'
             '<div style="padding:32px">'
             + content_html
@@ -218,6 +229,13 @@ class EmailService:
             for item in order.items
         )
 
+        discount_val = float(getattr(order, "discount_amount", 0) or 0)
+        discount_row = (
+            f'<tr><td style="padding:4px 0;font-size:13px;color:#059669;font-weight:600">Discount</td>'
+            f'<td style="padding:4px 0;font-size:13px;color:#059669;font-weight:600;text-align:right">'
+            f'&#8722;${discount_val:.2f}</td></tr>'
+            if discount_val > 0 else ""
+        )
         tax_row = (
             f'<tr><td style="padding:4px 0;font-size:13px;color:#6b7280">Tax</td>'
             f'<td style="padding:4px 0;font-size:13px;color:#6b7280;text-align:right">'
@@ -270,6 +288,7 @@ class EmailService:
             f'<tr><td style="padding:4px 0;font-size:13px;color:#6b7280">Subtotal</td>'
             f'<td style="padding:4px 0;font-size:13px;color:#6b7280;text-align:right">'
             f'${float(order.subtotal):.2f}</td></tr>'
+            f'{discount_row}'
             f'<tr><td style="padding:4px 0;font-size:13px;color:#6b7280">Shipping</td>'
             f'<td style="padding:4px 0;font-size:13px;color:#6b7280;text-align:right">'
             f'${float(order.shipping_cost):.2f}</td></tr>'
