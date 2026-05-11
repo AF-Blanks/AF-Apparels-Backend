@@ -13,20 +13,27 @@ if TYPE_CHECKING:
 
 
 class User(BaseModel):
-    """Platform user — either an admin or a company buyer."""
+    """Platform user — admin, wholesale company buyer, or retail customer."""
 
     __tablename__ = "users"
 
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
-    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
     phone: Mapped[str | None] = mapped_column(String(50))
+
+    # 'wholesale' | 'retail'
+    account_type: Mapped[str] = mapped_column(String(20), default="wholesale", nullable=False)
 
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     email_verification_token: Mapped[str | None] = mapped_column(String(255))
+
+    # Retail account activation (set when retail user is auto-created at guest checkout)
+    activation_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    activation_token_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     password_reset_token: Mapped[str | None] = mapped_column(String(255))
     password_reset_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

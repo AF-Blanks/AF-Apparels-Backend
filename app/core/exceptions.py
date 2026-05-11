@@ -79,3 +79,8 @@ class InsufficientStockError(ValidationError):
 class AccountSuspendedError(ForbiddenError):
     error_code = "ACCOUNT_SUSPENDED"
     message = "Your account has been suspended"
+
+
+class AccountNotActivatedError(ForbiddenError):
+    error_code = "ACCOUNT_NOT_ACTIVATED"
+    message = "Your account is not yet activated. Check your email for the activation link."

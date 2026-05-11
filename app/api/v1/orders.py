@@ -27,11 +27,18 @@ async def list_orders(
     db: AsyncSession = Depends(get_db),
 ):
     company_id = getattr(request.state, "company_id", None)
-    if not company_id:
-        raise ForbiddenError("Company account required")
+    user_id = getattr(request.state, "user_id", None)
+    account_type = getattr(request.state, "account_type", "wholesale")
 
     svc = OrderService(db)
-    orders, total = await svc.list_orders_for_company(company_id, page, page_size, q=q, status=status)
+
+    if company_id:
+        orders, total = await svc.list_orders_for_company(company_id, page, page_size, q=q, status=status)
+    elif account_type == "retail" and user_id:
+        orders, total = await svc.list_orders_for_retail_user(user_id, page, page_size, q=q, status=status)
+    else:
+        raise ForbiddenError("Company account required")
+
     return PaginatedResponse(
         items=orders,
         total=total,
@@ -48,11 +55,17 @@ async def get_order(
     db: AsyncSession = Depends(get_db),
 ):
     company_id = getattr(request.state, "company_id", None)
-    if not company_id:
-        raise ForbiddenError("Company account required")
+    user_id = getattr(request.state, "user_id", None)
+    account_type = getattr(request.state, "account_type", "wholesale")
 
     svc = OrderService(db)
-    return await svc.get_order(order_id, company_id)
+
+    if company_id:
+        return await svc.get_order(order_id, company_id)
+    elif account_type == "retail" and user_id:
+        return await svc.get_order_for_retail_user(order_id, user_id)
+    else:
+        raise ForbiddenError("Company account required")
 
 
 @router.post("/{order_id}/reorder")

@@ -443,6 +443,54 @@ class OrderService:
         return list(orders), total
 
     # ------------------------------------------------------------------
+    # Retail customer order listing (linked via placed_by_id)
+    # ------------------------------------------------------------------
+
+    async def list_orders_for_retail_user(
+        self,
+        user_id: str,
+        page: int = 1,
+        page_size: int = 20,
+        q: str | None = None,
+        status: str | None = None,
+    ) -> tuple[list[Order], int]:
+        from sqlalchemy.orm import selectinload
+
+        base = select(Order).where(Order.placed_by_id == user_id)
+        if q:
+            base = base.where(Order.order_number.ilike(f"%{q}%"))
+        if status:
+            base = base.where(Order.status == status)
+
+        count_result = await self.db.execute(
+            select(func.count()).select_from(base.subquery())
+        )
+        total = count_result.scalar_one()
+
+        result = await self.db.execute(
+            base
+            .options(selectinload(Order.items))
+            .order_by(Order.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        return list(result.scalars().all()), total
+
+    async def get_order_for_retail_user(self, order_id: UUID, user_id: str) -> Order:
+        from sqlalchemy.orm import selectinload
+        from app.core.exceptions import NotFoundError
+
+        result = await self.db.execute(
+            select(Order)
+            .options(selectinload(Order.items))
+            .where(Order.id == order_id, Order.placed_by_id == user_id)
+        )
+        order = result.scalar_one_or_none()
+        if not order:
+            raise NotFoundError(f"Order {order_id} not found")
+        return order
+
+    # ------------------------------------------------------------------
     # Reorder (T150 — Phase 15)
     # ------------------------------------------------------------------
 

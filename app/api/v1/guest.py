@@ -1,6 +1,8 @@
 """Guest checkout endpoints — no authentication required."""
 import json
 import logging
+import secrets
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -19,6 +21,42 @@ from app.schemas.order import AddressIn
 router = APIRouter(prefix="/guest", tags=["guest"])
 
 logger = logging.getLogger(__name__)
+
+
+async def _create_or_get_retail_user(
+    email: str,
+    first_name: str,
+    last_name: str,
+    db: AsyncSession,
+) -> tuple:
+    """Create (or fetch) a retail User account for a guest shopper.
+
+    Returns (user, activation_token_or_None).
+    activation_token is None when the user already exists.
+    """
+    from app.models.user import User
+
+    result = await db.execute(select(User).where(User.email == email.lower()))
+    existing = result.scalar_one_or_none()
+    if existing:
+        return existing, None
+
+    token = secrets.token_urlsafe(32)
+    token_expires = datetime.now(timezone.utc) + timedelta(days=7)
+
+    new_user = User(
+        email=email.lower(),
+        first_name=first_name,
+        last_name=last_name,
+        account_type="retail",
+        is_active=False,
+        hashed_password=None,
+        activation_token=token,
+        activation_token_expires=token_expires,
+    )
+    db.add(new_user)
+    await db.flush()
+    return new_user, token
 
 GUEST_SHIPPING_STANDARD = Decimal("9.99")
 GUEST_SHIPPING_EXPEDITED = Decimal("54.99")  # standard + expedited surcharge
@@ -248,19 +286,42 @@ async def guest_checkout(
 
     await db.flush()
 
-    # 7. Reload with items eager-loaded
+    # 7. Auto-create retail account for this guest (non-blocking)
+    _activation_token: str | None = None
+    try:
+        _retail_user, _activation_token = await _create_or_get_retail_user(
+            email=payload.guest_email,
+            first_name=payload.guest_name.split()[0] if payload.guest_name else "Guest",
+            last_name=" ".join(payload.guest_name.split()[1:]) if payload.guest_name and len(payload.guest_name.split()) > 1 else "",
+            db=db,
+        )
+        order.placed_by_id = _retail_user.id
+        await db.flush()
+    except Exception as exc:
+        logger.warning("Retail user creation failed for %s: %s", payload.guest_email, exc)
+
+    # 8. Reload with items eager-loaded
     from sqlalchemy.orm import selectinload
     result = await db.execute(
         select(Order).options(selectinload(Order.items)).where(Order.id == order.id)
     )
     order = result.scalar_one()
 
-    # 8. Send guest confirmation email + admin alert
+    # 9. Send guest confirmation email + admin alert + activation email
     try:
         from app.services.email_service import EmailService
+        from app.core.config import get_settings as _get_settings
         _email_svc = EmailService(db)
         _email_svc.send_order_confirmation(order, order.guest_email)
         _email_svc.send_admin_new_order_alert(order)
+        if _activation_token:
+            _cfg = _get_settings()
+            _email_svc.send_retail_account_activation(
+                customer_email=order.guest_email,
+                first_name=order.guest_name.split()[0] if order.guest_name else "Guest",
+                activation_url=f"{_cfg.FRONTEND_URL}/activate-account?token={_activation_token}",
+                order_number=order.order_number,
+            )
     except Exception as exc:
         logger.warning("Order confirmation email failed: %s", exc)
 

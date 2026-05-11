@@ -1,18 +1,24 @@
 # backend/app/api/v1/auth.py
 """Auth API router."""
-from fastapi import APIRouter, Depends, Request, Response
+import secrets
+from datetime import datetime, timezone, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 
 from app.core.database import get_db
-from app.core.security import get_token_jti
+from app.core.security import get_token_jti, hash_password, create_access_token
 from app.schemas.auth import (
+    ActivateAccountSchema,
     ChangePasswordRequest,
     ForgotPasswordRequest,
     LoginRequest,
     LoginResponse,
     RegisterWholesaleRequest,
+    ResendActivationSchema,
     ResetPasswordRequest,
     TokenRefreshResponse,
 )
@@ -127,3 +133,93 @@ async def reset_password(
 ) -> None:
     service = AuthService(db)
     await service.reset_password(data.token, data.new_password)
+
+
+@router.post("/activate-account")
+async def activate_account(
+    payload: ActivateAccountSchema,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Set password and activate a retail account using an activation token."""
+    from app.models.user import User
+
+    if payload.password != payload.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+
+    result = await db.execute(
+        select(User).where(User.activation_token == payload.token)
+    )
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid activation token")
+
+    if user.activation_token_expires and user.activation_token_expires < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="Activation token expired. Request a new one.")
+
+    user.hashed_password = hash_password(payload.password)
+    user.is_active = True
+    user.activation_token = None
+    user.activation_token_expires = None
+    await db.commit()
+    await db.refresh(user)
+
+    # Return JWT so the user is immediately logged in
+    access_token = create_access_token(
+        str(user.id),
+        extra_claims={"is_admin": False, "account_type": "retail"},
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "is_admin": False,
+            "account_type": "retail",
+        },
+    }
+
+
+@router.post("/resend-activation")
+async def resend_activation(
+    payload: ResendActivationSchema,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Re-send the activation email for a retail account."""
+    from app.models.user import User
+    from app.services.email_service import EmailService
+
+    result = await db.execute(
+        select(User).where(User.email == payload.email.lower())
+    )
+    user = result.scalar_one_or_none()
+
+    # Generic response to avoid email enumeration
+    generic = {"message": "If this email has a pending account, an activation link has been sent."}
+
+    if not user or getattr(user, "account_type", "wholesale") != "retail":
+        return generic
+
+    if user.is_active:
+        return {"message": "Account already active. Please log in."}
+
+    token = secrets.token_urlsafe(32)
+    user.activation_token = token
+    user.activation_token_expires = datetime.now(timezone.utc) + timedelta(days=7)
+    await db.commit()
+
+    email_svc = EmailService(db)
+    try:
+        email_svc.send_retail_account_activation(
+            customer_email=user.email,
+            first_name=user.first_name,
+            activation_url=f"{settings.FRONTEND_URL}/activate-account?token={token}",
+            order_number=None,
+        )
+    except Exception:
+        pass  # non-fatal
+
+    return generic

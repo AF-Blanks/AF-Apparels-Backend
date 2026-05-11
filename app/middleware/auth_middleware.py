@@ -20,6 +20,8 @@ PUBLIC_PATHS = {
     "/api/v1/forgot-password",
     "/api/v1/reset-password",
     "/api/v1/refresh",
+    "/api/v1/activate-account",
+    "/api/v1/resend-activation",
     "/api/v1/products",
     "/api/v1/products/categories",
     "/api/v1/webhooks/stripe",
@@ -85,6 +87,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             request.state.company_id = payload.get("company_id")
                             request.state.pricing_tier_id = payload.get("pricing_tier_id")
                             request.state.company_role = payload.get("company_role")
+                            request.state.account_type = payload.get("account_type", "wholesale")
                 except (JWTError, Exception):
                     pass  # Invalid/expired token — treat as guest, don't block
             return await call_next(request)
@@ -127,6 +130,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.company_id = payload.get("company_id")
         request.state.pricing_tier_id = payload.get("pricing_tier_id")
         request.state.company_role = payload.get("company_role")
+        request.state.account_type = payload.get("account_type", "wholesale")
 
         # ── Company suspension check ──────────────────────────────────────────
         company_id = request.state.company_id

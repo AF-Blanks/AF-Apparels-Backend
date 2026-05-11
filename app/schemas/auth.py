@@ -63,3 +63,13 @@ class ResetPasswordRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(..., min_length=8)
+
+
+class ActivateAccountSchema(BaseModel):
+    token: str
+    password: str = Field(..., min_length=8)
+    confirm_password: str
+
+
+class ResendActivationSchema(BaseModel):
+    email: EmailStr

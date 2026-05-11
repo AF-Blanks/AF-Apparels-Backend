@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings, settings
 
 from app.core.exceptions import (
+    AccountNotActivatedError,
     AccountSuspendedError,
     ConflictError,
     NotFoundError,
@@ -36,7 +37,10 @@ REFRESH_TOKEN_EXPIRE_DAYS = 7
 
 def _build_access_token_claims(user: User, membership: CompanyUser | None) -> dict:
     """Build extra JWT claims from user + company membership."""
-    claims: dict = {"is_admin": user.is_admin}
+    claims: dict = {
+        "is_admin": user.is_admin,
+        "account_type": getattr(user, "account_type", "wholesale"),
+    }
     if membership:
         claims["company_id"] = str(membership.company_id)
         claims["company_role"] = membership.role
@@ -53,7 +57,11 @@ class AuthService:
         result = await self.db.execute(select(User).where(User.email == email.lower()))
         user = result.scalar_one_or_none()
 
-        if not user or not verify_password(password, user.hashed_password):
+        # Retail user who hasn't activated yet — surface specific error before password check
+        if user and getattr(user, "account_type", "wholesale") == "retail" and not user.is_active:
+            raise AccountNotActivatedError()
+
+        if not user or not verify_password(password, user.hashed_password or ""):
             raise UnauthorizedError("Invalid email or password")
 
         if not user.is_active:
@@ -61,7 +69,8 @@ class AuthService:
 
         # Check company status for non-admin users
         membership: CompanyUser | None = None
-        if not user.is_admin:
+        is_retail = getattr(user, "account_type", "wholesale") == "retail"
+        if not user.is_admin and not is_retail:
             mem_result = await self.db.execute(
                 select(CompanyUser)
                 .where(CompanyUser.user_id == user.id, CompanyUser.is_active == True)

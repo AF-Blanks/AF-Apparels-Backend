@@ -457,6 +457,41 @@ class EmailService:
             body_html=self._base_template(content_html),
         )
 
+    def send_retail_account_activation(
+        self,
+        customer_email: str,
+        first_name: str,
+        activation_url: str,
+        order_number: str | None = None,
+    ) -> bool:
+        """Send retail account activation email after guest checkout."""
+        order_line = (
+            f'<p style="color:#374151;margin:0 0 16px">'
+            f'Your order <strong style="color:#1B3A5C">{order_number}</strong> '
+            f'has been placed and is being processed.</p>'
+        ) if order_number else ""
+
+        content_html = (
+            f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
+            f'Welcome to AF Apparels, {first_name}!</h2>'
+            f'{order_line}'
+            f'<p style="color:#374151;margin:0 0 16px">'
+            f'Create a password to access your order history, view invoices, '
+            f'and manage your account anytime.</p>'
+            f'<p style="color:#6b7280;font-size:13px;margin:0 0 24px">'
+            f'This link expires in 7 days.</p>'
+            f'<p style="margin:0">'
+            f'<a href="{activation_url}" style="background:#E8242A;color:#fff;'
+            f'padding:12px 28px;border-radius:6px;font-weight:700;'
+            f'text-decoration:none;font-size:14px;display:inline-block">'
+            f'Activate My Account →</a></p>'
+        )
+        return self._send_via_resend(
+            to_email=customer_email,
+            subject="Activate Your AF Apparels Account",
+            body_html=self._base_template(content_html),
+        )
+
     @staticmethod
     def get_available_variables(tpl: EmailTemplate) -> list[str]:
         if not tpl.available_variables:
