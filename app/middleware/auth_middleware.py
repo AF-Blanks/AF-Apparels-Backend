@@ -22,6 +22,7 @@ PUBLIC_PATHS = {
     "/api/v1/refresh",
     "/api/v1/activate-account",
     "/api/v1/resend-activation",
+    "/api/v1/validate-activation-token",
     "/api/v1/products",
     "/api/v1/products/categories",
     "/api/v1/webhooks/stripe",

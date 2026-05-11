@@ -12,6 +12,7 @@ from app.core.config import get_settings, settings
 
 from app.core.exceptions import (
     AccountNotActivatedError,
+    AccountPendingApprovalError,
     AccountSuspendedError,
     ConflictError,
     NotFoundError,
@@ -57,9 +58,12 @@ class AuthService:
         result = await self.db.execute(select(User).where(User.email == email.lower()))
         user = result.scalar_one_or_none()
 
-        # Retail user who hasn't activated yet — surface specific error before password check
+        # Retail user who hasn't activated yet (no password) or is pending admin approval
         if user and getattr(user, "account_type", "wholesale") == "retail" and not user.is_active:
-            raise AccountNotActivatedError()
+            if user.activation_token:
+                raise AccountNotActivatedError()
+            else:
+                raise AccountPendingApprovalError()
 
         if not user or not verify_password(password, user.hashed_password or ""):
             raise UnauthorizedError("Invalid email or password")

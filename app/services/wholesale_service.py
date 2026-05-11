@@ -113,6 +113,10 @@ class WholesaleService:
                 is_active=True,
             )
             self.db.add(membership)
+            # Retail users who submitted the activation form are inactive until approval
+            if not user.is_active:
+                user.is_active = True
+                user.account_type = "wholesale"
 
         # Update application
         application.status = "approved"

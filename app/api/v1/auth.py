@@ -135,13 +135,45 @@ async def reset_password(
     await service.reset_password(data.token, data.new_password)
 
 
+@router.get("/validate-activation-token")
+async def validate_activation_token(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Validate a retail activation token and return pre-fill data."""
+    from app.models.user import User
+
+    result = await db.execute(
+        select(User).where(User.activation_token == token)
+    )
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=400, detail="INVALID_TOKEN")
+
+    if user.activation_token_expires and user.activation_token_expires < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="TOKEN_EXPIRED")
+
+    return {
+        "valid": True,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "email": user.email,
+    }
+
+
 @router.post("/activate-account")
 async def activate_account(
     payload: ActivateAccountSchema,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Set password and activate a retail account using an activation token."""
+    """Submit wholesale application form from a retail activation link.
+
+    Sets the user's password and creates a WholesaleApplication for admin review.
+    User stays inactive until admin approves.
+    """
     from app.models.user import User
+    from app.models.wholesale import WholesaleApplication
 
     if payload.password != payload.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
@@ -155,32 +187,93 @@ async def activate_account(
         raise HTTPException(status_code=400, detail="Invalid activation token")
 
     if user.activation_token_expires and user.activation_token_expires < datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="Activation token expired. Request a new one.")
+        raise HTTPException(status_code=400, detail="TOKEN_EXPIRED")
 
+    # Update user — set password and profile, but keep inactive (pending admin approval)
+    user.first_name = payload.first_name
+    user.last_name = payload.last_name
+    user.phone = payload.phone
     user.hashed_password = hash_password(payload.password)
-    user.is_active = True
+    user.is_active = False  # admin must approve before they can log in
     user.activation_token = None
     user.activation_token_expires = None
-    await db.commit()
-    await db.refresh(user)
 
-    # Return JWT so the user is immediately logged in
-    access_token = create_access_token(
-        str(user.id),
-        extra_claims={"is_admin": False, "account_type": "retail"},
+    # Create WholesaleApplication so it appears in the admin approval queue
+    application = WholesaleApplication(
+        company_name=payload.company_name,
+        business_type=payload.business_type,
+        website=payload.website,
+        tax_id=payload.tax_id,
+        first_name=payload.first_name,
+        last_name=payload.last_name,
+        email=user.email,
+        phone=payload.phone,
+        company_email=payload.company_email,
+        address_line1=payload.address_line1,
+        address_line2=payload.address_line2,
+        city=payload.city,
+        state_province=payload.state_province,
+        postal_code=payload.postal_code,
+        country=payload.country,
+        how_heard=payload.how_heard,
+        secondary_business=payload.secondary_business,
+        num_employees=payload.num_employees,
+        num_sales_reps=payload.num_sales_reps,
+        status="pending",
     )
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": {
-            "id": str(user.id),
-            "email": user.email,
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "is_admin": False,
-            "account_type": "retail",
-        },
-    }
+    db.add(application)
+    await db.commit()
+
+    # Send emails (non-fatal)
+    from app.services.email_service import EmailService
+    email_svc = EmailService(db)
+    try:
+        email_svc.send_raw(
+            to_email=user.email,
+            subject="We Received Your Application — AF Apparels",
+            body_html=email_svc._base_template(
+                f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
+                f'Application Received! ✅</h2>'
+                f'<p style="color:#374151;margin:0 0 16px">Hi {payload.first_name},</p>'
+                f'<p style="color:#374151;margin:0 0 16px">'
+                f'We received your wholesale application for <b>{payload.company_name}</b>. '
+                f'Our team will review within 1–2 business days and notify you of our decision.</p>'
+                f'<p style="color:#374151;margin:0">Questions? Call <b>(214) 272-7213</b></p>'
+            ),
+        )
+    except Exception:
+        pass
+
+    if settings.ADMIN_NOTIFICATION_EMAIL:
+        try:
+            email_svc.send_raw(
+                to_email=settings.ADMIN_NOTIFICATION_EMAIL,
+                subject=f"New Wholesale Application (Retail Conversion): {payload.company_name}",
+                body_html=email_svc._base_template(
+                    f'<h2 style="color:#1B3A5C;font-size:20px;font-weight:800;margin:0 0 8px">'
+                    f'New Application (Retail → Wholesale)</h2>'
+                    f'<div style="background:#F9F8F4;border-radius:8px;padding:16px 20px;margin-bottom:20px">'
+                    f'<table style="width:100%">'
+                    f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Company</td>'
+                    f'<td style="font-size:13px;font-weight:700;text-align:right">{payload.company_name}</td></tr>'
+                    f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Name</td>'
+                    f'<td style="font-size:13px;text-align:right">{payload.first_name} {payload.last_name}</td></tr>'
+                    f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Email</td>'
+                    f'<td style="font-size:13px;text-align:right">{user.email}</td></tr>'
+                    f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Type</td>'
+                    f'<td style="font-size:13px;text-align:right">{payload.business_type}</td></tr>'
+                    f'</table></div>'
+                    f'<p style="margin:0">'
+                    f'<a href="{settings.FRONTEND_URL}/admin/customers" '
+                    f'style="background:#1B3A5C;color:#fff;padding:12px 24px;border-radius:6px;'
+                    f'font-weight:700;text-decoration:none;font-size:14px;display:inline-block">'
+                    f'Review Application →</a></p>'
+                ),
+            )
+        except Exception:
+            pass
+
+    return {"message": "Application submitted. We'll review within 1–2 business days."}
 
 
 @router.post("/resend-activation")

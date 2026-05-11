@@ -84,3 +84,8 @@ class AccountSuspendedError(ForbiddenError):
 class AccountNotActivatedError(ForbiddenError):
     error_code = "ACCOUNT_NOT_ACTIVATED"
     message = "Your account is not yet activated. Check your email for the activation link."
+
+
+class AccountPendingApprovalError(ForbiddenError):
+    error_code = "ACCOUNT_PENDING_APPROVAL"
+    message = "Your application is pending review. You'll receive an email once approved."
