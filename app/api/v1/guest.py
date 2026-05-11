@@ -89,6 +89,7 @@ class GuestCheckoutRequest(BaseModel):
     tax_amount: Decimal | None = None
     tax_rate: float | None = None
     tax_region: str | None = None
+    shipping_cost: Decimal | None = None
 
 
 class GuestOrderOut(BaseModel):
@@ -163,7 +164,7 @@ async def guest_checkout(
             "line_total": line_total,
         })
 
-    # 2. Shipping cost
+    # 2. Shipping cost — client value is authoritative when provided
     method = payload.shipping_method or "standard"
     if method == "will_call":
         shipping_cost = Decimal("0")
@@ -171,6 +172,8 @@ async def guest_checkout(
         shipping_cost = GUEST_SHIPPING_EXPEDITED
     else:
         shipping_cost = GUEST_SHIPPING_STANDARD
+    if payload.shipping_cost and payload.shipping_cost > 0:
+        shipping_cost = payload.shipping_cost
 
     tax_amount_val = payload.tax_amount or Decimal("0")
     total = subtotal + shipping_cost + tax_amount_val

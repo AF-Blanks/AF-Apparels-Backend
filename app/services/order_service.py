@@ -210,8 +210,8 @@ class OrderService:
             if shipping_method == "expedited":
                 shipping_cost += Decimal("45.00")
 
-        # If server-side calculation yielded $0 and client sent a shipping_cost, use it
-        if shipping_cost == Decimal("0") and confirm.shipping_cost and confirm.shipping_cost > 0:
+        # Client-provided shipping_cost is authoritative — single source of truth with display
+        if confirm.shipping_cost and confirm.shipping_cost > 0:
             shipping_cost = Decimal(str(confirm.shipping_cost))
 
         tax_amount_val = Decimal(str(confirm.tax_amount or 0))

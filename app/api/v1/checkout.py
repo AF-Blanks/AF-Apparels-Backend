@@ -207,7 +207,7 @@ async def _confirm_checkout_inner(
             base_shipping = Decimal("0.00")
             expedited_surcharge = Decimal("0.00")
         else:
-            base_shipping = cart.validation.estimated_shipping
+            base_shipping = Decimal(str(payload.shipping_cost)) if payload.shipping_cost else cart.validation.estimated_shipping
             expedited_surcharge = Decimal("45.00") if payload.shipping_method == "expedited" else Decimal("0")
 
         # Validate and apply discount code if provided

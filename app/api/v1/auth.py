@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 
@@ -228,6 +228,15 @@ async def activate_account(
         role="owner",
     )
     db.add(company_user)
+
+    # Link any previous guest orders with this email to the new account
+    from app.models.order import Order
+    await db.execute(
+        sql_update(Order)
+        .where(Order.guest_email == user.email, Order.placed_by_id == None)
+        .values(placed_by_id=user.id, company_id=company.id)
+    )
+
     await db.commit()
 
     # Send the same approval email admin sends when approving a wholesale customer (non-fatal)
