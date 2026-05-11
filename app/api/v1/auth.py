@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 
 from app.core.database import get_db
-from app.core.security import get_token_jti, hash_password, create_access_token
+from app.core.security import get_token_jti, hash_password, create_access_token, create_refresh_token
 from app.schemas.auth import (
     ActivateAccountSchema,
     ChangePasswordRequest,
@@ -189,12 +189,12 @@ async def activate_account(
     if user.activation_token_expires and user.activation_token_expires < datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="TOKEN_EXPIRED")
 
-    # Update user — set password and profile, but keep inactive (pending admin approval)
+    # Update user — set password and profile, activate immediately as retail
     user.first_name = payload.first_name
     user.last_name = payload.last_name
     user.phone = payload.phone
     user.hashed_password = hash_password(payload.password)
-    user.is_active = False  # admin must approve before they can log in
+    user.is_active = True  # retail activation — direct login, no admin approval required
     user.activation_token = None
     user.activation_token_expires = None
 
@@ -230,15 +230,19 @@ async def activate_account(
     try:
         email_svc.send_raw(
             to_email=user.email,
-            subject="We Received Your Application — AF Apparels",
+            subject="Your AF Apparels Account is Active!",
             body_html=email_svc._base_template(
                 f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
-                f'Application Received! ✅</h2>'
-                f'<p style="color:#374151;margin:0 0 16px">Hi {payload.first_name},</p>'
+                f'Welcome, {payload.first_name}! 🎉</h2>'
+                f'<p style="color:#374151;margin:0 0 16px">Your account is now active and ready to use.</p>'
                 f'<p style="color:#374151;margin:0 0 16px">'
-                f'We received your wholesale application for <b>{payload.company_name}</b>. '
-                f'Our team will review within 1–2 business days and notify you of our decision.</p>'
-                f'<p style="color:#374151;margin:0">Questions? Call <b>(214) 272-7213</b></p>'
+                f'We also received your wholesale application for <b>{payload.company_name}</b>. '
+                f'Our team will be in touch if we have any questions.</p>'
+                f'<p style="margin:0">'
+                f'<a href="{settings.FRONTEND_URL}/account/orders" '
+                f'style="background:#1B3A5C;color:#fff;padding:12px 24px;border-radius:6px;'
+                f'font-weight:700;text-decoration:none;font-size:14px;display:inline-block">'
+                f'View My Account →</a></p>'
             ),
         )
     except Exception:
@@ -273,7 +277,21 @@ async def activate_account(
         except Exception:
             pass
 
-    return {"message": "Application submitted. We'll review within 1–2 business days."}
+    access_token = create_access_token(str(user.id), extra_claims={"account_type": "retail", "is_admin": False})
+    refresh_token = create_refresh_token(str(user.id))
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "account_type": "retail",
+            "is_admin": False,
+        },
+    }
 
 
 @router.post("/resend-activation")

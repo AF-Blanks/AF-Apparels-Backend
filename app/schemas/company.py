@@ -8,8 +8,8 @@ class CompanyListItem(BaseModel):
     id: UUID
     name: str
     status: str
-    pricing_tier_id: UUID | None
-    shipping_tier_id: UUID | None
+    pricing_tier_id: UUID | None = None
+    shipping_tier_id: UUID | None = None
     order_count: int = 0
     total_spend: Decimal = Decimal("0")
     created_at: datetime
@@ -19,6 +19,7 @@ class CompanyListItem(BaseModel):
     contact_name: str | None = None
     last_order_date: datetime | None = None
     tags: list[str] = []
+    account_type: str = "wholesale"
 
     model_config = {"from_attributes": True}
 

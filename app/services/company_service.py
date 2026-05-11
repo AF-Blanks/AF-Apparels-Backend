@@ -111,7 +111,56 @@ class CompanyService:
                 "contact_name": owner.get("contact_name"),
                 "last_order_date": last_order_map.get(company.id),
                 "tags": company.tags or [],
+                "account_type": "wholesale",
             })
+
+        # Include retail users (no company record) — only when no company-specific filters applied
+        if not q and not status:
+            retail_result = await self.db.execute(
+                select(User).where(User.account_type == "retail", User.is_active == True)
+                .order_by(User.created_at.desc())
+            )
+            retail_users = retail_result.scalars().all()
+
+            # Fetch order counts for retail users
+            retail_ids = [u.id for u in retail_users]
+            retail_order_counts: dict = {}
+            retail_order_totals: dict = {}
+            if retail_ids:
+                rc = await self.db.execute(
+                    select(Order.placed_by_id, func.count(Order.id).label("cnt"))
+                    .where(Order.placed_by_id.in_(retail_ids))
+                    .group_by(Order.placed_by_id)
+                )
+                for uid, cnt in rc.all():
+                    retail_order_counts[uid] = cnt
+                rs = await self.db.execute(
+                    select(Order.placed_by_id, func.coalesce(func.sum(Order.total), 0).label("total"))
+                    .where(Order.placed_by_id.in_(retail_ids), Order.payment_status == "paid")
+                    .group_by(Order.placed_by_id)
+                )
+                for uid, tot in rs.all():
+                    retail_order_totals[uid] = tot
+
+            for u in retail_users:
+                companies.append({
+                    "id": u.id,
+                    "name": f"{u.first_name} {u.last_name}".strip() or u.email,
+                    "status": "active",
+                    "pricing_tier_id": None,
+                    "shipping_tier_id": None,
+                    "order_count": retail_order_counts.get(u.id, 0),
+                    "total_spend": Decimal(str(retail_order_totals.get(u.id, 0))),
+                    "created_at": u.created_at,
+                    "email": u.email,
+                    "phone": u.phone,
+                    "contact_name": None,
+                    "last_order_date": None,
+                    "tags": [],
+                    "account_type": "retail",
+                })
+            total += len(retail_users)
+
         return companies, total
 
     async def _get_company_orm(self, company_id: UUID) -> Company:
