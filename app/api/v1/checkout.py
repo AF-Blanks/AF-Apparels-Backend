@@ -212,7 +212,7 @@ async def _confirm_checkout_inner(
 
         # Validate and apply discount code if provided
         if payload.discount_code:
-            cart_total_for_coupon = float(cart.subtotal + base_shipping + expedited_surcharge)
+            cart_total_for_coupon = float(cart.subtotal)  # discount applies to subtotal only, not shipping
             coupon_discount_dc, coupon_error = await validate_discount_code(
                 payload.discount_code,
                 cart_total_for_coupon,
