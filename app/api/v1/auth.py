@@ -167,13 +167,13 @@ async def activate_account(
     payload: ActivateAccountSchema,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Submit wholesale application form from a retail activation link.
+    """Submit account activation form from a retail activation link.
 
-    Sets the user's password, creates a Company + CompanyUser (owner), and creates
-    a WholesaleApplication for admin review. User is activated immediately as retail.
+    Mirrors what admin does when approving a wholesale customer: creates a Company,
+    links the user as owner, marks active, and sends the approval email — but
+    automatically. Only difference from wholesale: account_type stays 'retail'.
     """
     from app.models.user import User
-    from app.models.wholesale import WholesaleApplication
     from app.models.company import Company, CompanyUser
 
     if payload.password != payload.confirm_password:
@@ -228,85 +228,19 @@ async def activate_account(
         role="owner",
     )
     db.add(company_user)
-
-    # Create WholesaleApplication so it appears in the admin approval queue
-    application = WholesaleApplication(
-        company_name=payload.company_name,
-        business_type=payload.business_type,
-        website=payload.website,
-        tax_id=payload.tax_id,
-        first_name=payload.first_name,
-        last_name=payload.last_name,
-        email=user.email,
-        phone=payload.phone,
-        company_email=payload.company_email,
-        address_line1=payload.address_line1,
-        address_line2=payload.address_line2,
-        city=payload.city,
-        state_province=payload.state_province,
-        postal_code=payload.postal_code,
-        country=payload.country,
-        how_heard=payload.how_heard,
-        secondary_business=payload.secondary_business,
-        num_employees=payload.num_employees,
-        num_sales_reps=payload.num_sales_reps,
-        status="pending",
-    )
-    db.add(application)
     await db.commit()
 
-    # Send emails (non-fatal)
+    # Send the same approval email admin sends when approving a wholesale customer (non-fatal)
     from app.services.email_service import EmailService
     email_svc = EmailService(db)
     try:
-        email_svc.send_raw(
+        email_svc.send_application_approved(
             to_email=user.email,
-            subject="Your AF Apparels Account is Active!",
-            body_html=email_svc._base_template(
-                f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
-                f'Welcome, {payload.first_name}! 🎉</h2>'
-                f'<p style="color:#374151;margin:0 0 16px">Your account is now active and ready to use.</p>'
-                f'<p style="color:#374151;margin:0 0 16px">'
-                f'We also received your wholesale application for <b>{payload.company_name}</b>. '
-                f'Our team will be in touch if we have any questions.</p>'
-                f'<p style="margin:0">'
-                f'<a href="{settings.FRONTEND_URL}/account/orders" '
-                f'style="background:#1B3A5C;color:#fff;padding:12px 24px;border-radius:6px;'
-                f'font-weight:700;text-decoration:none;font-size:14px;display:inline-block">'
-                f'View My Account →</a></p>'
-            ),
+            first_name=user.first_name,
+            company_name=payload.company_name,
         )
     except Exception:
         pass
-
-    if settings.ADMIN_NOTIFICATION_EMAIL:
-        try:
-            email_svc.send_raw(
-                to_email=settings.ADMIN_NOTIFICATION_EMAIL,
-                subject=f"New Wholesale Application (Retail Conversion): {payload.company_name}",
-                body_html=email_svc._base_template(
-                    f'<h2 style="color:#1B3A5C;font-size:20px;font-weight:800;margin:0 0 8px">'
-                    f'New Application (Retail → Wholesale)</h2>'
-                    f'<div style="background:#F9F8F4;border-radius:8px;padding:16px 20px;margin-bottom:20px">'
-                    f'<table style="width:100%">'
-                    f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Company</td>'
-                    f'<td style="font-size:13px;font-weight:700;text-align:right">{payload.company_name}</td></tr>'
-                    f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Name</td>'
-                    f'<td style="font-size:13px;text-align:right">{payload.first_name} {payload.last_name}</td></tr>'
-                    f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Email</td>'
-                    f'<td style="font-size:13px;text-align:right">{user.email}</td></tr>'
-                    f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Type</td>'
-                    f'<td style="font-size:13px;text-align:right">{payload.business_type}</td></tr>'
-                    f'</table></div>'
-                    f'<p style="margin:0">'
-                    f'<a href="{settings.FRONTEND_URL}/admin/customers" '
-                    f'style="background:#1B3A5C;color:#fff;padding:12px 24px;border-radius:6px;'
-                    f'font-weight:700;text-decoration:none;font-size:14px;display:inline-block">'
-                    f'Review Application →</a></p>'
-                ),
-            )
-        except Exception:
-            pass
 
     access_token = create_access_token(
         str(user.id),
