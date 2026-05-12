@@ -1367,13 +1367,15 @@ async def list_statements(
 ):
     """Return statement transactions with running balance."""
     import uuid as _uuid
-    from sqlalchemy import func as _func
+    from sqlalchemy import func as _func, or_
 
     company_id = getattr(request.state, "company_id", None)
     if not company_id:
         raise ForbiddenError("Company account required")
 
     company_uuid = _uuid.UUID(str(company_id))
+    user_id = getattr(request.state, "user_id", None)
+    user_uuid = _uuid.UUID(str(user_id)) if user_id else None
 
     # 1. Try StatementTransaction records (wholesale checkout path)
     q = select(StatementTransaction).where(StatementTransaction.company_id == company_uuid)
@@ -1407,9 +1409,13 @@ async def list_statements(
             })
     else:
         # 2. Fallback: synthesize from Orders (retail/guest orders have no StatementTransactions)
+        # Include orders linked by company_id OR by placed_by_id with no company (pre-activation guest orders)
         from app.models.order import Order as _Order
+        company_filter = _Order.company_id == company_uuid
+        if user_uuid:
+            company_filter = or_(company_filter, (_Order.placed_by_id == user_uuid) & (_Order.company_id == None))
         order_q = select(_Order).where(
-            _Order.company_id == company_uuid,
+            company_filter,
             _Order.status != "cancelled",
         )
         if date_from:
@@ -1900,20 +1906,27 @@ async def get_sales_history(
 ):
     """Returns order sales grouped by product or showing price details for a given year."""
     import uuid as _uuid
+    from sqlalchemy import or_
 
     company_id = getattr(request.state, "company_id", None)
     if not company_id:
         raise ForbiddenError("Company account required")
 
     company_uuid = _uuid.UUID(str(company_id))
+    user_id = getattr(request.state, "user_id", None)
+    user_uuid = _uuid.UUID(str(user_id)) if user_id else None
 
     from app.models.order import Order, OrderItem
     from sqlalchemy import extract
 
+    company_filter = Order.company_id == company_uuid
+    if user_uuid:
+        company_filter = or_(company_filter, (Order.placed_by_id == user_uuid) & (Order.company_id == None))
+
     q = (
         select(OrderItem, Order.created_at, Order.order_number)
         .join(Order, Order.id == OrderItem.order_id)
-        .where(Order.company_id == company_uuid)
+        .where(company_filter)
         .where(Order.status.notin_(["cancelled", "refunded"]))
     )
     if year:

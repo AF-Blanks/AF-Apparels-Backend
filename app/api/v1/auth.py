@@ -229,12 +229,20 @@ async def activate_account(
     )
     db.add(company_user)
 
-    # Link any previous guest orders with this email to the new account
+    # Link any previous guest orders with this email to the new account.
+    # Two cases:
+    # 1. Orders placed before account existed — placed_by_id is NULL (set by guest.py step 7 never ran, or pre-PHR#159)
+    # 2. Orders placed after PHR#159 — guest.py step 7 already set placed_by_id but company_id is still NULL
     from app.models.order import Order
     await db.execute(
         sql_update(Order)
         .where(Order.guest_email == user.email, Order.placed_by_id == None)
         .values(placed_by_id=user.id, company_id=company.id)
+    )
+    await db.execute(
+        sql_update(Order)
+        .where(Order.guest_email == user.email, Order.placed_by_id == user.id, Order.company_id == None)
+        .values(company_id=company.id)
     )
 
     await db.commit()
