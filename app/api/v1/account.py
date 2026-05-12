@@ -1366,13 +1366,17 @@ async def list_statements(
     db: AsyncSession = Depends(get_db),
 ):
     """Return statement transactions with running balance."""
+    import uuid as _uuid
+    from sqlalchemy import func as _func
+
     company_id = getattr(request.state, "company_id", None)
     if not company_id:
         raise ForbiddenError("Company account required")
 
-    q = select(StatementTransaction).where(
-        StatementTransaction.company_id == company_id
-    )
+    company_uuid = _uuid.UUID(str(company_id))
+
+    # 1. Try StatementTransaction records (wholesale checkout path)
+    q = select(StatementTransaction).where(StatementTransaction.company_id == company_uuid)
     if date_from:
         q = q.where(StatementTransaction.transaction_date >= date_from)
     if date_to:
@@ -1384,24 +1388,65 @@ async def list_statements(
 
     running_balance = 0.0
     items = []
-    for txn in transactions:
-        if txn.transaction_type == "charge":
-            running_balance += float(txn.amount)
-        else:
-            running_balance -= float(txn.amount)
-        items.append({
-            "id": str(txn.id),
-            "date": txn.transaction_date,
-            "description": txn.description,
-            "type": txn.transaction_type,
-            "amount": float(txn.amount),
-            "reference": txn.reference_number,
-            "order_id": str(txn.order_id) if txn.order_id else None,
-            "running_balance": round(running_balance, 2),
-        })
 
-    total_charges = sum(float(t.amount) for t in transactions if t.transaction_type == "charge")
-    total_payments = sum(float(t.amount) for t in transactions if t.transaction_type in ("payment", "credit", "refund"))
+    if transactions:
+        for txn in transactions:
+            if txn.transaction_type == "charge":
+                running_balance += float(txn.amount)
+            else:
+                running_balance -= float(txn.amount)
+            items.append({
+                "id": str(txn.id),
+                "date": txn.transaction_date,
+                "description": txn.description,
+                "type": txn.transaction_type,
+                "amount": float(txn.amount),
+                "reference": txn.reference_number,
+                "order_id": str(txn.order_id) if txn.order_id else None,
+                "running_balance": round(running_balance, 2),
+            })
+    else:
+        # 2. Fallback: synthesize from Orders (retail/guest orders have no StatementTransactions)
+        from app.models.order import Order as _Order
+        order_q = select(_Order).where(
+            _Order.company_id == company_uuid,
+            _Order.status != "cancelled",
+        )
+        if date_from:
+            order_q = order_q.where(_func.date(_Order.created_at) >= date_from)
+        if date_to:
+            order_q = order_q.where(_func.date(_Order.created_at) <= date_to)
+        order_q = order_q.order_by(_Order.created_at.asc())
+        orders = (await db.execute(order_q)).scalars().all()
+
+        for order in orders:
+            amount = round(float(order.total or 0), 2)
+            running_balance = round(running_balance + amount, 2)
+            items.append({
+                "id": str(order.id),
+                "date": order.created_at.strftime("%Y-%m-%d"),
+                "description": f"Order {order.order_number}",
+                "type": "charge",
+                "amount": amount,
+                "reference": order.order_number,
+                "order_id": str(order.id),
+                "running_balance": running_balance,
+            })
+            if order.payment_status == "paid":
+                running_balance = round(running_balance - amount, 2)
+                items.append({
+                    "id": f"{order.id}-pmt",
+                    "date": order.created_at.strftime("%Y-%m-%d"),
+                    "description": f"Payment for {order.order_number}",
+                    "type": "payment",
+                    "amount": amount,
+                    "reference": order.order_number,
+                    "order_id": str(order.id),
+                    "running_balance": running_balance,
+                })
+
+    total_charges = sum(i["amount"] for i in items if i["type"] == "charge")
+    total_payments = sum(i["amount"] for i in items if i["type"] != "charge")
 
     return {
         "items": items,
@@ -1854,9 +1899,13 @@ async def get_sales_history(
     db: AsyncSession = Depends(get_db),
 ):
     """Returns order sales grouped by product or showing price details for a given year."""
+    import uuid as _uuid
+
     company_id = getattr(request.state, "company_id", None)
     if not company_id:
         raise ForbiddenError("Company account required")
+
+    company_uuid = _uuid.UUID(str(company_id))
 
     from app.models.order import Order, OrderItem
     from sqlalchemy import extract
@@ -1864,7 +1913,7 @@ async def get_sales_history(
     q = (
         select(OrderItem, Order.created_at, Order.order_number)
         .join(Order, Order.id == OrderItem.order_id)
-        .where(Order.company_id == company_id)
+        .where(Order.company_id == company_uuid)
         .where(Order.status.notin_(["cancelled", "refunded"]))
     )
     if year:
