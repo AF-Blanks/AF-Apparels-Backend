@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel
@@ -44,6 +44,7 @@ class Order(BaseModel):
 
     po_number: Mapped[str | None] = mapped_column(String(100), index=True)
     notes: Mapped[str | None] = mapped_column(Text)
+    timeline: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=list)
 
     # Shipping address snapshot
     shipping_address_id: Mapped[uuid.UUID | None] = mapped_column(

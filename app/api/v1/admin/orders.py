@@ -498,6 +498,7 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
         ach_account_last4=getattr(order, "ach_account_last4", None),
         ach_account_type=getattr(order, "ach_account_type", None),
         ach_verified=getattr(order, "ach_verified", None),
+        timeline=order.timeline or [],
     )
 
 
@@ -608,6 +609,7 @@ async def update_admin_order(
     payload: OrderUpdateRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    from sqlalchemy import text as _text
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
     if not order:
         raise NotFoundError(f"Order {order_id} not found")
@@ -615,6 +617,21 @@ async def update_admin_order(
     old_status = order.status
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(order, field, value)
+
+    if payload.status and payload.status != old_status:
+        entry = {
+            "status": payload.status,
+            "message": f"Status changed to {payload.status.replace('_', ' ').title()}",
+            "created_by": "admin",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        current = list(order.timeline or [])
+        current.append(entry)
+        await db.execute(
+            _text("UPDATE orders SET timeline = :tl::jsonb WHERE id = :oid"),
+            {"tl": _json.dumps(current), "oid": str(order_id)},
+        )
+
     await db.commit()
 
     if payload.status and payload.status != old_status:
@@ -629,6 +646,7 @@ async def update_order_status(
     payload: OrderStatusUpdate,
     db: AsyncSession = Depends(get_db),
 ):
+    from sqlalchemy import text as _text
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -644,6 +662,19 @@ async def update_order_status(
         order.courier_service = payload.courier_service
     if payload.status == "shipped" and not order.shipped_at:
         order.shipped_at = datetime.now(timezone.utc)
+
+    entry = {
+        "status": payload.status,
+        "message": f"Status changed to {payload.status.replace('_', ' ').title()}",
+        "created_by": "admin",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    current = list(order.timeline or [])
+    current.append(entry)
+    await db.execute(
+        _text("UPDATE orders SET timeline = :tl::jsonb WHERE id = :oid"),
+        {"tl": _json.dumps(current), "oid": str(order_id)},
+    )
 
     await db.commit()
 

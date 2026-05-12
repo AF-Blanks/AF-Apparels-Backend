@@ -179,6 +179,8 @@ class AdminOrderDetail(OrderOut):
     ach_account_last4: str | None = None
     ach_account_type: str | None = None
     ach_verified: bool | None = None
+    # Order timeline
+    timeline: list[dict] = []
 
     model_config = {"from_attributes": True}
 
