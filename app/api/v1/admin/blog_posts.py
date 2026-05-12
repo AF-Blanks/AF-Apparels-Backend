@@ -5,7 +5,7 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import String, Text, Date, ARRAY, select
+from sqlalchemy import String, Text, Date, ARRAY, select, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
@@ -36,7 +36,7 @@ class BlogPost(Base):
     keywords: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     og_image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default="now()")
-    updated_at: Mapped[datetime] = mapped_column(server_default="now()", onupdate="now()")
+    updated_at: Mapped[datetime] = mapped_column(server_default="now()", onupdate=func.now())
 
 
 class BlogPostCreate(BaseModel):

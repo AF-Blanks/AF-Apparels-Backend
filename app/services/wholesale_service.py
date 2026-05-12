@@ -184,8 +184,12 @@ class WholesaleService:
         application.reviewed_by_id = admin_user_id
         application.admin_notes = data.admin_notes
         await self.db.flush()
+        await self.db.commit()
 
-        from app.tasks.email_tasks import send_wholesale_rejected_email
-        send_wholesale_rejected_email.delay(str(application.id), data.rejection_reason)
+        try:
+            from app.tasks.email_tasks import send_wholesale_rejected_email
+            send_wholesale_rejected_email.delay(str(application.id), data.rejection_reason)
+        except Exception:
+            pass
 
         return application
