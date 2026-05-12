@@ -628,7 +628,7 @@ async def update_admin_order(
         current = list(order.timeline or [])
         current.append(entry)
         await db.execute(
-            _text("UPDATE orders SET timeline = :tl::jsonb WHERE id = :oid"),
+            _text("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
             {"tl": _json.dumps(current), "oid": str(order_id)},
         )
 
@@ -672,7 +672,7 @@ async def update_order_status(
     current = list(order.timeline or [])
     current.append(entry)
     await db.execute(
-        _text("UPDATE orders SET timeline = :tl::jsonb WHERE id = :oid"),
+        _text("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
         {"tl": _json.dumps(current), "oid": str(order_id)},
     )
 
