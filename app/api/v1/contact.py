@@ -50,16 +50,33 @@ def _send_contact_email(data: ContactRequest) -> None:
     <p style="white-space: pre-line">{data.message}</p>
     """
 
+    admin_to = getattr(settings, "ADMIN_NOTIFICATION_EMAIL", None) or settings.EMAIL_FROM_ADDRESS
     try:
         resend.Emails.send({
             "from": settings.EMAIL_FROM_ADDRESS,
-            "to": "info@afblanks.com",
+            "to": admin_to,
             "reply_to": data.email,
             "subject": f"[Contact] {dept_label} — {data.name}",
             "html": html,
         })
     except Exception as exc:
         print(f"Contact email failed: {exc}")
+
+    confirm_html = f"""
+    <p>Hi {data.name},</p>
+    <p>We've received your message and will respond within 4 business hours (Mon–Fri, 8AM–6PM CT).</p>
+    <p><strong>Your message:</strong><br/><em>{data.message}</em></p>
+    <p>— AF Apparels Team</p>
+    """
+    try:
+        resend.Emails.send({
+            "from": settings.EMAIL_FROM_ADDRESS,
+            "to": data.email,
+            "subject": "We received your message — AF Apparels",
+            "html": confirm_html,
+        })
+    except Exception as exc:
+        print(f"Contact confirmation email failed: {exc}")
 
 
 @router.post("/contact", status_code=202)
