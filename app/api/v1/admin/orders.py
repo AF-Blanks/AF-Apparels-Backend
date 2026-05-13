@@ -333,6 +333,7 @@ async def list_admin_orders(
             is_guest_order=order.is_guest_order,
             guest_email=order.guest_email,
             guest_name=order.guest_name,
+            timeline=order.timeline or [],
         ))
 
     return PaginatedResponse(items=items, total=total, page=page, page_size=page_size, pages=(total + page_size - 1) // page_size)

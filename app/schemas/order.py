@@ -144,6 +144,8 @@ class AdminOrderListItem(BaseModel):
     is_guest_order: bool = False
     guest_email: str | None = None
     guest_name: str | None = None
+    # Timeline entries for customer activity feed
+    timeline: list[dict] = []
 
     model_config = {"from_attributes": True}
 
