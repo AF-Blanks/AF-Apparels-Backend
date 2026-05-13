@@ -411,9 +411,10 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
     import uuid as _uuid
     from sqlalchemy import outerjoin
 
-    # Accept order_number (AF-...) or UUID
-    if order_id.upper().startswith("AF-"):
-        where_clause = Order.order_number == order_id.upper()
+    # Accept order_number (AF-..., DRAFT-...) or UUID
+    upper = order_id.upper()
+    if upper.startswith("AF-") or upper.startswith("DRAFT-"):
+        where_clause = Order.order_number == upper
     else:
         where_clause = Order.id == _uuid.UUID(order_id)
 
@@ -535,8 +536,8 @@ async def add_order_item(
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    if order.status not in ("pending", "confirmed"):
-        raise HTTPException(status_code=422, detail="Can only add items to pending orders")
+    if order.status in ("delivered", "cancelled", "refunded"):
+        raise HTTPException(status_code=422, detail="Cannot add items to a completed or cancelled order")
 
     variant_id_str = payload.get("variant_id")
     quantity = int(payload.get("quantity", 1))
@@ -595,7 +596,7 @@ async def remove_order_item(
         raise HTTPException(status_code=404, detail="Item not found")
 
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
-    if order and order.status in ("pending", "confirmed"):
+    if order and order.status not in ("delivered", "cancelled", "refunded"):
         order.subtotal = max(0, float(order.subtotal or 0) - float(item.line_total or 0))
         order.total = float(order.subtotal) + float(order.shipping_cost or 0) + float(order.tax_amount or 0)
 
