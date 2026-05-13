@@ -189,10 +189,10 @@ class EmailService:
             + content_html
             + '<div style="border-top:1px solid #e5e7eb;margin-top:28px;padding-top:20px">'
             '<p style="color:#9ca3af;font-size:12px;margin:0 0 4px">'
-            'Questions? Call <a href="tel:2142727213" style="color:#1B3A5C;font-weight:700">'
-            '(214)\xa0272-7213</a> or '
-            '<a href="mailto:info.afapparel@gmail.com" style="color:#1B3A5C">'
-            'info.afapparel@gmail.com</a></p>'
+            'Questions? Call <a href="tel:4693679753" style="color:#1B3A5C;font-weight:700">'
+            '+1\xa0(469)\xa0367-9753</a> or '
+            '<a href="mailto:info@afblanks.com" style="color:#1B3A5C">'
+            'info@afblanks.com</a></p>'
             f'{note_html}'
             '<p style="color:#9ca3af;font-size:12px;margin:4px 0 0">'
             '— AF Apparels Wholesale Team</p>'
@@ -215,11 +215,9 @@ class EmailService:
             f'<tr>'
             f'<td style="padding:9px 12px;font-size:13px;color:#111827;border-bottom:1px solid #f3f4f6">'
             f'{item.product_name}</td>'
-            f'<td style="padding:9px 12px;font-size:12px;color:#6b7280;font-family:monospace;'
-            f'border-bottom:1px solid #f3f4f6">{item.sku}</td>'
             f'<td style="padding:9px 12px;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6">'
             f'{item.color or "—"} / {item.size or "—"}</td>'
-            f'<td style="padding:9px 12px;font-size:13px;font-weight:700;text-align:right;'
+            f'<td style="padding:9px 12px;font-size:13px;font-weight:700;text-align:center;'
             f'border-bottom:1px solid #f3f4f6">{item.quantity}</td>'
             f'<td style="padding:9px 12px;font-size:13px;text-align:right;'
             f'border-bottom:1px solid #f3f4f6">${float(item.unit_price):.2f}</td>'
@@ -253,7 +251,7 @@ class EmailService:
 
         content_html = (
             f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
-            f'Order Confirmed!</h2>'
+            f'Order Received!</h2>'
             f'<p style="color:#374151;margin:0 0 24px">Hi {name}, your order has been received '
             f'and is now being processed.</p>'
             f'<div style="background:#F9F8F4;border-radius:8px;padding:16px 20px;margin-bottom:20px">'
@@ -268,15 +266,14 @@ class EmailService:
             f'<div style="font-size:20px;font-weight:800;color:#059669;margin-top:2px">'
             f'${float(order.total):.2f}</div></td>'
             f'</tr></table></div>'
-            f'<table style="width:100%;border-collapse:collapse;margin-bottom:20px">'
+            f'<table style="width:100%;border-collapse:collapse;margin-bottom:20px;'
+            f'table-layout:fixed;word-wrap:break-word">'
             f'<thead><tr style="background:#1B3A5C">'
             f'<th style="padding:8px 12px;color:#fff;text-align:left;font-size:11px;'
             f'font-weight:700;letter-spacing:.06em">PRODUCT</th>'
             f'<th style="padding:8px 12px;color:#fff;text-align:left;font-size:11px;'
-            f'font-weight:700;letter-spacing:.06em">SKU</th>'
-            f'<th style="padding:8px 12px;color:#fff;text-align:left;font-size:11px;'
             f'font-weight:700;letter-spacing:.06em">VARIANT</th>'
-            f'<th style="padding:8px 12px;color:#fff;text-align:right;font-size:11px;'
+            f'<th style="padding:8px 12px;color:#fff;text-align:center;font-size:11px;'
             f'font-weight:700;letter-spacing:.06em">QTY</th>'
             f'<th style="padding:8px 12px;color:#fff;text-align:right;font-size:11px;'
             f'font-weight:700;letter-spacing:.06em">UNIT</th>'
@@ -310,7 +307,7 @@ class EmailService:
 
         return self._send_via_resend(
             to_email=to_email,
-            subject=f"Order Confirmed — {order.order_number} | AF Apparels",
+            subject=f"Order Received — {order.order_number} | AF Apparels",
             body_html=self._base_template(content_html),
             attachments=attachments,
         )

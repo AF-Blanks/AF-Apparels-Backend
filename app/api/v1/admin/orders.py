@@ -34,18 +34,30 @@ router = APIRouter(prefix="/admin", tags=["admin-orders"])
 
 def _af_email(content_html: str) -> str:
     """Wrap content in the AF Apparels branded email shell."""
+    from app.core.config import settings as _cfg
+    logo_url = _cfg.LOGO_URL or f"{_cfg.FRONTEND_URL}/Af-apparel%20logo.png"
+    logo_html = (
+        f'<img src="{logo_url}" alt="AF Apparels" '
+        f'style="height:44px;width:auto;display:block;margin:0 auto" />'
+        if logo_url else
+        '<span style="font-size:28px;font-weight:900;color:#fff">AF APPARELS</span>'
+    )
     return (
-        '<div style="font-family:sans-serif;max-width:600px;margin:0 auto">'
-        '<div style="background:#080808;padding:24px;text-align:center">'
-        '<span style="font-size:36px;font-weight:900;color:#1A5CFF">A</span>'
-        '<span style="font-size:36px;font-weight:900;color:#E8242A">F</span>'
-        '<span style="color:#fff;font-size:14px;margin-left:8px;letter-spacing:.1em">APPARELS</span>'
+        '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\','
+        'Helvetica,Arial,sans-serif;max-width:600px;margin:0 auto;background:#ffffff">'
+        '<div style="background:#1B3A5C;padding:24px 32px;text-align:center;'
+        'border-bottom:3px solid #E8242A">'
+        + logo_html +
         '</div>'
         '<div style="padding:32px;background:#fff">'
         + content_html
-        + '<p style="color:#9ca3af;font-size:12px;margin-top:24px">'
-        'Questions? Call (214)&nbsp;272-7213 or email info.afapparel@gmail.com</p>'
-        '<p style="color:#9ca3af;font-size:12px">— AF Apparels Team</p>'
+        + '<div style="border-top:1px solid #e5e7eb;margin-top:28px;padding-top:20px">'
+        '<p style="color:#9ca3af;font-size:12px;margin:0 0 4px">'
+        'Questions? Call <a href="tel:4693679753" style="color:#1B3A5C;font-weight:700">'
+        '+1\xa0(469)\xa0367-9753</a> or '
+        '<a href="mailto:info@afblanks.com" style="color:#1B3A5C">info@afblanks.com</a></p>'
+        '<p style="color:#9ca3af;font-size:12px;margin:4px 0 0">— AF Apparels Team</p>'
+        '</div>'
         '</div></div>'
     )
 
@@ -64,7 +76,7 @@ async def _send_order_status_email(order: Order, new_status: str, db: AsyncSessi
 
         _LABEL = {
             "pending": "Order Received", "confirmed": "Order Confirmed",
-            "processing": "In Production", "ready_for_pickup": "Ready for Pickup",
+            "processing": "Processing", "ready_for_pickup": "Ready for Pickup",
             "shipped": "Shipped", "delivered": "Delivered",
             "cancelled": "Cancelled", "refunded": "Refunded",
         }
