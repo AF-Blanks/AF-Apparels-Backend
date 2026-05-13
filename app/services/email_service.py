@@ -312,46 +312,96 @@ class EmailService:
             attachments=attachments,
         )
 
-    def send_invoice(self, order: "Order", to_email: str) -> bool:  # type: ignore[name-defined]
-        """Send invoice PDF email to customer."""
+    def send_invoice(
+        self,
+        order: "Order",  # type: ignore[name-defined]
+        to_email: str,
+        payment_terms: str | None = None,
+        customer_name: str | None = None,
+    ) -> bool:
+        """Send invoice PDF email to customer with payment terms and bank details."""
+        from datetime import timedelta as _td
         from app.services.pdf_service import PDFService
+
+        terms = payment_terms or getattr(order, 'payment_terms', None) or 'net_30'
+        name = customer_name or "Valued Customer"
+
+        _terms_display = {
+            'net_30': ('Net 30 — due within 30 days', 30),
+            'net_15': ('Net 15 — due within 15 days', 15),
+            'due_on_receipt': ('Due on Receipt', 0),
+        }
+        terms_label, days = _terms_display.get(terms, _terms_display['net_30'])
+        from datetime import datetime as _dt
+        now = _dt.now()
+        due_str = (now + _td(days=days)).strftime('%B %d, %Y')
+        inv_date = now.strftime('%B %d, %Y')
+        order_num = getattr(order, 'order_number', 'N/A')
+        total_val = float(getattr(order, 'total', 0))
 
         content_html = (
             f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
-            f'Invoice for Order {order.order_number}</h2>'
+            f'Invoice — {order_num}</h2>'
             f'<p style="color:#374151;margin:0 0 20px">'
-            f'Please find your invoice attached. Payment is due within 30 days (Net 30).</p>'
+            f'Hi {name}, please find your invoice attached to this email.</p>'
             f'<div style="background:#F9F8F4;border-radius:8px;padding:16px 20px;margin-bottom:20px">'
-            f'<table style="width:100%"><tr>'
-            f'<td><div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;'
-            f'color:#6b7280">Order</div>'
-            f'<div style="font-size:18px;font-weight:800;color:#1B3A5C;margin-top:2px">'
-            f'{order.order_number}</div></td>'
-            f'<td style="text-align:right">'
-            f'<div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;'
-            f'color:#6b7280">Amount Due</div>'
-            f'<div style="font-size:18px;font-weight:800;color:#E8242A;margin-top:2px">'
-            f'${float(order.total):.2f}</div></td>'
-            f'</tr></table></div>'
+            f'<table style="width:100%;border-collapse:collapse">'
+            f'<tr><td style="font-size:12px;color:#6b7280;padding:5px 0">Order #</td>'
+            f'<td style="font-size:14px;font-weight:800;color:#1B3A5C;text-align:right">{order_num}</td></tr>'
+            f'<tr><td style="font-size:12px;color:#6b7280;padding:5px 0">Invoice Date</td>'
+            f'<td style="font-size:13px;color:#374151;text-align:right">{inv_date}</td></tr>'
+            f'<tr><td style="font-size:12px;color:#6b7280;padding:5px 0">Payment Terms</td>'
+            f'<td style="font-size:13px;color:#374151;text-align:right">{terms_label}</td></tr>'
+            f'<tr style="border-top:1px solid #e5e7eb">'
+            f'<td style="font-size:12px;color:#6b7280;font-weight:700;padding:10px 0 5px">Due Date</td>'
+            f'<td style="font-size:17px;font-weight:800;color:#E8242A;text-align:right;padding-top:10px">'
+            f'{due_str}</td></tr>'
+            f'<tr><td style="font-size:12px;color:#6b7280;padding:5px 0">Amount Due</td>'
+            f'<td style="font-size:17px;font-weight:800;color:#1B3A5C;text-align:right">'
+            f'${total_val:.2f}</td></tr>'
+            f'</table></div>'
+            f'<div style="background:#fff8e1;border:1px solid #ffe082;border-radius:8px;'
+            f'padding:16px 20px;margin-bottom:20px">'
+            f'<p style="margin:0 0 8px;font-weight:700;color:#1B3A5C;font-size:14px">Payment Instructions</p>'
+            f'<p style="margin:0 0 4px;font-size:13px;color:#444">'
+            f'Please pay via <strong>ACH / Bank Transfer</strong>:</p>'
+            f'<p style="margin:0;font-size:13px;color:#444;line-height:2">'
+            f'<strong>Bank:</strong> [YOUR BANK NAME]<br/>'
+            f'<strong>Account Name:</strong> AF Apparels Inc.<br/>'
+            f'<strong>Routing #:</strong> [ROUTING NUMBER]<br/>'
+            f'<strong>Account #:</strong> [ACCOUNT NUMBER]<br/>'
+            f'<strong style="color:#E8242A">Memo:</strong> '
+            f'Include <strong>{order_num}</strong> in payment memo</p>'
+            f'</div>'
             f'<p style="color:#6b7280;font-size:13px;margin:0">'
-            f'To pay, please reference your order number. For questions about this invoice '
-            f'contact your account manager.</p>'
+            f'The invoice PDF is attached. Questions? Call '
+            f'<a href="tel:4693679753" style="color:#1B3A5C">+1\xa0(469)\xa0367-9753</a> or '
+            f'<a href="mailto:info@afblanks.com" style="color:#1B3A5C">info@afblanks.com</a></p>'
         )
+
+        # Temporarily set payment_terms on the order object so PDF picks it up
+        _orig_terms = getattr(order, 'payment_terms', None)
+        try:
+            object.__setattr__(order, 'payment_terms', terms)
+        except AttributeError:
+            pass
 
         attachments = None
         try:
             pdf_bytes = PDFService().generate_invoice(order)
-            attachments = [{"filename": f"invoice-{order.order_number}.pdf", "content": pdf_bytes}]
+            attachments = [{"filename": f"invoice-{order_num}.pdf", "content": pdf_bytes}]
         except Exception as _exc:
             logger.warning("PDF generation failed (invoice): %s", _exc)
+        finally:
+            try:
+                object.__setattr__(order, 'payment_terms', _orig_terms)
+            except AttributeError:
+                pass
 
         return self._send_via_resend(
             to_email=to_email,
-            subject=f"Invoice — {order.order_number} | AF Apparels",
-            body_html=self._base_template(
-                content_html,
-                footer_note="Payment terms: Net 30. Please remit referencing your order number.",
-            ),
+            subject=f"Invoice {order_num} — Due {due_str} | AF Apparels",
+            body_html=self._base_template(content_html),
             attachments=attachments,
         )
 

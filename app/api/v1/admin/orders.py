@@ -26,6 +26,7 @@ from app.schemas.order import (
     RMACreate,
     RMAOut,
     RMAUpdateRequest,
+    SendInvoicePayload,
 )
 from app.types.api import PaginatedResponse
 
@@ -512,6 +513,10 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
         ach_account_last4=getattr(order, "ach_account_last4", None),
         ach_account_type=getattr(order, "ach_account_type", None),
         ach_verified=getattr(order, "ach_verified", None),
+        payment_terms=getattr(order, "payment_terms", None),
+        invoice_sent_at=getattr(order, "invoice_sent_at", None),
+        marked_paid_at=getattr(order, "marked_paid_at", None),
+        marked_paid_by=getattr(order, "marked_paid_by", None),
         timeline=order.timeline or [],
     )
 
@@ -651,6 +656,37 @@ async def update_admin_order(
     if payload.status and payload.status != old_status:
         await _send_order_status_email(order, payload.status, db)
 
+        # Auto-send invoice when a draft/pending order is confirmed
+        if payload.status == "confirmed" and old_status == "pending":
+            try:
+                from app.services.email_service import EmailService as _ES
+                from app.models.company import CompanyUser as _CU
+                from sqlalchemy import select as _sel
+
+                _to_email: str | None = None
+                _cust_name: str | None = None
+                if order.is_guest_order and order.guest_email:
+                    _to_email = order.guest_email
+                    _cust_name = order.guest_name
+                elif order.placed_by_id:
+                    _u = (await db.execute(_sel(User).where(User.id == order.placed_by_id))).scalar_one_or_none()
+                    if _u:
+                        _to_email = _u.email
+                        _cust_name = f"{_u.first_name} {_u.last_name}".strip() or None
+
+                if _to_email:
+                    _terms = getattr(order, "payment_terms", None) or "net_30"
+                    _ok = _ES(db).send_invoice(order, _to_email, payment_terms=_terms, customer_name=_cust_name)
+                    if _ok:
+                        await db.execute(
+                            _text("UPDATE orders SET invoice_sent_at = now() WHERE id = :oid"),
+                            {"oid": str(order_id)},
+                        )
+                        await db.commit()
+            except Exception as _e:
+                import logging as _lg
+                _lg.getLogger(__name__).warning("Auto invoice email failed: %s", _e)
+
     return {"message": "Order updated"}
 
 
@@ -749,6 +785,102 @@ async def resend_invoice_email(order_id: UUID, db: AsyncSession = Depends(get_db
         raise HTTPException(status_code=502, detail="Invoice email failed to send")
 
     return {"message": f"Invoice emailed to {to_email}"}
+
+
+@router.post("/orders/{order_id}/send-invoice", response_model=dict)
+async def send_invoice_email(
+    order_id: UUID,
+    payload: SendInvoicePayload,
+    request: "Request",
+    db: AsyncSession = Depends(get_db),
+):
+    """Send (or resend) invoice with specified payment terms to the customer."""
+    from sqlalchemy.orm import selectinload
+    from app.services.email_service import EmailService
+
+    result = await db.execute(
+        select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+    )
+    order = result.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Persist payment terms
+    order.payment_terms = payload.payment_terms
+    await db.commit()
+    await db.refresh(order)
+
+    # Resolve customer contact
+    to_email: str | None = None
+    customer_name: str | None = None
+    if order.is_guest_order and order.guest_email:
+        to_email = order.guest_email
+        customer_name = order.guest_name
+    elif order.placed_by_id:
+        user_row = (await db.execute(select(User).where(User.id == order.placed_by_id))).scalar_one_or_none()
+        if user_row:
+            to_email = user_row.email
+            customer_name = f"{user_row.first_name} {user_row.last_name}".strip() or None
+
+    if not to_email:
+        raise HTTPException(status_code=422, detail="No customer email found for this order")
+
+    ok = EmailService(db).send_invoice(order, to_email, payment_terms=payload.payment_terms, customer_name=customer_name)
+    if not ok:
+        raise HTTPException(status_code=502, detail="Invoice email failed to send")
+
+    from sqlalchemy import text as _t2
+    await db.execute(_t2("UPDATE orders SET invoice_sent_at = now() WHERE id = :oid"), {"oid": str(order_id)})
+    await db.commit()
+
+    return {"message": f"Invoice sent to {to_email}"}
+
+
+@router.post("/orders/{order_id}/mark-paid", response_model=dict)
+async def mark_order_paid(
+    order_id: UUID,
+    request: "Request",
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark an order as paid and record who marked it."""
+    from sqlalchemy import text as _t3
+
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Resolve admin name from request state
+    admin_name = "Admin"
+    admin_user_id = getattr(request.state, "user_id", None) if request else None
+    if admin_user_id:
+        _admin = (await db.execute(select(User).where(User.id == admin_user_id))).scalar_one_or_none()
+        if _admin:
+            admin_name = f"{_admin.first_name} {_admin.last_name}".strip() or "Admin"
+
+    order.payment_status = "paid"
+
+    # Write invoice tracking fields + timeline via raw SQL to avoid ORM column issues
+    timeline = list(order.timeline or [])
+    timeline.append({
+        "status": "paid",
+        "message": "Payment received — marked as paid",
+        "created_by": admin_name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    await db.execute(
+        _t3("""
+            UPDATE orders
+            SET payment_status = 'paid',
+                marked_paid_at  = now(),
+                marked_paid_by  = :admin,
+                timeline        = CAST(:tl AS jsonb)
+            WHERE id = :oid
+        """),
+        {"admin": admin_name, "tl": _json.dumps(timeline), "oid": str(order_id)},
+    )
+    await db.commit()
+
+    return {"message": "Order marked as paid"}
 
 
 @router.post("/orders/{order_id}/sync-quickbooks", response_model=dict)

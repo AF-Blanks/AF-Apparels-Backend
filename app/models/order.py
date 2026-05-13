@@ -100,6 +100,12 @@ class Order(BaseModel):
     ach_account_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     ach_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
 
+    # Invoice & payment tracking
+    payment_terms: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, default='net_30')
+    invoice_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    marked_paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    marked_paid_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
     # ── Schema compatibility aliases ────────────────────────────────────────────
     @property
     def order_notes(self) -> str | None:

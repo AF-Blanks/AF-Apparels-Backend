@@ -278,6 +278,23 @@ async def _ensure_content_tables() -> None:
                 END$$;
             """))
             await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='payment_terms') THEN
+                        ALTER TABLE orders ADD COLUMN payment_terms VARCHAR(20) DEFAULT 'net_30';
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='invoice_sent_at') THEN
+                        ALTER TABLE orders ADD COLUMN invoice_sent_at TIMESTAMPTZ;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='marked_paid_at') THEN
+                        ALTER TABLE orders ADD COLUMN marked_paid_at TIMESTAMPTZ;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='marked_paid_by') THEN
+                        ALTER TABLE orders ADD COLUMN marked_paid_by VARCHAR(255);
+                    END IF;
+                END$$;
+            """))
+            await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS page_seo (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     page_slug VARCHAR(100) UNIQUE NOT NULL,

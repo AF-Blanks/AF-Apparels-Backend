@@ -286,7 +286,9 @@ class PDFService:
             inv_num = f"INV-{year}-{suffix}"
 
         invoice_date = now.strftime("%B %d, %Y")
-        due_date = (now + timedelta(days=30)).strftime("%B %d, %Y")
+        terms_value = getattr(order, 'payment_terms', None) or 'net_30'
+        _days_map = {'net_30': 30, 'net_15': 15, 'due_on_receipt': 0}
+        due_date = (now + timedelta(days=_days_map.get(terms_value, 30))).strftime("%B %d, %Y")
 
         extra = [
             ["Invoice #", inv_num],
@@ -387,13 +389,30 @@ class PDFService:
         ]))
 
         # ── Payment terms ──────────────────────────────────────────────────────
+        _terms_text_map = {
+            'net_30': "Payment due within <b>30 days</b> of invoice date (Net&nbsp;30).",
+            'net_15': "Payment due within <b>15 days</b> of invoice date (Net&nbsp;15).",
+            'due_on_receipt': "Payment is due <b>upon receipt</b> of this invoice.",
+        }
+        _terms_text = _terms_text_map.get(terms_value, _terms_text_map['net_30'])
+        RED = colors.HexColor("#D01F2D")
         terms: list = [
             Paragraph("Payment Terms", _h2),
             Paragraph(
-                "Payment due within <b>30 days</b> of invoice date (Net&nbsp;30). "
-                "Please remit payment referencing your order number and invoice number. "
+                f"{_terms_text} Please remit payment referencing your order number and invoice number. "
                 "Late payments may be subject to a 1.5%/month finance charge.",
                 _body,
+            ),
+            Spacer(1, 8),
+            Paragraph("Payment Instructions", _h2),
+            Paragraph("Please make payment via ACH / Bank Transfer:", _body),
+            Paragraph("<b>Bank:</b> [YOUR BANK NAME]", _body),
+            Paragraph("<b>Account Name:</b> AF Apparels Inc.", _body),
+            Paragraph("<b>Routing #:</b> [ROUTING NUMBER]", _body),
+            Paragraph("<b>Account #:</b> [ACCOUNT NUMBER]", _body),
+            Paragraph(
+                f"<b>Reference:</b> Include Invoice # {inv_num} in payment memo",
+                ParagraphStyle("ref", parent=_body, textColor=RED),
             ),
             Spacer(1, 20),
         ]

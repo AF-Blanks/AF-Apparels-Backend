@@ -181,6 +181,11 @@ class AdminOrderDetail(OrderOut):
     ach_account_last4: str | None = None
     ach_account_type: str | None = None
     ach_verified: bool | None = None
+    # Invoice & payment tracking
+    payment_terms: str | None = None
+    invoice_sent_at: datetime | None = None
+    marked_paid_at: datetime | None = None
+    marked_paid_by: str | None = None
     # Order timeline
     timeline: list[dict] = []
 
@@ -193,6 +198,11 @@ class OrderUpdateRequest(BaseModel):
     courier: str | None = None
     courier_service: str | None = None
     notes: str | None = None
+    payment_terms: str | None = None
+
+
+class SendInvoicePayload(BaseModel):
+    payment_terms: str = 'net_30'
 
 
 class OrderStatusUpdate(BaseModel):
