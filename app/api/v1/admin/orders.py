@@ -20,6 +20,7 @@ from app.schemas.order import (
     AdminOrderDetail,
     AdminOrderListItem,
     CancelOrderRequest,
+    DraftOrderCreate,
     OrderItemOut,
     OrderStatusUpdate,
     OrderUpdateRequest,
@@ -228,7 +229,7 @@ async def _send_order_status_email(order: Order, new_status: str, db: AsyncSessi
 
 @router.post("/orders/draft", status_code=201)
 async def create_draft_order(
-    payload: dict,
+    payload: DraftOrderCreate,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Create an empty draft (pending) order for admin to fill in."""
@@ -236,11 +237,7 @@ async def create_draft_order(
     from app.models.company import Company as _Company, CompanyUser as _CompanyUser
     import string, random
 
-    company_id_str = payload.get("company_id")
-    if not company_id_str:
-        raise HTTPException(status_code=422, detail="company_id is required")
-
-    company_id = _UUID(str(company_id_str))
+    company_id = _UUID(str(payload.company_id))
 
     # Verify company exists
     company = (await db.execute(select(_Company).where(_Company.id == company_id))).scalar_one_or_none()
@@ -265,8 +262,8 @@ async def create_draft_order(
         order_number=order_number,
         status="pending",
         payment_status="unpaid",
-        po_number=payload.get("po_number"),
-        notes=payload.get("notes"),
+        po_number=payload.po_number,
+        notes=payload.notes,
         subtotal=0,
         shipping_cost=0,
         tax_amount=0,
@@ -791,7 +788,6 @@ async def resend_invoice_email(order_id: UUID, db: AsyncSession = Depends(get_db
 async def send_invoice_email(
     order_id: UUID,
     payload: SendInvoicePayload,
-    request: "Request",
     db: AsyncSession = Depends(get_db),
 ):
     """Send (or resend) invoice with specified payment terms to the customer."""
@@ -839,7 +835,7 @@ async def send_invoice_email(
 @router.post("/orders/{order_id}/mark-paid", response_model=dict)
 async def mark_order_paid(
     order_id: UUID,
-    request: "Request",
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """Mark an order as paid and record who marked it."""

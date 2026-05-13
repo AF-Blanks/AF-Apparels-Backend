@@ -201,6 +201,12 @@ class OrderUpdateRequest(BaseModel):
     payment_terms: str | None = None
 
 
+class DraftOrderCreate(BaseModel):
+    company_id: str
+    po_number: str | None = None
+    notes: str | None = None
+
+
 class SendInvoicePayload(BaseModel):
     payment_terms: str = 'net_30'
 
