@@ -128,7 +128,6 @@ class ProductVariant(BaseModel):
         nullable=False,
     )
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    stock: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     product: Mapped["Product"] = relationship("Product", back_populates="variants")
     inventory_records: Mapped[list["InventoryRecord"]] = relationship(

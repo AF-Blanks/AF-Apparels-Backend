@@ -245,12 +245,11 @@ async def add_variant(
         retail_price=payload.retail_price,
         compare_price=payload.compare_price,
         status=payload.status,
-        stock=payload.stock if payload.stock is not None else 0,
     )
     db.add(variant)
     await db.commit()
     await db.refresh(variant)
-    variant.stock_quantity = variant.stock
+    variant.stock_quantity = 0
     return variant
 
 
@@ -287,7 +286,6 @@ async def create_variants_batch(
             size=v.get("size"),
             retail_price=float(v.get("retail_price", 0)),
             status=str(v.get("status", "active")),
-            stock=int(v.get("stock", 0)),
         )
         db.add(variant)
         created.append(variant)

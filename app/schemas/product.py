@@ -221,7 +221,6 @@ class VariantCreate(BaseModel):
     cost_per_item: Decimal | None = None
     country_of_origin: str | None = None
     status: str = "active"
-    stock: int = 0
 
 
 class BulkGenerateRequest(BaseModel):
