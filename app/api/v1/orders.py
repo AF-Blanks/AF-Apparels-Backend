@@ -1,7 +1,7 @@
 # backend/app/api/v1/orders.py
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -224,6 +224,10 @@ class CommentOut(_BaseModel):
     model_config = {"from_attributes": True}
 
 
+class _PayInvoiceRequest(_BaseModel):
+    card_token: str
+
+
 @router.get("/{order_id}/comments", response_model=list[CommentOut])
 async def list_order_comments(
     order_id: UUID,
@@ -319,3 +323,79 @@ async def add_order_comment(
         author_name=author.full_name if author else None,
         created_at=comment.created_at,
     )
+
+
+@router.post("/{order_id}/pay-invoice")
+async def pay_invoice(
+    order_id: UUID,
+    payload: _PayInvoiceRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    import json as _json
+    import uuid as _uuid
+    from datetime import datetime as _dt, timezone as _tz
+    from sqlalchemy import text as _text
+    from sqlalchemy.orm import selectinload as _sil
+    from app.services.qb_payments_service import QBPaymentsService
+
+    company_id = getattr(request.state, "company_id", None)
+    user_id = getattr(request.state, "user_id", None)
+    account_type = getattr(request.state, "account_type", "wholesale")
+
+    result = await db.execute(
+        select(Order).options(_sil(Order.items)).where(Order.id == order_id)
+    )
+    order = result.scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+
+    if account_type == "retail" and user_id:
+        if order.placed_by_id != _uuid.UUID(user_id):
+            raise ForbiddenError("Access denied")
+    elif company_id:
+        if order.company_id != _uuid.UUID(str(company_id)):
+            raise ForbiddenError("Access denied")
+    else:
+        raise ForbiddenError("Authentication required")
+
+    if order.payment_status == "paid":
+        raise HTTPException(status_code=400, detail="Order is already paid")
+
+    try:
+        qb = QBPaymentsService()
+        charge_resp = qb.charge_card(
+            token=payload.card_token,
+            amount=float(order.total),
+            description=f"Invoice — {order.order_number}",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=f"Payment failed: {exc}") from exc
+
+    if charge_resp.get("status") != "CAPTURED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Payment not captured (status={charge_resp.get('status')})",
+        )
+
+    now = _dt.now(_tz.utc)
+    timeline = list(order.timeline or [])
+    timeline.append({
+        "message": "Payment received via invoice payment link",
+        "status": "paid",
+        "created_by": "Customer",
+        "created_at": now.isoformat(),
+    })
+    await db.execute(
+        _text(
+            "UPDATE orders SET payment_status='paid', marked_paid_at=:ts, "
+            "timeline=CAST(:tl AS jsonb) WHERE id=:id"
+        ),
+        {"ts": now, "tl": _json.dumps(timeline), "id": str(order_id)},
+    )
+    await db.commit()
+    return {
+        "message": "Payment successful",
+        "order_number": order.order_number,
+        "charge_id": charge_resp.get("id"),
+    }

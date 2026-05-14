@@ -338,6 +338,7 @@ class EmailService:
         inv_date = now.strftime('%B %d, %Y')
         order_num = getattr(order, 'order_number', 'N/A')
         total_val = float(getattr(order, 'total', 0))
+        pay_url = f"{settings.FRONTEND_URL}/checkout/invoice/{order_num}"
 
         content_html = (
             f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
@@ -360,18 +361,16 @@ class EmailService:
             f'<td style="font-size:17px;font-weight:800;color:#1B3A5C;text-align:right">'
             f'${total_val:.2f}</td></tr>'
             f'</table></div>'
-            f'<div style="background:#fff8e1;border:1px solid #ffe082;border-radius:8px;'
-            f'padding:16px 20px;margin-bottom:20px">'
-            f'<p style="margin:0 0 8px;font-weight:700;color:#1B3A5C;font-size:14px">Payment Instructions</p>'
-            f'<p style="margin:0 0 4px;font-size:13px;color:#444">'
-            f'Please pay via <strong>ACH / Bank Transfer</strong>:</p>'
-            f'<p style="margin:0;font-size:13px;color:#444;line-height:2">'
-            f'<strong>Bank:</strong> [YOUR BANK NAME]<br/>'
-            f'<strong>Account Name:</strong> AF Apparels Inc.<br/>'
-            f'<strong>Routing #:</strong> [ROUTING NUMBER]<br/>'
-            f'<strong>Account #:</strong> [ACCOUNT NUMBER]<br/>'
-            f'<strong style="color:#E8242A">Memo:</strong> '
-            f'Include <strong>{order_num}</strong> in payment memo</p>'
+            f'<div style="text-align:center;margin:28px 0;">'
+            f'<p style="color:#444;font-size:14px;margin:0 0 16px;">'
+            f'Click below to complete your payment securely online:</p>'
+            f'<a href="{pay_url}" '
+            f'style="display:inline-block;background:#E8242A;color:#fff;'
+            f'padding:14px 40px;border-radius:6px;font-size:16px;'
+            f'font-weight:700;text-decoration:none;letter-spacing:0.5px;">'
+            f'Pay Now — ${total_val:.2f}</a>'
+            f'<p style="color:#888;font-size:12px;margin:12px 0 0;">'
+            f'Secure payment · Order {order_num}</p>'
             f'</div>'
             f'<p style="color:#6b7280;font-size:13px;margin:0">'
             f'The invoice PDF is attached. Questions? Call '
