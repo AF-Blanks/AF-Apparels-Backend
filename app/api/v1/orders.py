@@ -63,8 +63,8 @@ async def get_order(
 
     svc = OrderService(db)
 
-    # Support order_number (AF-XXXXXX) or UUID in URL
-    if order_id.upper().startswith("AF-"):
+    # Support order_number (AF-XXXXXX / DRAFT-XXXXXX) or UUID in URL
+    if order_id.upper().startswith(("AF-", "DRAFT-")):
         order_num = order_id.upper()
         if account_type == "retail" and user_id:
             result = await db.execute(
@@ -323,6 +323,39 @@ async def add_order_comment(
         author_name=author.full_name if author else None,
         created_at=comment.created_at,
     )
+
+
+@router.get("/{order_id}/invoice-summary")
+async def get_order_invoice_summary(order_id: str, db: AsyncSession = Depends(get_db)):
+    """Public endpoint — returns limited order data for invoice payment links."""
+    from sqlalchemy.orm import selectinload as _sil
+    result = await db.execute(
+        select(Order).options(_sil(Order.items))
+        .where(Order.order_number == order_id.upper())
+    )
+    order = result.scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+    return {
+        "id": str(order.id),
+        "order_number": order.order_number,
+        "status": order.status,
+        "payment_status": order.payment_status,
+        "subtotal": float(order.subtotal or 0),
+        "shipping_cost": float(order.shipping_cost or 0),
+        "tax_amount": float(order.tax_amount or 0),
+        "total": float(order.total),
+        "items": [
+            {
+                "product_name": item.product_name,
+                "color": item.color,
+                "size": item.size,
+                "quantity": item.quantity,
+                "unit_price": float(item.unit_price),
+            }
+            for item in (order.items or [])
+        ],
+    }
 
 
 @router.post("/{order_id}/pay-invoice")

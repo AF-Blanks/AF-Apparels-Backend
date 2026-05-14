@@ -184,4 +184,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Blog posts — public listing and detail
         if path.startswith("/api/v1/blog-posts"):
             return True
+        # Invoice summary — public for pay-now email link access
+        if path.endswith('/invoice-summary'):
+            return True
         return False
