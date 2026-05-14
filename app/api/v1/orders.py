@@ -336,6 +336,8 @@ async def get_order_invoice_summary(order_id: str, db: AsyncSession = Depends(ge
     order = result.scalar_one_or_none()
     if not order:
         raise NotFoundError(f"Order {order_id} not found")
+    _total = float(order.total)
+    _paid = float(order.amount_paid or 0)
     return {
         "id": str(order.id),
         "order_number": order.order_number,
@@ -344,7 +346,9 @@ async def get_order_invoice_summary(order_id: str, db: AsyncSession = Depends(ge
         "subtotal": float(order.subtotal or 0),
         "shipping_cost": float(order.shipping_cost or 0),
         "tax_amount": float(order.tax_amount or 0),
-        "total": float(order.total),
+        "total": _total,
+        "amount_paid": _paid,
+        "balance_due": max(0.0, _total - _paid),
         "items": [
             {
                 "product_name": item.product_name,
@@ -395,11 +399,19 @@ async def pay_invoice(
     if order.payment_status == "paid":
         raise HTTPException(status_code=400, detail="Order is already paid")
 
+    from decimal import Decimal as _Dec
+    _order_total = _Dec(str(order.total or 0))
+    _already_paid = _Dec(str(order.amount_paid or 0))
+    _balance_due = max(_Dec('0.00'), _order_total - _already_paid)
+
+    if _balance_due <= _Dec('0.00'):
+        raise HTTPException(status_code=400, detail="Order is already paid in full")
+
     try:
         qb = QBPaymentsService()
         charge_resp = qb.charge_card(
             token=payload.card_token,
-            amount=float(order.total),
+            amount=float(_balance_due),
             description=f"Invoice — {order.order_number}",
         )
     except RuntimeError as exc:
@@ -414,7 +426,7 @@ async def pay_invoice(
     now = _dt.now(_tz.utc)
     timeline = list(order.timeline or [])
     timeline.append({
-        "message": "Payment received via invoice payment link",
+        "message": f"Payment received via invoice link — ${float(_balance_due):.2f}",
         "status": "paid",
         "created_by": "Customer",
         "created_at": now.isoformat(),
@@ -422,9 +434,10 @@ async def pay_invoice(
     await db.execute(
         _text(
             "UPDATE orders SET payment_status='paid', marked_paid_at=:ts, "
+            "amount_paid=:ap, "
             "timeline=CAST(:tl AS jsonb) WHERE id=:id"
         ),
-        {"ts": now, "tl": _json.dumps(timeline), "id": str(order_id)},
+        {"ts": now, "ap": float(_order_total), "tl": _json.dumps(timeline), "id": str(order_id)},
     )
     await db.commit()
     return {

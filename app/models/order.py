@@ -105,6 +105,7 @@ class Order(BaseModel):
     invoice_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     marked_paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     marked_paid_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    amount_paid: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
 
     # ── Schema compatibility aliases ────────────────────────────────────────────
     @property
@@ -114,6 +115,18 @@ class Order(BaseModel):
     @property
     def item_count(self) -> int:
         return len(self.items) if self.items is not None else 0
+
+    @property
+    def balance_due(self):
+        from decimal import Decimal as _D
+        total = _D(str(self.total or 0))
+        paid = _D(str(self.amount_paid or 0))
+        return max(_D('0.00'), total - paid)
+
+    @property
+    def is_fully_paid(self) -> bool:
+        from decimal import Decimal as _D
+        return self.balance_due <= _D('0.00')
 
     # ── Relationships ─────────────────────────────────────────────────────────
     company: Mapped[Optional["Company"]] = relationship("Company", back_populates="orders")

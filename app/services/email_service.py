@@ -338,7 +338,28 @@ class EmailService:
         inv_date = now.strftime('%B %d, %Y')
         order_num = getattr(order, 'order_number', 'N/A')
         total_val = float(getattr(order, 'total', 0))
+        amount_paid_val = float(getattr(order, 'amount_paid', None) or 0)
+        balance_due_val = max(0.0, total_val - amount_paid_val)
         pay_url = f"{settings.FRONTEND_URL}/checkout/invoice/{order_num}"
+        btn_label = f'Pay Balance — ${balance_due_val:.2f}' if amount_paid_val > 0 else f'Pay Now — ${total_val:.2f}'
+
+        if amount_paid_val > 0:
+            amount_row = (
+                f'<tr><td style="font-size:12px;color:#6b7280;padding:5px 0">Order Total</td>'
+                f'<td style="font-size:13px;color:#374151;text-align:right">${total_val:.2f}</td></tr>'
+                f'<tr><td style="font-size:12px;color:#059669;padding:5px 0">Amount Paid</td>'
+                f'<td style="font-size:13px;color:#059669;font-weight:600;text-align:right">&#8722;${amount_paid_val:.2f}</td></tr>'
+                f'<tr style="border-top:1px solid #e5e7eb">'
+                f'<td style="font-size:12px;color:#6b7280;font-weight:700;padding:10px 0 5px">Balance Due</td>'
+                f'<td style="font-size:17px;font-weight:800;color:#E8242A;text-align:right;padding-top:10px">'
+                f'${balance_due_val:.2f}</td></tr>'
+            )
+        else:
+            amount_row = (
+                f'<tr><td style="font-size:12px;color:#6b7280;padding:5px 0">Amount Due</td>'
+                f'<td style="font-size:17px;font-weight:800;color:#1B3A5C;text-align:right">'
+                f'${total_val:.2f}</td></tr>'
+            )
 
         content_html = (
             f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
@@ -357,9 +378,7 @@ class EmailService:
             f'<td style="font-size:12px;color:#6b7280;font-weight:700;padding:10px 0 5px">Due Date</td>'
             f'<td style="font-size:17px;font-weight:800;color:#E8242A;text-align:right;padding-top:10px">'
             f'{due_str}</td></tr>'
-            f'<tr><td style="font-size:12px;color:#6b7280;padding:5px 0">Amount Due</td>'
-            f'<td style="font-size:17px;font-weight:800;color:#1B3A5C;text-align:right">'
-            f'${total_val:.2f}</td></tr>'
+            f'{amount_row}'
             f'</table></div>'
             f'<div style="text-align:center;margin:28px 0;">'
             f'<p style="color:#444;font-size:14px;margin:0 0 16px;">'
@@ -368,7 +387,7 @@ class EmailService:
             f'style="display:inline-block;background:#E8242A;color:#fff;'
             f'padding:14px 40px;border-radius:6px;font-size:16px;'
             f'font-weight:700;text-decoration:none;letter-spacing:0.5px;">'
-            f'Pay Now — ${total_val:.2f}</a>'
+            f'{btn_label}</a>'
             f'<p style="color:#888;font-size:12px;margin:12px 0 0;">'
             f'Secure payment · Order {order_num}</p>'
             f'</div>'

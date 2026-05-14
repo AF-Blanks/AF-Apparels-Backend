@@ -825,8 +825,18 @@ async def send_invoice_email(
     if not ok:
         raise HTTPException(status_code=502, detail="Invoice email failed to send")
 
+    _inv_timeline = list(order.timeline or [])
+    _inv_timeline.append({
+        "status": "invoice_sent",
+        "message": f"Invoice sent to {to_email}",
+        "created_by": "Admin",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
     from sqlalchemy import text as _t2
-    await db.execute(_t2("UPDATE orders SET invoice_sent_at = now() WHERE id = :oid"), {"oid": str(order_id)})
+    await db.execute(
+        _t2("UPDATE orders SET invoice_sent_at = now(), timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
+        {"tl": _json.dumps(_inv_timeline), "oid": str(order_id)},
+    )
     await db.commit()
 
     return {"message": f"Invoice sent to {to_email}"}
@@ -859,7 +869,7 @@ async def mark_order_paid(
     timeline = list(order.timeline or [])
     timeline.append({
         "status": "paid",
-        "message": "Payment received — marked as paid",
+        "message": f"Payment received — marked as paid (${float(order.total):.2f})",
         "created_by": admin_name,
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
@@ -869,6 +879,7 @@ async def mark_order_paid(
             SET payment_status = 'paid',
                 marked_paid_at  = now(),
                 marked_paid_by  = :admin,
+                amount_paid     = COALESCE(total, 0),
                 timeline        = CAST(:tl AS jsonb)
             WHERE id = :oid
         """),

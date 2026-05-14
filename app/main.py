@@ -295,6 +295,15 @@ async def _ensure_content_tables() -> None:
                 END$$;
             """))
             await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='amount_paid') THEN
+                        ALTER TABLE orders ADD COLUMN amount_paid NUMERIC(10,2) DEFAULT 0.00;
+                        UPDATE orders SET amount_paid = total WHERE payment_status = 'paid';
+                    END IF;
+                END$$;
+            """))
+            await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS page_seo (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     page_slug VARCHAR(100) UNIQUE NOT NULL,

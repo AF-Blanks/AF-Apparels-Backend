@@ -102,6 +102,7 @@ class OrderOut(BaseModel):
     subtotal: Decimal
     shipping_cost: Decimal
     total: Decimal
+    amount_paid: Decimal | None = None
     items: list[OrderItemOut]
     created_at: datetime
     updated_at: datetime
@@ -186,6 +187,8 @@ class AdminOrderDetail(OrderOut):
     invoice_sent_at: datetime | None = None
     marked_paid_at: datetime | None = None
     marked_paid_by: str | None = None
+    balance_due: Decimal | None = None
+    is_fully_paid: bool = False
     # Order timeline
     timeline: list[dict] = []
 
