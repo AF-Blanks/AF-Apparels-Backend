@@ -498,14 +498,14 @@ class EmailService:
     def send_application_approved(
         self, to_email: str, first_name: str, company_name: str
     ) -> bool:
-        """Notify applicant their wholesale account has been approved."""
+        """Notify applicant their account has been approved."""
         from app.core.config import settings as _s
         content_html = (
             f'<h2 style="color:#059669;font-size:22px;font-weight:800;margin:0 0 8px">'
             f'Application Approved! ✅</h2>'
             f'<p style="color:#374151;margin:0 0 20px">Hi {first_name},</p>'
             f'<p style="color:#374151;margin:0 0 16px">'
-            f'Great news — your wholesale application for <b>{company_name}</b> has been '
+            f'Great news — your application for <b>{company_name}</b> has been '
             f'<b style="color:#059669">approved</b>. Your account is now active and you can '
             f'start placing orders.</p>'
             f'<p style="margin:0"><a href="{_s.FRONTEND_URL}/login" '
@@ -515,7 +515,7 @@ class EmailService:
         )
         return self._send_via_resend(
             to_email=to_email,
-            subject="Your AF Apparels Wholesale Account is Approved!",
+            subject="Your AF Apparels Account is Approved!",
             body_html=self._base_template(content_html),
         )
 

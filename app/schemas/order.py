@@ -103,6 +103,8 @@ class OrderOut(BaseModel):
     shipping_cost: Decimal
     total: Decimal
     amount_paid: Decimal | None = None
+    balance_due: Decimal | None = None
+    is_fully_paid: bool = False
     items: list[OrderItemOut]
     created_at: datetime
     updated_at: datetime

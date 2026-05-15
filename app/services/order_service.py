@@ -107,6 +107,7 @@ class OrderService:
         order_items_data = []
         subtotal = Decimal("0")
         total_units = 0
+        ordered_product_slugs: set[str] = set()
 
         for cart_item in cart_items:
             variant_result = await self.db.execute(
@@ -118,6 +119,8 @@ class OrderService:
             if not row:
                 raise NotFoundError(f"Variant {cart_item.variant_id} not found")
             variant, product = row
+            if product.slug:
+                ordered_product_slugs.add(product.slug)
 
             # Stock check — only enforce when inventory records exist.
             # COALESCE returns 0 when no records found; treat 0 as unlimited.
@@ -323,6 +326,14 @@ class OrderService:
                         .values(quantity=current_qty - deduct)
                     )
                     qty_to_deduct -= deduct
+
+        # 9.6. Invalidate product detail cache so stock shows immediately
+        try:
+            from app.core.redis import redis_delete_pattern as _rdp
+            for _slug in ordered_product_slugs:
+                await _rdp(f"products:detail:{_slug}:*")
+        except Exception:
+            pass
 
         # 10. Clear cart
         from sqlalchemy import delete

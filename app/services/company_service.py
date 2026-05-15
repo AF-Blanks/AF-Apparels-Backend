@@ -203,6 +203,9 @@ class CompanyService:
             setattr(company, field, value)
         await self.db.flush()
         await self.db.refresh(company)
+        if "tags" in update_fields:
+            from app.core.redis import redis_delete
+            await redis_delete(f"company:{company_id}:discount_group_id")
         return company
 
     async def suspend(self, company_id: UUID, reason: str) -> Company:
