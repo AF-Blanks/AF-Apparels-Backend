@@ -350,42 +350,11 @@ class OrderService:
         )
         order = result.scalar_one()
 
-        # Step 11 — ✅ Direct email, no Celery
+        # Step 11 — Admin notification only (customer confirmation sent by checkout.py)
         try:
             from app.services.email_service import EmailService
             email_svc = EmailService(self.db)
-            
-            # Customer ko confirmation
-            customer_result = await self.db.execute(
-                select(User).where(User.id == user_id)
-            )
-            customer = customer_result.scalar_one_or_none()
-            
-            if customer:
-                await email_svc.send(
-                    trigger_event="order_confirmation",
-                    to_email=customer.email,
-                    variables={
-                        "first_name": customer.first_name or "there",
-                        "order_number": order.order_number,
-                        "order_total": f"${float(order.total):.2f}",
-                        "order_url": f"{settings.FRONTEND_URL}/account/orders/{order.id}",
-                        "items": [
-                            {
-                                "product_name": i.product_name,
-                                "sku": i.sku,
-                                "color": i.color or "",
-                                "size": i.size or "",
-                                "quantity": i.quantity,
-                                "unit_price": f"${float(i.unit_price):.2f}",
-                                "line_total": f"${float(i.line_total):.2f}",
-                            }
-                            for i in order.items
-                        ],
-                    },
-                )
-        
-            # Admin ko notification
+
             if settings.ADMIN_NOTIFICATION_EMAIL:
                 email_svc.send_raw(
                     to_email=settings.ADMIN_NOTIFICATION_EMAIL,
@@ -399,7 +368,7 @@ class OrderService:
                     """,
                 )
         except Exception as e:
-            logger.warning("Order confirmation email failed: %s", e)
+            logger.warning("Admin notification email failed: %s", e)
 
         # 12. Auto-create statement charge transaction
         try:

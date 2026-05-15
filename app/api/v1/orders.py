@@ -396,9 +396,6 @@ async def pay_invoice(
     else:
         raise ForbiddenError("Authentication required")
 
-    if order.payment_status == "paid":
-        raise HTTPException(status_code=400, detail="Order is already paid")
-
     from decimal import Decimal as _Dec
     _order_total = _Dec(str(order.total or 0))
     _already_paid = _Dec(str(order.amount_paid or 0))
