@@ -169,11 +169,10 @@ def _address_block(order: "Order") -> list:
 
 def _items_table(order: "Order") -> list:
     """Build line-items table."""
-    header_row = ["SKU", "Product", "Color", "Size", "Qty", "Unit Price", "Total"]
+    header_row = ["Product", "Color", "Size", "Qty", "Unit Price", "Total"]
     data = [header_row]
     for item in order.items:
         data.append([
-            item.sku,
             item.product_name,
             item.color or "—",
             item.size or "—",
@@ -182,8 +181,7 @@ def _items_table(order: "Order") -> list:
             f"${float(item.line_total):.2f}",
         ])
 
-    col_widths = [1.0 * inch, 2.2 * inch, 0.8 * inch, 0.6 * inch,
-                  0.5 * inch, 0.85 * inch, 0.85 * inch]
+    col_widths = [2.9 * inch, 0.9 * inch, 0.65 * inch, 0.5 * inch, 0.85 * inch, 0.85 * inch]
     tbl = Table(data, colWidths=col_widths, repeatRows=1)
     tbl.setStyle(TableStyle([
         # Header row
@@ -197,7 +195,7 @@ def _items_table(order: "Order") -> list:
         ("TEXTCOLOR", (0, 1), (-1, -1), DARK_GRAY),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, LIGHT_GRAY]),
         # Alignment
-        ("ALIGN", (4, 0), (-1, -1), "RIGHT"),
+        ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
         # Padding
         ("TOPPADDING", (0, 0), (-1, -1), 5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
@@ -324,12 +322,11 @@ class PDFService:
             bill_to.append(Paragraph("Billing address on file", _body))
         bill_to.append(Spacer(1, 12))
 
-        # ── Items table (Style # column) ───────────────────────────────────────
-        header_row = ["Style #", "Product Name", "Color", "Size", "Qty", "Unit Price", "Total"]
+        # ── Items table ────────────────────────────────────────────────────────
+        header_row = ["Product Name", "Color", "Size", "Qty", "Unit Price", "Total"]
         data = [header_row]
         for item in order.items:
             data.append([
-                item.sku,
                 item.product_name,
                 item.color or "—",
                 item.size or "—",
@@ -338,8 +335,7 @@ class PDFService:
                 f"${float(item.line_total):.2f}",
             ])
 
-        col_widths = [1.0 * inch, 2.2 * inch, 0.8 * inch, 0.6 * inch,
-                      0.5 * inch, 0.85 * inch, 0.85 * inch]
+        col_widths = [2.9 * inch, 0.9 * inch, 0.65 * inch, 0.5 * inch, 0.85 * inch, 0.85 * inch]
         items_tbl = Table(data, colWidths=col_widths, repeatRows=1)
         items_tbl.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), BRAND_BLUE),
@@ -350,7 +346,7 @@ class PDFService:
             ("FONTSIZE", (0, 1), (-1, -1), 9),
             ("TEXTCOLOR", (0, 1), (-1, -1), DARK_GRAY),
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, LIGHT_GRAY]),
-            ("ALIGN", (4, 0), (-1, -1), "RIGHT"),
+            ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
             ("TOPPADDING", (0, 0), (-1, -1), 5),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ("LEFTPADDING", (0, 0), (-1, -1), 6),
@@ -388,42 +384,12 @@ class PDFService:
             ("LINEABOVE", (1, -1), (2, -1), 1, DARK_GRAY),
         ]))
 
-        # ── Payment terms ──────────────────────────────────────────────────────
-        _terms_text_map = {
-            'net_30': "Payment due within <b>30 days</b> of invoice date (Net&nbsp;30).",
-            'net_15': "Payment due within <b>15 days</b> of invoice date (Net&nbsp;15).",
-            'due_on_receipt': "Payment is due <b>upon receipt</b> of this invoice.",
-        }
-        _terms_text = _terms_text_map.get(terms_value, _terms_text_map['net_30'])
-        RED = colors.HexColor("#D01F2D")
-        terms: list = [
-            Paragraph("Payment Terms", _h2),
-            Paragraph(
-                f"{_terms_text} Please remit payment referencing your order number and invoice number. "
-                "Late payments may be subject to a 1.5%/month finance charge.",
-                _body,
-            ),
-            Spacer(1, 8),
-            Paragraph("Payment Instructions", _h2),
-            Paragraph("Please make payment via ACH / Bank Transfer:", _body),
-            Paragraph("<b>Bank:</b> [YOUR BANK NAME]", _body),
-            Paragraph("<b>Account Name:</b> AF Apparels Inc.", _body),
-            Paragraph("<b>Routing #:</b> [ROUTING NUMBER]", _body),
-            Paragraph("<b>Account #:</b> [ACCOUNT NUMBER]", _body),
-            Paragraph(
-                f"<b>Reference:</b> Include Invoice # {inv_num} in payment memo",
-                ParagraphStyle("ref", parent=_body, textColor=RED),
-            ),
-            Spacer(1, 20),
-        ]
-
         story = (
             _header("Invoice")
             + _order_meta(order, extra_rows=extra)
             + bill_to
             + [items_tbl, Spacer(1, 10)]
             + [sum_tbl, Spacer(1, 20)]
-            + terms
             + _footer(f"Invoice {inv_num} · Due {due_date} · AF Apparels Wholesale Division")
         )
         doc.build(story)
@@ -451,11 +417,10 @@ class PDFService:
         buf = io.BytesIO()
         doc = _doc(buf)
         # Pack slip: no pricing, just quantities
-        header_row = ["SKU", "Product", "Color", "Size", "Qty Ordered", "Qty Packed"]
+        header_row = ["Product", "Color", "Size", "Qty Ordered", "Qty Packed"]
         data = [header_row]
         for item in order.items:
             data.append([
-                item.sku,
                 item.product_name,
                 item.color or "—",
                 item.size or "—",
@@ -463,7 +428,7 @@ class PDFService:
                 "______",
             ])
 
-        col_widths = [1.0 * inch, 2.2 * inch, 0.85 * inch, 0.65 * inch, 0.9 * inch, 0.9 * inch]
+        col_widths = [2.9 * inch, 0.95 * inch, 0.7 * inch, 0.9 * inch, 0.9 * inch]
         tbl = Table(data, colWidths=col_widths, repeatRows=1)
         tbl.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), BRAND_BLUE),
@@ -474,7 +439,7 @@ class PDFService:
             ("FONTSIZE", (0, 1), (-1, -1), 9),
             ("TEXTCOLOR", (0, 1), (-1, -1), DARK_GRAY),
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, LIGHT_GRAY]),
-            ("ALIGN", (4, 0), (-1, -1), "RIGHT"),
+            ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
             ("TOPPADDING", (0, 0), (-1, -1), 5),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ("LEFTPADDING", (0, 0), (-1, -1), 6),

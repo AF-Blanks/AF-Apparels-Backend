@@ -514,6 +514,9 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
         invoice_sent_at=getattr(order, "invoice_sent_at", None),
         marked_paid_at=getattr(order, "marked_paid_at", None),
         marked_paid_by=getattr(order, "marked_paid_by", None),
+        amount_paid=order.amount_paid,
+        balance_due=order.balance_due,
+        is_fully_paid=order.is_fully_paid,
         timeline=order.timeline or [],
     )
 
