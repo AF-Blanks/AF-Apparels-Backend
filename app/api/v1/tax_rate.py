@@ -1,4 +1,4 @@
-"""Public — calculate sales tax via TaxJar (fallback: manual tax_rates table)."""
+"""Public — calculate sales tax via ZipTax (fallback: manual tax_rates table)."""
 import logging
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
@@ -36,8 +36,8 @@ async def get_tax_rate(
 
     # ── TaxJar: use when API key is configured and we have enough address data ──
     if zip_code and subtotal > 0:
-        from app.services.taxjar_service import calculate_tax, get_taxjar_client
-        if get_taxjar_client() is not None:
+        from app.services.tax_service import calculate_tax, get_ziptax_client
+        if get_ziptax_client() is not None:
             result = await calculate_tax(
                 to_state=state,
                 to_zip=zip_code,
@@ -45,9 +45,9 @@ async def get_tax_rate(
                 subtotal=taxable_subtotal,
                 shipping=0,  # shipping not taxed
             )
-            if result.get("source") == "taxjar":
+            if result.get("source") == "ziptax":
                 logger.info(
-                    "TaxJar: %s %s → rate=%.4f%% amount=$%.2f (discount=$%.2f applied)",
+                    "ZipTax: %s %s → rate=%.4f%% amount=$%.2f (discount=$%.2f applied)",
                     state, zip_code, result["rate"], result["tax_amount"], discount,
                 )
                 return result

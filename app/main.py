@@ -508,7 +508,7 @@ async def health_check() -> dict:
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-from app.api.v1 import auth, products, cart, checkout, orders, account, webhooks, reviews, discounts, guest, contact, style_sheets, product_specs, upload, tax_rate, pages_seo, blog_posts  # noqa: E402
+from app.api.v1 import auth, products, cart, checkout, orders, account, webhooks, reviews, discounts, guest, contact, style_sheets, product_specs, upload, tax_rate, tax, pages_seo, blog_posts  # noqa: E402
 from app.api.v1.admin import (  # noqa: E402
     customers,
     pricing as admin_pricing,
@@ -559,6 +559,7 @@ app.include_router(style_sheets.router, prefix=_V1)
 app.include_router(product_specs.router, prefix=_V1)
 app.include_router(upload.router, prefix=_V1)
 app.include_router(tax_rate.router, prefix=_V1)
+app.include_router(tax.router, prefix=_V1)
 
 app.include_router(customers.router, prefix=f"{_V1}/admin")
 app.include_router(admin_pricing.router, prefix=_V1)
