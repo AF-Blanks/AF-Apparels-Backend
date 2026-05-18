@@ -36,6 +36,29 @@ async def create_label(order_id: str, to_address: dict, carrier_token: str) -> d
     try:
         client = get_client()
 
+        # For UPS, validate that city/state/zip match before creating shipment
+        if "ups" in carrier_token.lower():
+            try:
+                validated_addr = client.addresses.create(
+                    components.AddressCreateRequest(
+                        name=to_address.get("name", "Customer"),
+                        street1=to_address.get("street1", ""),
+                        city=to_address.get("city", ""),
+                        state=to_address.get("state", ""),
+                        zip=to_address.get("zip", ""),
+                        country=to_address.get("country", "US"),
+                        validate=True,
+                    )
+                )
+                vr = getattr(validated_addr, "validation_results", None)
+                if vr and not getattr(vr, "is_valid", True):
+                    return {
+                        "success": False,
+                        "error": "Please verify the shipping address - city, state and ZIP code must match",
+                    }
+            except Exception as val_exc:
+                logger.warning("UPS address validation error: %s", val_exc)
+
         shipment = client.shipments.create(
             components.ShipmentCreateRequest(
                 address_from=components.AddressCreateRequest(
@@ -100,7 +123,10 @@ async def create_label(order_id: str, to_address: dict, carrier_token: str) -> d
                 "rate": float(selected_rate.amount),
             }
         else:
-            return {"success": False, "error": str(transaction.messages)}
+            if transaction.messages:
+                error_text = " | ".join([m.text for m in transaction.messages if hasattr(m, "text")])
+                return {"success": False, "error": error_text}
+            return {"success": False, "error": "Label creation failed"}
 
     except Exception as e:
         logger.error(f"Shippo label error: {e}")
