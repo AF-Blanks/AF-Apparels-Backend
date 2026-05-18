@@ -1,5 +1,6 @@
 """POST /api/v1/tax/calculate — ZipTax-backed tax calculation."""
 import logging
+import os
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -27,18 +28,28 @@ async def calculate_tax(
     state = body.state.upper()
     taxable_subtotal = max(0.0, body.subtotal - body.discount)
 
+    logger.info(
+        "Tax calculate: raw_state=%r state=%s zip=%r subtotal=%.2f discount=%.2f taxable=%.2f",
+        body.state, state, body.zip_code, body.subtotal, body.discount, taxable_subtotal,
+    )
+
     # Tax-exempt companies pay no tax
     company_id = getattr(request.state, "company_id", None)
     if company_id:
         from app.models.company import Company
         company = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
         if company and company.tax_exempt:
+            logger.info("Tax: company %s is tax-exempt → returning 0", company_id)
             return {"tax_rate": 0.0, "tax_amount": 0.0, "region": state, "taxable": False, "source": "exempt"}
 
     # ZipTax: use when API key is configured and we have address data
+    from app.services.tax_service import get_ziptax_client
+    api_key_present = get_ziptax_client() is not None
+    logger.info("Tax: zip_code=%r taxable_subtotal=%.2f ziptax_key_present=%s", body.zip_code, taxable_subtotal, api_key_present)
+
     if body.zip_code and taxable_subtotal > 0:
-        from app.services.tax_service import calculate_tax as ziptax_calc, get_ziptax_client
-        if get_ziptax_client() is not None:
+        if api_key_present:
+            from app.services.tax_service import calculate_tax as ziptax_calc
             result = await ziptax_calc(
                 to_state=state,
                 to_zip=body.zip_code,
@@ -46,9 +57,10 @@ async def calculate_tax(
                 subtotal=taxable_subtotal,
                 shipping=0,
             )
+            logger.info("ZipTax service returned: %s", result)
             if result.get("source") == "ziptax":
                 logger.info(
-                    "ZipTax: %s %s → rate=%.4f%% amount=$%.2f",
+                    "ZipTax success: %s %s → rate=%.4f%% amount=$%.2f",
                     state, body.zip_code, result["rate"], result["tax_amount"],
                 )
                 return {
@@ -58,6 +70,11 @@ async def calculate_tax(
                     "taxable": result["tax_amount"] > 0,
                     "source": "ziptax",
                 }
+            logger.warning("ZipTax did not return source=ziptax — result: %s", result)
+        else:
+            logger.warning("ZIPTAX_API_KEY not set in environment — skipping ZipTax")
+    else:
+        logger.info("Tax: skipping ZipTax — zip_code empty or taxable_subtotal=0")
 
     # Fallback: manual tax_rates table
     from app.api.v1.admin.taxes import TaxRate
@@ -68,6 +85,7 @@ async def calculate_tax(
     if r:
         rate = float(r.rate)
         tax_amount = round(taxable_subtotal * rate / 100, 2)
+        logger.info("Tax: manual table match for %s → rate=%.4f%% amount=$%.2f", state, rate, tax_amount)
         return {
             "tax_rate": rate,
             "tax_amount": tax_amount,
@@ -76,4 +94,36 @@ async def calculate_tax(
             "source": "manual",
         }
 
+    logger.info("Tax: no manual rate found for %s → returning 0", state)
     return {"tax_rate": 0.0, "tax_amount": 0.0, "region": state, "taxable": False, "source": "none"}
+
+
+@router.get("/test-ziptax")
+async def test_ziptax(zip_code: str = "75215"):
+    """Debug endpoint — tests ZipTax API directly. Remove after debugging."""
+    import httpx
+    from app.services.tax_service import ZIPTAX_BASE_URL
+
+    api_key = os.getenv("ZIPTAX_API_KEY", "")
+    key_status = f"{api_key[:8]}..." if len(api_key) >= 8 else ("SET_BUT_SHORT" if api_key else "NOT_SET")
+
+    logger.info("test-ziptax: key_status=%s zip=%s", key_status, zip_code)
+
+    if not api_key:
+        return {"error": "ZIPTAX_API_KEY is not set", "key_status": key_status}
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                ZIPTAX_BASE_URL,
+                params={"key": api_key, "postalcode": zip_code},
+            )
+        return {
+            "key_status": key_status,
+            "zip_code": zip_code,
+            "http_status": resp.status_code,
+            "response": resp.json(),
+        }
+    except Exception as exc:
+        logger.error("test-ziptax error: %s", exc)
+        return {"key_status": key_status, "zip_code": zip_code, "error": str(exc)}
