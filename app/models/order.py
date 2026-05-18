@@ -74,6 +74,8 @@ class Order(BaseModel):
     # Shipping
     shipping_method: Mapped[str | None] = mapped_column(String(50), nullable=True)
     tracking_number: Mapped[str | None] = mapped_column(String(255))
+    tracking_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    label_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     carrier: Mapped[str | None] = mapped_column(String(100))
     courier: Mapped[str | None] = mapped_column(String(100))
     courier_service: Mapped[str | None] = mapped_column(String(100))

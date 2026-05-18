@@ -6,6 +6,7 @@ from datetime import date, datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -489,6 +490,8 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
         company_id=order.company_id,
         company_name=company_name,
         tracking_number=order.tracking_number,
+        tracking_url=getattr(order, "tracking_url", None),
+        label_url=getattr(order, "label_url", None),
         courier=order.courier,
         courier_service=order.courier_service,
         shipped_at=order.shipped_at,
@@ -732,6 +735,64 @@ async def update_order_status(
         await _send_order_status_email(order, payload.status, db)
 
     return {"success": True, "status": order.status}
+
+
+class _LabelRequest(BaseModel):
+    carrier: str  # "usps" | "ups" | "fedex"
+
+
+@router.post("/orders/{order_id}/labels", status_code=200)
+async def generate_shipping_label(
+    order_id: UUID,
+    payload: _LabelRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Generate a Shippo label for an order, mark it shipped, and email the customer."""
+    from app.services.shippo_service import create_shippo_label
+    from sqlalchemy import text as _text
+
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    result = await create_shippo_label(order, carrier=payload.carrier.lower())
+
+    if result.get("success"):
+        order.tracking_number = result["tracking_number"]
+        order.carrier = result["carrier"]
+        order.courier = result["carrier"]   # keeps email helper working
+        order.courier_service = result["service"]
+        order.status = "shipped"
+        if not order.shipped_at:
+            order.shipped_at = datetime.now(timezone.utc)
+
+        # label_url / tracking_url added via startup migration — use raw SQL for safety
+        await db.execute(
+            _text("UPDATE orders SET label_url=:lu, tracking_url=:tu WHERE id=:oid"),
+            {"lu": result.get("label_url"), "tu": result.get("tracking_url"), "oid": str(order_id)},
+        )
+
+        # Timeline entry
+        entry = {
+            "status": "shipped",
+            "message": (
+                f"Shippo label generated via {result['carrier']} {result['service']}"
+                f" — Tracking: {result['tracking_number']}"
+            ),
+            "created_by": "admin",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        current = list(order.timeline or [])
+        current.append(entry)
+        await db.execute(
+            _text("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
+            {"tl": _json.dumps(current), "oid": str(order_id)},
+        )
+
+        await db.commit()
+        await _send_order_status_email(order, "shipped", db)
+
+    return result
 
 
 @router.post("/orders/{order_id}/cancel", response_model=dict)

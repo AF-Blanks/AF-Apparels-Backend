@@ -157,6 +157,8 @@ class AdminOrderDetail(OrderOut):
     company_id: UUID | None
     company_name: str | None
     tracking_number: str | None
+    tracking_url: str | None = None
+    label_url: str | None = None
     courier: str | None = None
     courier_service: str | None = None
     shipped_at: datetime | None = None

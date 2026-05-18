@@ -304,6 +304,17 @@ async def _ensure_content_tables() -> None:
                 END$$;
             """))
             await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='label_url') THEN
+                        ALTER TABLE orders ADD COLUMN label_url TEXT;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='tracking_url') THEN
+                        ALTER TABLE orders ADD COLUMN tracking_url TEXT;
+                    END IF;
+                END$$;
+            """))
+            await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS page_seo (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     page_slug VARCHAR(100) UNIQUE NOT NULL,
