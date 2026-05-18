@@ -68,6 +68,8 @@ async def create_label(order_id: str, to_address: dict, carrier_token: str) -> d
                     state=WAREHOUSE_ADDRESS["state"],
                     zip=WAREHOUSE_ADDRESS["zip"],
                     country=WAREHOUSE_ADDRESS["country"],
+                    phone=WAREHOUSE_ADDRESS["phone"],
+                    email=WAREHOUSE_ADDRESS["email"],
                 ),
                 address_to=components.AddressCreateRequest(
                     name=to_address.get("name", ""),
