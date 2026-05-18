@@ -15,6 +15,7 @@ from app.core.database import get_db
 from app.core.exceptions import NotFoundError, ValidationError, InsufficientStockError
 from app.models.inventory import InventoryRecord
 from app.models.order import Order, OrderItem
+from app.models.user import User
 from app.models.product import Product, ProductVariant
 from app.schemas.order import AddressIn
 
@@ -386,22 +387,40 @@ async def guest_shipping_estimate(
 @router.get("/orders/{order_number}")
 async def track_guest_order(
     order_number: str,
-    email: str = Query(..., description="Guest email used at checkout"),
+    email: str = Query(..., description="Email address used at checkout or on account"),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Look up a guest order by order number + email."""
-    from sqlalchemy.orm import selectinload
+    """Look up an order by order number + email (guest or registered user)."""
+    from sqlalchemy import or_
+    from sqlalchemy.orm import selectinload, outerjoin
 
+    email_lower = email.lower().strip()
+    order_number_clean = order_number.strip()
+
+    logger.info("Track order lookup: order_number=%r email=%r", order_number_clean, email_lower)
+
+    # Match guest orders on guest_email OR registered-user orders via the placed_by User record
     result = await db.execute(
         select(Order)
         .options(selectinload(Order.items))
+        .outerjoin(User, User.id == Order.placed_by_id)
         .where(
-            Order.order_number == order_number,
-            Order.is_guest_order == True,
-            Order.guest_email == email.lower().strip(),
+            Order.order_number == order_number_clean,
+            or_(
+                func.lower(Order.guest_email) == email_lower,
+                func.lower(User.email) == email_lower,
+            ),
         )
     )
     order = result.scalar_one_or_none()
+
+    logger.info(
+        "Track order result: found=%s is_guest=%s guest_email=%r",
+        order is not None,
+        getattr(order, "is_guest_order", None),
+        getattr(order, "guest_email", None),
+    )
+
     if not order:
         raise NotFoundError("Order not found. Please check your order number and email.")
 
@@ -414,6 +433,10 @@ async def track_guest_order(
         "total": float(order.total),
         "created_at": order.created_at.isoformat(),
         "guest_name": order.guest_name,
+        "tracking_number": order.tracking_number,
+        "tracking_url": getattr(order, "tracking_url", None),
+        "carrier": order.courier,
+        "courier_service": order.courier_service,
         "items": [
             {
                 "product_name": i.product_name,
