@@ -96,24 +96,41 @@ async def _send_order_status_email(order: Order, new_status: str, db: AsyncSessi
         if order.is_guest_order and order.guest_email:
             name = order.guest_name or "there"
             if new_status == "shipped":
+                tracking_url = getattr(order, "tracking_url", None)
                 tracking_block = ""
                 if order.tracking_number:
-                    carrier_line = (
-                        f'<p style="margin:4px 0 0;color:#166534">Carrier: <b>{order.courier}</b></p>'
-                        if order.courier else ""
+                    tracking_link = (
+                        f'<a href="{tracking_url}" style="color:#166534;font-weight:700">'
+                        f'{order.tracking_number}</a>'
+                        if tracking_url else f'<b>{order.tracking_number}</b>'
                     )
+                    carrier_line = (
+                        f'<p style="margin:6px 0 0;color:#166534;font-size:13px">'
+                        f'Carrier: <b>{order.courier}</b>'
+                        + (f' &mdash; {order.courier_service}' if order.courier_service else '')
+                        + '</p>'
+                    ) if order.courier else ""
+                    track_btn = (
+                        f'<p style="margin:14px 0 0">'
+                        f'<a href="{tracking_url}" style="background:#059669;color:#fff;'
+                        f'padding:10px 20px;border-radius:6px;text-decoration:none;'
+                        f'font-weight:700;font-size:13px;display:inline-block">Track Your Package &rarr;</a></p>'
+                    ) if tracking_url else ""
                     tracking_block = (
                         '<div style="background:#f0fdf4;border:1px solid #bbf7d0;'
                         'border-radius:8px;padding:16px;margin:16px 0">'
-                        '<p style="margin:0 0 4px;font-weight:700;color:#166534">Tracking Information</p>'
-                        f'<p style="margin:0;color:#166534">Tracking #: <b>{order.tracking_number}</b></p>'
-                        f'{carrier_line}</div>'
+                        '<p style="margin:0 0 6px;font-weight:700;color:#166534;font-size:13px;'
+                        'text-transform:uppercase;letter-spacing:.06em">Tracking Information</p>'
+                        f'<p style="margin:0;color:#166534;font-size:14px">Tracking #: {tracking_link}</p>'
+                        f'{carrier_line}'
+                        f'{track_btn}'
+                        '</div>'
                     )
                 email_svc.send_raw(
                     to_email=order.guest_email,
                     subject=f"Your Order {order.order_number} Has Shipped!",
                     body_html=_af_email(
-                        f'<h2 style="color:#059669;margin:0 0 12px">Your Order Has Shipped! &#128230;</h2>'
+                        f'<h2 style="color:#059669;margin:0 0 12px">Your Order Has Shipped!</h2>'
                         f'<p>Hi {name},</p>'
                         f'<p>Great news &#8212; your AF Apparels order is on its way!</p>'
                         f'<div style="background:#f9fafb;border-radius:8px;padding:16px;margin:16px 0">'
@@ -184,18 +201,52 @@ async def _send_order_status_email(order: Order, new_status: str, db: AsyncSessi
                 )
             except Exception:
                 # Template may not exist — fall back to raw
+                tracking_url = getattr(order, "tracking_url", None)
+                tracking_block_w = ""
+                if order.tracking_number:
+                    tracking_link_w = (
+                        f'<a href="{tracking_url}" style="color:#166534;font-weight:700">'
+                        f'{order.tracking_number}</a>'
+                        if tracking_url else f'<b>{order.tracking_number}</b>'
+                    )
+                    carrier_line_w = (
+                        f'<p style="margin:6px 0 0;color:#166534;font-size:13px">'
+                        f'Carrier: <b>{order.courier}</b>'
+                        + (f' &mdash; {order.courier_service}' if order.courier_service else '')
+                        + '</p>'
+                    ) if order.courier else ""
+                    track_btn_w = (
+                        f'<p style="margin:14px 0 0">'
+                        f'<a href="{tracking_url}" style="background:#059669;color:#fff;'
+                        f'padding:10px 20px;border-radius:6px;text-decoration:none;'
+                        f'font-weight:700;font-size:13px;display:inline-block">Track Your Package &rarr;</a></p>'
+                    ) if tracking_url else ""
+                    tracking_block_w = (
+                        '<div style="background:#f0fdf4;border:1px solid #bbf7d0;'
+                        'border-radius:8px;padding:16px;margin:16px 0">'
+                        '<p style="margin:0 0 6px;font-weight:700;color:#166534;font-size:13px;'
+                        'text-transform:uppercase;letter-spacing:.06em">Tracking Information</p>'
+                        f'<p style="margin:0;color:#166534;font-size:14px">Tracking #: {tracking_link_w}</p>'
+                        f'{carrier_line_w}'
+                        f'{track_btn_w}'
+                        '</div>'
+                    )
                 email_svc.send_raw(
                     to_email=user.email,
-                    subject=f"Order {order.order_number} Has Shipped!",
+                    subject=f"Your Order {order.order_number} Has Shipped!",
                     body_html=_af_email(
-                        f'<h2 style="color:#059669;margin:0 0 12px">Your Order Has Shipped! &#128230;</h2>'
+                        f'<h2 style="color:#059669;margin:0 0 12px">Your Order Has Shipped!</h2>'
                         f'<p>Hi {first},</p>'
-                        f'<p>Order <b>{order.order_number}</b> is on its way.</p>'
-                        + (f'<p><b>Tracking #:</b> {order.tracking_number}</p>' if order.tracking_number else "")
-                        + (f'<p><b>Carrier:</b> {order.courier}</p>' if order.courier else "")
-                        + f'<p style="margin:20px 0"><a href="{order_url}"'
-                        f' style="background:#E8242A;color:#fff;padding:12px 24px;border-radius:6px;'
-                        f'text-decoration:none;font-weight:700;display:inline-block">View Order &rarr;</a></p>'
+                        f'<p>Great news &#8212; your AF Apparels order <b>{order.order_number}</b> is on its way!</p>'
+                        f'<div style="background:#f9fafb;border-radius:8px;padding:16px;margin:16px 0">'
+                        f'<p style="margin:0;color:#6b7280;font-size:12px;text-transform:uppercase;letter-spacing:.06em">Order Number</p>'
+                        f'<p style="margin:4px 0 0;font-weight:800;font-size:18px;color:#2A2830">{order.order_number}</p>'
+                        f'</div>'
+                        f'{tracking_block_w}'
+                        f'<p style="margin:20px 0">'
+                        f'<a href="{order_url}" style="background:#E8242A;color:#fff;padding:12px 24px;'
+                        f'border-radius:6px;text-decoration:none;font-weight:700;display:inline-block">'
+                        f'View Order &rarr;</a></p>'
                     ),
                 )
         else:
