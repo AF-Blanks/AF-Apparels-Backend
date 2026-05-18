@@ -175,8 +175,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return True
         if path.startswith("/api/v1/product-specs"):
             return True
-        # Tax rate — needed for guest checkout address step
+        # Tax rate + ZipTax calculate/test — needed for guest checkout and debugging
         if path.startswith("/api/v1/tax-rate"):
+            return True
+        if path.startswith("/api/v1/tax/"):
             return True
         # Page SEO metadata — needed for SSR on all public pages
         if path.startswith("/api/v1/pages-seo"):
