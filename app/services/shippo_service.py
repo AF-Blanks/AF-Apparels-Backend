@@ -6,6 +6,14 @@ from shippo.models import components
 
 logger = logging.getLogger(__name__)
 
+GRAMS_PER_OZ = 28.3495
+
+
+def grams_to_oz(grams: float) -> float:
+    """Convert grams to ounces for Shippo API calls."""
+    return grams / GRAMS_PER_OZ
+
+
 WAREHOUSE_ADDRESS = {
     "name": "AF Apparels",
     "street1": "10719 Turbeville Rd",
@@ -32,7 +40,7 @@ def get_client():
     return shippo.Shippo(api_key_header=api_key)
 
 
-async def create_label(order_id: str, to_address: dict, carrier_token: str) -> dict:
+async def create_label(order_id: str, to_address: dict, carrier_token: str, weight_oz: float = 16.0) -> dict:
     try:
         client = get_client()
 
@@ -84,7 +92,7 @@ async def create_label(order_id: str, to_address: dict, carrier_token: str) -> d
                     width="10",
                     height="6",
                     distance_unit=components.DistanceUnitEnum.IN,
-                    weight="16",
+                    weight=str(round(weight_oz, 2)),
                     mass_unit=components.WeightUnitEnum.OZ,
                 )],
                 async_=False,
@@ -154,8 +162,26 @@ async def create_shippo_label(order, carrier: str) -> dict:
     if not all([to_address["street1"], to_address["city"], to_address["state"], to_address["zip"]]):
         return {"success": False, "error": "Incomplete shipping address on order"}
 
+    # Compute total shipment weight in oz from order items (weight stored in grams per product).
+    # Falls back to 16 oz (~453 g) when product weights are not set.
+    weight_oz = 16.0
+    items = getattr(order, "items", None) or []
+    if items:
+        total_g = 0.0
+        for item in items:
+            prod = getattr(item, "product", None)
+            w_str = getattr(prod, "weight", None) if prod else None
+            if w_str:
+                try:
+                    total_g += float(w_str) * (item.quantity or 1)
+                except (ValueError, TypeError):
+                    total_g = 0.0
+                    break
+        if total_g > 0:
+            weight_oz = grams_to_oz(total_g)
+
     carrier_token = CARRIER_TOKENS.get(carrier, "usps_priority")
-    return await create_label(str(order.id), to_address, carrier_token)
+    return await create_label(str(order.id), to_address, carrier_token, weight_oz=weight_oz)
 
 
 async def track_package(tracking_number: str, carrier: str) -> dict:
