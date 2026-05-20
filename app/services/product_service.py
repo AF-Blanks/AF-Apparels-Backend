@@ -587,6 +587,7 @@ def _variant_to_dict(variant: ProductVariant) -> dict:
         "msrp": str(msrp) if msrp is not None else None,
         "effective_price": str(getattr(variant, "effective_price", variant.retail_price)),
         "stock_quantity": getattr(variant, "stock_quantity", 0),
+        "weight_grams": getattr(variant, "weight_grams", None),
         "status": variant.status,
     }
 

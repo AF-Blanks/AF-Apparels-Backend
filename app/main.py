@@ -346,6 +346,17 @@ async def _ensure_content_tables() -> None:
                     updated_at TIMESTAMPTZ DEFAULT now()
                 )
             """))
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='product_variants' AND column_name='weight_grams'
+                    ) THEN
+                        ALTER TABLE product_variants ADD COLUMN weight_grams FLOAT;
+                    END IF;
+                END$$;
+            """))
         print("Content tables: OK")
     except Exception as exc:
         print(f"Content tables warning (non-fatal): {exc}")

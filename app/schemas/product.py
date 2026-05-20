@@ -68,6 +68,7 @@ class VariantOut(BaseModel):
     # msrp: Decimal | None = None  # deprecated in admin UI; kept in DB for guest pricing
     cost_per_item: Decimal | None = None
     country_of_origin: str | None = None
+    weight_grams: float | None = None
     effective_price: Decimal | None = None  # populated by pricing layer
     stock_quantity: int = 0               # summed across warehouses
     status: str
@@ -220,6 +221,7 @@ class VariantCreate(BaseModel):
     # msrp: Decimal | None = None  # deprecated in admin UI; kept in DB for guest pricing
     cost_per_item: Decimal | None = None
     country_of_origin: str | None = None
+    weight_grams: float | None = None
     status: str = "active"
 
 

@@ -2,7 +2,7 @@
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Enum, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Enum, Float, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -121,6 +121,7 @@ class ProductVariant(BaseModel):
     msrp: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)  # kept for guest pricing logic; hidden from admin UI
     cost_per_item: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
     country_of_origin: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    weight_grams: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Status: active | discontinued | out_of_stock
     status: Mapped[str] = mapped_column(
         Enum("active", "discontinued", "out_of_stock", name="variant_status"),
