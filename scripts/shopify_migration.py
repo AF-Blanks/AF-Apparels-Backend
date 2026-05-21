@@ -227,7 +227,7 @@ def migrate_customers(
     tier_rows = cur.fetchall()
     tier_name_to_id: dict[str, str] = {r["name"].lower(): str(r["id"]) for r in tier_rows}
 
-    with open(csv_path, newline="", encoding="utf-8-sig") as fh:
+    with open(csv_path, newline="", encoding="utf-8-sig", errors="replace") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             stats["processed"] += 1
@@ -384,7 +384,7 @@ def migrate_orders(
 
     # Group rows by order Name (#XXXX)
     orders: dict[str, list[dict]] = {}
-    with open(csv_path, newline="", encoding="utf-8-sig") as fh:
+    with open(csv_path, newline="", encoding="utf-8-sig", errors="replace") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             name = (row.get("Name") or "").strip()
