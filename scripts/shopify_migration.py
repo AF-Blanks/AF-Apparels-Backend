@@ -83,7 +83,15 @@ def get_connection() -> psycopg2.extensions.connection:
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
 
-    return psycopg2.connect(db_url, cursor_factory=psycopg2.extras.RealDictCursor)
+    return psycopg2.connect(
+        db_url,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        connect_timeout=30,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
 
 
 def ensure_migration_columns(cur: psycopg2.extensions.cursor) -> None:
@@ -227,6 +235,7 @@ def migrate_customers(
     tier_rows = cur.fetchall()
     tier_name_to_id: dict[str, str] = {r["name"].lower(): str(r["id"]) for r in tier_rows}
 
+    batch_count = 0
     with open(csv_path, newline="", encoding="utf-8-sig", errors="replace") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
@@ -241,6 +250,9 @@ def migrate_customers(
                     cur, row, email, tier_name_to_id, dry_run
                 )
                 stats["created"] += 1
+                batch_count += 1
+                if not dry_run and batch_count % 50 == 0:
+                    cur.connection.commit()
             except Exception as exc:
                 stats["errors"] += 1
                 errors.append({
@@ -250,7 +262,13 @@ def migrate_customers(
                 })
                 if not dry_run:
                     cur.connection.rollback()
+                    batch_count = 0
 
+            if stats["processed"] % 10 == 0:
+                print(f"  Progress: {stats['processed']} customers processed...")
+
+    if not dry_run:
+        cur.connection.commit()
     return stats
 
 
@@ -367,8 +385,6 @@ def _migrate_single_customer(
         (company_id, user_id),
     )
 
-    cur.connection.commit()
-
 
 # ---------------------------------------------------------------------------
 # Order migration
@@ -392,14 +408,17 @@ def migrate_orders(
                 continue
             orders.setdefault(name, []).append(row)
 
-    stats["processed"] = len(orders)
-
+    batch_count = 0
     for order_name, rows in orders.items():
+        stats["processed"] += 1
         first = rows[0]
         try:
             created = _migrate_single_order(cur, order_name, first, rows, dry_run)
             if created:
                 stats["created"] += 1
+                batch_count += 1
+                if not dry_run and batch_count % 50 == 0:
+                    cur.connection.commit()
             else:
                 stats["skipped"] += 1
         except Exception as exc:
@@ -411,7 +430,13 @@ def migrate_orders(
             })
             if not dry_run:
                 cur.connection.rollback()
+                batch_count = 0
 
+        if stats["processed"] % 10 == 0:
+            print(f"  Progress: {stats['processed']} orders processed...")
+
+    if not dry_run:
+        cur.connection.commit()
     return stats
 
 
@@ -589,7 +614,6 @@ def _migrate_single_order(
             ),
         )
 
-    cur.connection.commit()
     return True
 
 
