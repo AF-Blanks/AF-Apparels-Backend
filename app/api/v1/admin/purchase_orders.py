@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
+from app.services.quickbooks_service import quickbooks_service
 from app.models.product import ProductVariant
 from app.models.purchase_order import (
     Manufacturer,
@@ -212,6 +213,7 @@ class POCreate(BaseModel):
 async def create_po(data: POCreate, db: AsyncSession = Depends(get_db)):
     po = PurchaseOrder(
         manufacturer_id=UUID(data.manufacturer_id),
+        order_date=date.today(),
         expected_delivery=data.expected_delivery,
         notes=data.notes,
         status="draft",
@@ -353,8 +355,6 @@ async def sync_to_quickbooks(po_id: UUID, db: AsyncSession = Depends(get_db)):
     if not manufacturer:
         raise HTTPException(status_code=400, detail="PO has no manufacturer")
 
-    from app.services.quickbooks_service import quickbooks_service
-
     try:
         if po.status in ("draft", "sent"):
             qb_result = await quickbooks_service.create_purchase_order(
@@ -394,5 +394,5 @@ async def sync_to_quickbooks(po_id: UUID, db: AsyncSession = Depends(get_db)):
         return {"success": True, "qb_id": qb_result.get("id")}
 
     except Exception as e:
-        logger.error(f"QB sync error for PO {po_id}: {e}")
+        logger.error(f"QB sync failed for PO {po_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"QB sync failed: {str(e)}")

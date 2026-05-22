@@ -229,3 +229,109 @@ class QuickBooksService:
             return True
         except Exception:
             return False
+
+    # ── Async helpers for PO sync ──────────────────────────────────────────────
+
+    async def _make_request(self, method: str, path: str, data: dict | None = None) -> dict[str, Any]:
+        """Async wrapper around sync _request, runs in thread pool."""
+        kwargs: dict[str, Any] = {}
+        if data is not None:
+            kwargs["json"] = data
+        return await asyncio.to_thread(self._request, method, path, **kwargs)
+
+    # ── Vendor ────────────────────────────────────────────────────────────────
+
+    async def find_or_create_vendor(self, vendor_name: str) -> str:
+        """Find vendor in QB by name; create if not found. Returns QB vendor Id."""
+        import logging
+        _log = logging.getLogger(__name__)
+        escaped = vendor_name.replace("'", "\\'")
+        result = await self._make_request(
+            "GET",
+            f"query?query=SELECT * FROM Vendor WHERE DisplayName = '{escaped}'&minorversion=65",
+        )
+        vendors = result.get("QueryResponse", {}).get("Vendor", [])
+        if vendors:
+            return str(vendors[0]["Id"])
+        result = await self._make_request("POST", "vendor", {"DisplayName": vendor_name})
+        vendor_id = result.get("Vendor", {}).get("Id")
+        if not vendor_id:
+            _log.error("QB create vendor returned no Id: %s", result)
+            raise ValueError(f"Could not create QB vendor for '{vendor_name}'")
+        return str(vendor_id)
+
+    # ── Purchase Order ────────────────────────────────────────────────────────
+
+    async def create_purchase_order(
+        self,
+        vendor_name: str,
+        line_items: list[dict],
+        po_number: str,
+        expected_date: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a Purchase Order in QuickBooks. Returns the QB PurchaseOrder dict."""
+        from datetime import date as _date
+        vendor_id = await self.find_or_create_vendor(vendor_name)
+        qb_lines = []
+        for i, item in enumerate(line_items):
+            amount = round(item["qty"] * item["unit_price"], 2)
+            qb_lines.append({
+                "Id": str(i + 1),
+                "LineNum": i + 1,
+                "Amount": amount,
+                "DetailType": "ItemBasedExpenseLineDetail",
+                "Description": item.get("description", ""),
+                "ItemBasedExpenseLineDetail": {
+                    "ItemRef": {"value": "1", "name": "Services"},
+                    "Qty": item["qty"],
+                    "UnitPrice": item["unit_price"],
+                },
+            })
+        po_data = {
+            "VendorRef": {"value": vendor_id},
+            "Line": qb_lines,
+            "DocNumber": po_number,
+            "TxnDate": expected_date or str(_date.today()),
+            "POStatus": "Open",
+        }
+        result = await self._make_request("POST", "purchaseorder", po_data)
+        qb_po = result.get("PurchaseOrder", {})
+        return {"id": qb_po.get("Id"), **qb_po}
+
+    # ── Vendor Bill ───────────────────────────────────────────────────────────
+
+    async def create_vendor_bill(
+        self,
+        vendor_name: str,
+        line_items: list[dict],
+        po_number: str,
+        bill_date: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a Vendor Bill in QuickBooks. Returns the QB Bill dict."""
+        from datetime import date as _date
+        vendor_id = await self.find_or_create_vendor(vendor_name)
+        qb_lines = []
+        for i, item in enumerate(line_items):
+            amount = round(item["qty"] * item["unit_price"], 2)
+            qb_lines.append({
+                "Id": str(i + 1),
+                "LineNum": i + 1,
+                "Amount": amount,
+                "DetailType": "AccountBasedExpenseLineDetail",
+                "Description": item.get("description", ""),
+                "AccountBasedExpenseLineDetail": {
+                    "AccountRef": {"value": "1", "name": "Cost of Goods Sold"},
+                },
+            })
+        bill_data = {
+            "VendorRef": {"value": vendor_id},
+            "Line": qb_lines,
+            "DocNumber": po_number,
+            "TxnDate": bill_date or str(_date.today()),
+        }
+        result = await self._make_request("POST", "bill", bill_data)
+        qb_bill = result.get("Bill", {})
+        return {"id": qb_bill.get("Id"), **qb_bill}
+
+
+quickbooks_service = QuickBooksService()
