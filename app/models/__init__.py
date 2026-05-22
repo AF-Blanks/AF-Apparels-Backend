@@ -16,3 +16,4 @@ from app.models.communication import Message, EmailTemplate  # noqa: F401
 from app.models.statement import StatementTransaction  # noqa: F401
 from app.models.discount_group import DiscountGroup, VariantPricingOverride, VariantLevelPricingOverride  # noqa: F401
 from app.models.discount import DiscountCode, DiscountUsage  # noqa: F401
+from app.models.purchase_order import Manufacturer, PurchaseOrder, POLineItem, POReceiving, POReceivingItem  # noqa: F401

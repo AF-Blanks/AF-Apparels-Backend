@@ -357,6 +357,110 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            # ── Purchase Order tables ──────────────────────────────────────────
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS manufacturers (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name VARCHAR(255) NOT NULL,
+                    contact_name VARCHAR(255),
+                    email VARCHAR(255),
+                    phone VARCHAR(50),
+                    address TEXT,
+                    notes TEXT,
+                    is_active BOOLEAN DEFAULT true,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS purchase_orders (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    po_number VARCHAR(50) UNIQUE NOT NULL DEFAULT '',
+                    manufacturer_id UUID REFERENCES manufacturers(id),
+                    status VARCHAR(50) DEFAULT 'draft',
+                    order_date DATE DEFAULT CURRENT_DATE,
+                    expected_delivery DATE,
+                    notes TEXT,
+                    total_expected DECIMAL(10,2) DEFAULT 0,
+                    total_received DECIMAL(10,2) DEFAULT 0,
+                    qb_synced BOOLEAN DEFAULT false,
+                    qb_po_id VARCHAR(255),
+                    qb_bill_id VARCHAR(255),
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS po_line_items (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    po_id UUID REFERENCES purchase_orders(id) ON DELETE CASCADE,
+                    product_variant_id UUID REFERENCES product_variants(id),
+                    new_product_name VARCHAR(255),
+                    new_product_sku VARCHAR(255),
+                    new_product_size VARCHAR(50),
+                    new_product_color VARCHAR(50),
+                    qty_ordered INTEGER NOT NULL DEFAULT 0,
+                    unit_cost_expected DECIMAL(10,2) NOT NULL DEFAULT 0,
+                    total_expected DECIMAL(10,2) GENERATED ALWAYS AS (qty_ordered * unit_cost_expected) STORED,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS po_receivings (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    po_id UUID REFERENCES purchase_orders(id) ON DELETE CASCADE,
+                    received_date DATE DEFAULT CURRENT_DATE,
+                    notes TEXT,
+                    qb_bill_id VARCHAR(255),
+                    qb_synced BOOLEAN DEFAULT false,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS po_receiving_items (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    receiving_id UUID REFERENCES po_receivings(id) ON DELETE CASCADE,
+                    po_line_item_id UUID REFERENCES po_line_items(id),
+                    qty_received INTEGER NOT NULL DEFAULT 0,
+                    unit_cost_actual DECIMAL(10,2) NOT NULL DEFAULT 0,
+                    total_actual DECIMAL(10,2) GENERATED ALWAYS AS (qty_received * unit_cost_actual) STORED,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+            await conn.execute(text("""
+                CREATE OR REPLACE FUNCTION generate_po_number()
+                RETURNS TRIGGER AS $$
+                DECLARE
+                    year_part TEXT;
+                    seq_num INTEGER;
+                    new_po_number TEXT;
+                BEGIN
+                    year_part := TO_CHAR(NOW(), 'YYYY');
+                    SELECT COUNT(*) + 1 INTO seq_num
+                    FROM purchase_orders
+                    WHERE EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM NOW());
+                    new_po_number := 'PO-' || year_part || '-' || LPAD(seq_num::TEXT, 3, '0');
+                    NEW.po_number := new_po_number;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql
+            """))
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_trigger WHERE tgname = 'set_po_number'
+                    ) THEN
+                        CREATE TRIGGER set_po_number
+                            BEFORE INSERT ON purchase_orders
+                            FOR EACH ROW
+                            EXECUTE FUNCTION generate_po_number();
+                    END IF;
+                END$$;
+            """))
         print("Content tables: OK")
     except Exception as exc:
         print(f"Content tables warning (non-fatal): {exc}")
@@ -551,6 +655,7 @@ from app.api.v1.admin import (  # noqa: E402
     product_specs as admin_product_specs,
     pages_seo as admin_pages_seo,
     blog_posts as admin_blog_posts,
+    purchase_orders as admin_purchase_orders,
 )
 
 _cors_origins = list({settings.FRONTEND_URL, *settings.allowed_origins_list} - {""})
@@ -604,6 +709,7 @@ app.include_router(pages_seo.router, prefix=_V1)
 app.include_router(blog_posts.router, prefix=_V1)
 app.include_router(admin_pages_seo.router, prefix=_V1)
 app.include_router(admin_blog_posts.router, prefix=_V1)
+app.include_router(admin_purchase_orders.router, prefix=f"{_V1}/admin/purchase-orders", tags=["purchase-orders"])
 
 # ── Debug: log all registered routes at import time ──────────────────────────
 for _route in app.routes:
