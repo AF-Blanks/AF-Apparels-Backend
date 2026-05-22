@@ -433,3 +433,124 @@ async def sync_to_quickbooks(po_id: UUID, db: AsyncSession = Depends(get_db)):
     except Exception as e:
         logger.error(f"QB sync failed for PO {po_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"QB sync failed: {str(e)}")
+
+
+# ─── Send email ────────────────────────────────────────────────────────────────
+
+@router.post("/{po_id}/send-email")
+async def send_po_email(po_id: UUID, db: AsyncSession = Depends(get_db)):
+    import asyncio
+
+    result = await db.execute(
+        select(PurchaseOrder)
+        .where(PurchaseOrder.id == po_id)
+        .options(
+            selectinload(PurchaseOrder.manufacturer),
+            selectinload(PurchaseOrder.line_items)
+            .selectinload(POLineItem.variant)
+            .selectinload(ProductVariant.product),
+        )
+    )
+    po = result.scalar_one_or_none()
+    if not po:
+        raise HTTPException(status_code=404, detail="PO not found")
+
+    manufacturer = po.manufacturer
+    if not manufacturer or not manufacturer.email:
+        raise HTTPException(status_code=400, detail="Manufacturer has no email address on file")
+
+    # Build line items rows
+    rows_html = ""
+    for li in po.line_items:
+        variant = li.variant
+        product = variant.product if variant else None
+        product_name = product.name if product else (li.new_product_name or "—")
+        color = (variant.color if variant else li.new_product_color) or "—"
+        size = (variant.size if variant else li.new_product_size) or "—"
+        sku = (variant.sku if variant else li.new_product_sku) or "—"
+        qty = li.qty_ordered
+        unit_cost = float(li.unit_cost_expected)
+        rows_html += (
+            f'<tr>'
+            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;">{product_name}</td>'
+            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;font-family:monospace;font-size:12px;">{sku}</td>'
+            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;">{color}</td>'
+            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;">{size}</td>'
+            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;text-align:center;">{qty}</td>'
+            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;text-align:right;">${unit_cost:.2f}</td>'
+            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;text-align:right;font-weight:600;">${qty * unit_cost:.2f}</td>'
+            f'</tr>'
+        )
+
+    order_date_str = po.order_date.strftime("%B %d, %Y") if po.order_date else date.today().strftime("%B %d, %Y")
+    delivery_str = po.expected_delivery.strftime("%B %d, %Y") if po.expected_delivery else "—"
+    contact_str = manufacturer.contact_name or manufacturer.name
+
+    notes_html = (
+        f'<p style="margin:0 0 16px;"><strong>Notes:</strong> {po.notes}</p>'
+        if po.notes else ""
+    )
+
+    content_html = f"""
+<h2 style="color:#1B3A5C;margin:0 0 20px;font-size:20px;">Purchase Order: {po.po_number}</h2>
+<table style="width:100%;margin-bottom:24px;border-collapse:collapse;">
+  <tr>
+    <td style="padding:4px 0;width:50%;"><strong>To:</strong> {manufacturer.name}</td>
+    <td style="padding:4px 0;"><strong>Order Date:</strong> {order_date_str}</td>
+  </tr>
+  <tr>
+    <td style="padding:4px 0;"><strong>Contact:</strong> {contact_str}</td>
+    <td style="padding:4px 0;"><strong>Expected Delivery:</strong> {delivery_str}</td>
+  </tr>
+</table>
+<table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px;">
+  <thead>
+    <tr style="background:#1B3A5C;color:#ffffff;">
+      <th style="padding:10px 12px;text-align:left;">Product</th>
+      <th style="padding:10px 12px;text-align:left;">SKU</th>
+      <th style="padding:10px 12px;text-align:left;">Color</th>
+      <th style="padding:10px 12px;text-align:left;">Size</th>
+      <th style="padding:10px 12px;text-align:center;">Qty</th>
+      <th style="padding:10px 12px;text-align:right;">Unit Cost</th>
+      <th style="padding:10px 12px;text-align:right;">Total</th>
+    </tr>
+  </thead>
+  <tbody>{rows_html}</tbody>
+  <tfoot>
+    <tr style="background:#F3F4F6;font-weight:700;">
+      <td colspan="6" style="padding:10px 12px;border:1px solid #e5e7eb;text-align:right;">Total Expected:</td>
+      <td style="padding:10px 12px;border:1px solid #e5e7eb;text-align:right;">${float(po.total_expected):.2f}</td>
+    </tr>
+  </tfoot>
+</table>
+{notes_html}
+<p style="color:#6b7280;font-size:13px;margin:0;">
+  Please confirm receipt of this purchase order at your earliest convenience.
+</p>
+"""
+
+    from app.services.email_service import EmailService
+    email_svc = EmailService()
+    html_body = EmailService._base_template(content_html)
+
+    try:
+        ok = await asyncio.to_thread(
+            email_svc.send_raw,
+            manufacturer.email,
+            f"Purchase Order {po.po_number} — AF Apparels",
+            html_body,
+        )
+        if not ok:
+            raise HTTPException(status_code=500, detail="Email delivery failed (check RESEND_API_KEY)")
+
+        if po.status == "draft":
+            po.status = "sent"
+            await db.commit()
+
+        return {"success": True, "message": f"PO email sent to {manufacturer.email}"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("PO email send error for %s: %s", po_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Email failed: {str(e)}")
