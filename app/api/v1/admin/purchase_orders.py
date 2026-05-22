@@ -12,7 +12,8 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.services.quickbooks_service import quickbooks_service
-from app.models.product import ProductVariant
+from app.models.inventory import InventoryRecord, Warehouse
+from app.models.product import Product, ProductVariant
 from app.models.purchase_order import (
     Manufacturer,
     POLineItem,
@@ -43,10 +44,12 @@ def _mfr_dict(m: Manufacturer) -> dict:
 
 def _line_item_dict(li: POLineItem) -> dict:
     variant = li.variant
+    product = variant.product if variant else None
     return {
         "id": str(li.id),
         "po_id": str(li.po_id),
         "product_variant_id": str(li.product_variant_id) if li.product_variant_id else None,
+        "product_name": product.name if product else li.new_product_name,
         "variant_sku": variant.sku if variant else None,
         "variant_color": variant.color if variant else li.new_product_color,
         "variant_size": variant.size if variant else li.new_product_size,
@@ -182,7 +185,9 @@ async def get_po(po_id: UUID, db: AsyncSession = Depends(get_db)):
         .where(PurchaseOrder.id == po_id)
         .options(
             selectinload(PurchaseOrder.manufacturer),
-            selectinload(PurchaseOrder.line_items).selectinload(POLineItem.variant),
+            selectinload(PurchaseOrder.line_items)
+            .selectinload(POLineItem.variant)
+            .selectinload(ProductVariant.product),
             selectinload(PurchaseOrder.receivings).selectinload(POReceiving.items),
         )
     )
@@ -256,6 +261,19 @@ async def update_po_status(po_id: UUID, body: dict, db: AsyncSession = Depends(g
     return {"success": True, "status": new_status}
 
 
+@router.post("/{po_id}/mark-sent")
+async def mark_as_sent(po_id: UUID, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(PurchaseOrder).where(PurchaseOrder.id == po_id))
+    po = result.scalar_one_or_none()
+    if not po:
+        raise HTTPException(status_code=404, detail="PO not found")
+    if po.status != "draft":
+        raise HTTPException(status_code=400, detail=f"PO is already '{po.status}', cannot mark as sent")
+    po.status = "sent"
+    await db.commit()
+    return {"success": True, "status": "sent"}
+
+
 # ─── receiving ─────────────────────────────────────────────────────────────────
 
 class ReceivingItemCreate(BaseModel):
@@ -300,18 +318,37 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
         db.add(receiving_item)
         total_received_this_batch += item_data.qty_received * item_data.unit_cost_actual
 
-        # Update inventory
+        # Update inventory via InventoryRecord
         line_result = await db.execute(
             select(POLineItem).where(POLineItem.id == UUID(item_data.po_line_item_id))
         )
         line_item = line_result.scalar_one_or_none()
         if line_item and line_item.product_variant_id:
-            variant_result = await db.execute(
-                select(ProductVariant).where(ProductVariant.id == line_item.product_variant_id)
-            )
-            variant = variant_result.scalar_one_or_none()
-            if variant:
-                variant.stock_quantity = (variant.stock_quantity or 0) + item_data.qty_received
+            try:
+                inv_result = await db.execute(
+                    select(InventoryRecord).where(
+                        InventoryRecord.variant_id == line_item.product_variant_id
+                    ).limit(1)
+                )
+                inv_record = inv_result.scalar_one_or_none()
+                if inv_record:
+                    inv_record.quantity = inv_record.quantity + item_data.qty_received
+                else:
+                    wh_result = await db.execute(
+                        select(Warehouse).where(Warehouse.is_active == True).limit(1)
+                    )
+                    warehouse = wh_result.scalar_one_or_none()
+                    if warehouse:
+                        db.add(InventoryRecord(
+                            variant_id=line_item.product_variant_id,
+                            warehouse_id=warehouse.id,
+                            quantity=item_data.qty_received,
+                        ))
+                    else:
+                        logger.warning("No active warehouse found; skipping inventory update for variant %s", line_item.product_variant_id)
+            except Exception as e:
+                logger.error("Stock update error for variant %s: %s", line_item.product_variant_id, e, exc_info=True)
+                raise
 
     po.total_received = float(po.total_received or 0) + total_received_this_batch
 
