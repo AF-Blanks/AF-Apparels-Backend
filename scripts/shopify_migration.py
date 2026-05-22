@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import bcrypt
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
@@ -326,7 +327,10 @@ def _migrate_single_customer(
     now = datetime.now(timezone.utc)
     user_id = str(uuid.uuid4())
 
-    # Insert user (no real password — migrated users must reset)
+    random_password = str(uuid.uuid4())
+    hashed = bcrypt.hashpw(random_password.encode(), bcrypt.gensalt()).decode()
+
+    # Insert user (random password set — migrated users must reset via Forgot Password)
     cur.execute(
         """
         INSERT INTO users (
@@ -341,7 +345,7 @@ def _migrate_single_customer(
         """,
         (
             user_id, email,
-            "$migrated$no_password_set",  # sentinel; user must reset
+            hashed,
             first_name, last_name, phone,
             int(shopify_customer_id) if shopify_customer_id else None,
             now, now,
