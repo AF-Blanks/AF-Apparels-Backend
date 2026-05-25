@@ -25,6 +25,8 @@ PUBLIC_PATHS = {
     "/api/v1/validate-activation-token",
     "/api/v1/products",
     "/api/v1/products/categories",
+    "/api/v1/shipping/live-rates",
+    "/api/v1/shipping/shipping-type",
     "/api/v1/webhooks/stripe",
     "/health",
     "/docs",
