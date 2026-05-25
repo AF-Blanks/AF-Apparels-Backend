@@ -472,18 +472,18 @@ async def send_po_email(po_id: UUID, db: AsyncSession = Depends(get_db)):
 
         rows += (
             f'<div style="background:#f9f9f9;border-radius:6px;padding:14px;margin-bottom:10px;border-left:3px solid #1a1a2e;">'
-            f'<div style="font-weight:bold;color:#1a1a2e;margin-bottom:6px;">{product_name}</div>'
+            f'<div style="font-weight:bold;color:#1a1a2e;margin-bottom:8px;font-size:15px;">{product_name}</div>'
             f'<table style="width:100%;border-collapse:collapse;">'
             f'<tr>'
-            f'<td style="color:#666;font-size:13px;padding:2px 8px 2px 0;width:50%;">SKU: <span style="color:#333;">{sku}</span></td>'
-            f'<td style="color:#666;font-size:13px;padding:2px 0;width:50%;">Color: <span style="color:#333;">{color}</span></td>'
+            f'<td style="color:#666;font-size:13px;padding:2px 0;width:50%">SKU: <span style="color:#333;">{sku}</span></td>'
+            f'<td style="color:#666;font-size:13px;padding:2px 0;width:50%">Color: <span style="color:#333;">{color}</span></td>'
             f'</tr>'
             f'<tr>'
-            f'<td style="color:#666;font-size:13px;padding:2px 8px 2px 0;">Size: <span style="color:#333;">{size}</span></td>'
+            f'<td style="color:#666;font-size:13px;padding:2px 0;">Size: <span style="color:#333;">{size}</span></td>'
             f'<td style="color:#666;font-size:13px;padding:2px 0;">Qty: <span style="color:#333;">{li.qty_ordered}</span></td>'
             f'</tr>'
             f'<tr>'
-            f'<td style="color:#666;font-size:13px;padding:2px 8px 2px 0;">Unit Cost: <span style="color:#333;">${float(li.unit_cost_expected):.2f}</span></td>'
+            f'<td style="color:#666;font-size:13px;padding:2px 0;">Unit Cost: <span style="color:#333;">${float(li.unit_cost_expected):.2f}</span></td>'
             f'<td style="color:#666;font-size:13px;padding:2px 0;">Total: <span style="font-weight:bold;color:#1a1a2e;">${total:.2f}</span></td>'
             f'</tr>'
             f'</table>'
@@ -499,13 +499,18 @@ async def send_po_email(po_id: UUID, db: AsyncSession = Depends(get_db)):
         if po.notes else ""
     )
 
+    import resend as _resend
+    from app.core.config import settings as _cfg
+    logo_url = _cfg.LOGO_URL or f"{_cfg.FRONTEND_URL}/Af-apparel%20logo.png"
+    _resend.api_key = _cfg.RESEND_API_KEY
+
     html_body = f"""<!DOCTYPE html>
 <html>
 <head><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
 <body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,sans-serif;">
 <div style="max-width:600px;margin:0 auto;background:#ffffff;">
   <div style="background:#ffffff;padding:20px;text-align:center;border-bottom:2px solid #e63946;">
-    <img src="https://af-apparel.com/logo.png" style="max-height:60px;" alt="AF Apparels"/>
+    <img src="{logo_url}" style="max-height:60px;" alt="AF Apparels"/>
   </div>
   <div style="padding:24px;">
     <h2 style="color:#1a1a2e;margin-top:0;">Purchase Order: {po.po_number}</h2>
@@ -544,10 +549,6 @@ async def send_po_email(po_id: UUID, db: AsyncSession = Depends(get_db)):
 </div>
 </body>
 </html>"""
-
-    import resend as _resend
-    from app.core.config import settings as _cfg
-    _resend.api_key = _cfg.RESEND_API_KEY
 
     try:
         response = await asyncio.to_thread(
