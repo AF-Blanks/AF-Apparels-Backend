@@ -109,6 +109,7 @@ async def update_platform_settings(
     ALLOWED_KEYS = {
         "mov", "moq", "guest_pricing_mode", "tax_rate",
         "low_stock_threshold", "notification_email", "standard_shipping",
+        "standard_shipping_method",
     }
 
     updated = {}
@@ -124,6 +125,24 @@ async def update_platform_settings(
         else:
             db.add(PlatformSettings(key=key, value=str(value)))
         updated[key] = str(value)
+
+        # When standard_shipping JSON is saved, also upsert standard_shipping_method
+        # as a plain string for quick lookup without JSON parsing.
+        if key == "standard_shipping":
+            import json as _json
+            _TYPE_MAP = {"store_default": "flat", "flat_rate": "bracket", "live_shippo": "live_shippo"}
+            try:
+                cfg = _json.loads(str(value))
+                method_val = _TYPE_MAP.get(cfg.get("shipping_type", ""), "flat")
+            except Exception:
+                method_val = "flat"
+            method_row = (await db.execute(
+                select(PlatformSettings).where(PlatformSettings.key == "standard_shipping_method")
+            )).scalar_one_or_none()
+            if method_row:
+                method_row.value = method_val
+            else:
+                db.add(PlatformSettings(key="standard_shipping_method", value=method_val))
 
     await db.commit()
     await redis_delete("platform_settings")

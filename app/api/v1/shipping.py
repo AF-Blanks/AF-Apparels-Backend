@@ -1,9 +1,8 @@
 """Public shipping endpoints — live Shippo rates and shipping type lookup."""
-import json
 import logging
 
 from fastapi import APIRouter, Request
-from sqlalchemy import select, text
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/shipping", tags=["shipping"])
@@ -93,10 +92,11 @@ async def get_shipping_type(request: Request):
     """Return the shipping type applicable to the current session.
 
     - Users with a discount group: returns that group's shipping_type
-    - All others: returns the standard_shipping setting's shipping_type
+    - All others: reads standard_shipping_method from the settings table
     """
     from app.core.database import AsyncSessionLocal
     from app.models.discount_group import DiscountGroup
+    from app.models.system import Settings as PlatformSettings
 
     group_id = getattr(request.state, "discount_group_id", None)
     if group_id:
@@ -111,17 +111,10 @@ async def get_shipping_type(request: Request):
                 }
 
     async with AsyncSessionLocal() as db:
-        row = (await db.execute(
-            text("SELECT value FROM settings WHERE key = 'standard_shipping'")
-        )).fetchone()
-        if row:
-            try:
-                cfg = json.loads(row[0])
-                return {
-                    "shipping_type": cfg.get("shipping_type", "store_default"),
-                    "shipping_amount": float(cfg.get("shipping_amount") or 0),
-                }
-            except Exception:
-                pass
+        setting = (await db.execute(
+            select(PlatformSettings).where(PlatformSettings.key == "standard_shipping_method")
+        )).scalar_one_or_none()
+        if setting:
+            return {"shipping_type": setting.value, "shipping_amount": 0}
 
-    return {"shipping_type": "store_default", "shipping_amount": 0}
+    return {"shipping_type": "flat", "shipping_amount": 0}
