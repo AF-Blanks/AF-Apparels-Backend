@@ -34,7 +34,7 @@ class ProductService:
             return json.loads(cached)  # returned as plain dicts for response
 
         result = await self.db.execute(
-            select(Category).options(selectinload(Category.children)).order_by(Category.name)
+            select(Category).options(selectinload(Category.children)).order_by(Category.sort_order, Category.name)
         )
         all_cats = result.scalars().all()
 

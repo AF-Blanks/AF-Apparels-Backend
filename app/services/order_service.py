@@ -114,6 +114,7 @@ class OrderService:
                 select(ProductVariant, Product)
                 .join(Product, ProductVariant.product_id == Product.id)
                 .where(ProductVariant.id == cart_item.variant_id)
+                .with_for_update(skip_locked=False)
             )
             row = variant_result.first()
             if not row:
@@ -342,6 +343,34 @@ class OrderService:
         )
 
         await self.db.flush()
+
+        # Auto-save new shipping address to company address book (if new address, not from book)
+        if not confirm.address_id and confirm.shipping_address and company_id:
+            try:
+                addr = confirm.shipping_address
+                existing_addr = await self.db.execute(
+                    select(UserAddress).where(
+                        UserAddress.company_id == company_id,
+                        UserAddress.address_line1 == addr.line1,
+                        UserAddress.postal_code == addr.postal_code,
+                    )
+                )
+                if not existing_addr.scalar_one_or_none():
+                    self.db.add(UserAddress(
+                        company_id=company_id,
+                        label="Shipping Address",
+                        address_line1=addr.line1,
+                        address_line2=addr.line2,
+                        city=addr.city,
+                        state=addr.state,
+                        postal_code=addr.postal_code,
+                        country=addr.country or "US",
+                        is_default=False,
+                    ))
+                    await self.db.flush()
+            except Exception as _e:
+                import logging as _lg
+                _lg.getLogger(__name__).warning("Auto-save address failed: %s", _e)
 
         # Reload order with items eager-loaded (async ORM cannot lazy-load during response serialization)
         from sqlalchemy.orm import selectinload

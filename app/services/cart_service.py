@@ -353,21 +353,40 @@ class CartService:
             line_total = effective_price * item.quantity
             moq_satisfied = item.quantity >= product.moq
 
-            # Primary product image
-            img_result = await self.db.execute(
-                select(ProductImage)
-                .where(ProductImage.product_id == product.id)
-                .order_by(ProductImage.sort_order)
-                .limit(1)
-            )
-            primary_img = img_result.scalar_one_or_none()
+            # Try to find a color-matched image first (alt_text stores color tag), then fall back to primary
             image_url = None
-            if primary_img:
-                image_url = (
-                    getattr(primary_img, "url_medium_webp", None)
-                    or getattr(primary_img, "url_medium", None)
-                    or getattr(primary_img, "url_thumbnail", None)
+            color_tag = variant.color
+            if color_tag:
+                color_img_result = await self.db.execute(
+                    select(ProductImage)
+                    .where(
+                        ProductImage.product_id == product.id,
+                        ProductImage.alt_text.ilike(color_tag),
+                    )
+                    .order_by(ProductImage.sort_order)
+                    .limit(1)
                 )
+                color_img = color_img_result.scalar_one_or_none()
+                if color_img:
+                    image_url = (
+                        getattr(color_img, "url_medium_webp", None)
+                        or getattr(color_img, "url_medium", None)
+                        or getattr(color_img, "url_thumbnail", None)
+                    )
+            if not image_url:
+                img_result = await self.db.execute(
+                    select(ProductImage)
+                    .where(ProductImage.product_id == product.id)
+                    .order_by(ProductImage.sort_order)
+                    .limit(1)
+                )
+                primary_img = img_result.scalar_one_or_none()
+                if primary_img:
+                    image_url = (
+                        getattr(primary_img, "url_medium_webp", None)
+                        or getattr(primary_img, "url_medium", None)
+                        or getattr(primary_img, "url_thumbnail", None)
+                    )
 
             items.append(
                 CartItemOut(

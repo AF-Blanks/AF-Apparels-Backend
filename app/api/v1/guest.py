@@ -129,6 +129,7 @@ async def guest_checkout(
             select(ProductVariant, Product)
             .join(Product, ProductVariant.product_id == Product.id)
             .where(ProductVariant.id == cart_item.variant_id)
+            .with_for_update(skip_locked=False)
         )
         row = variant_result.first()
         if not row:
@@ -136,6 +137,11 @@ async def guest_checkout(
         variant, product = row
 
         if variant.status != "active":
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "Checkout blocked: variant %s (SKU %s) has status '%s'",
+                variant.id, variant.sku, variant.status
+            )
             raise ValidationError(f"SKU {variant.sku} is no longer available")
 
         # Stock check — 0 means unlimited

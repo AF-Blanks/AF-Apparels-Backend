@@ -530,16 +530,24 @@ async def send_po_email(po_id: UUID, db: AsyncSession = Depends(get_db)):
 """
 
     from app.services.email_service import EmailService
-    email_svc = EmailService()
+    import resend as _resend
+    from app.core.config import settings as _cfg
+
     html_body = EmailService._base_template(content_html)
+    _resend.api_key = _cfg.RESEND_API_KEY
 
     try:
-        ok = await asyncio.to_thread(
-            email_svc.send_raw,
-            manufacturer.email,
-            f"Purchase Order {po.po_number} — AF Apparels",
-            html_body,
+        response = await asyncio.to_thread(
+            _resend.Emails.send,
+            {
+                "from": f"{_cfg.EMAIL_FROM_NAME} <{_cfg.EMAIL_FROM_ADDRESS}>",
+                "to": [manufacturer.email],
+                "subject": f"Purchase Order {po.po_number} — AF Apparels",
+                "html": html_body,
+            }
         )
+        logger.info("PO email sent to %s, resend response: %s", manufacturer.email, response)
+        ok = True
         if not ok:
             raise HTTPException(status_code=500, detail="Email delivery failed (check RESEND_API_KEY)")
 

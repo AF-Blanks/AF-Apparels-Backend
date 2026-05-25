@@ -97,6 +97,23 @@ async def get_analytics(
     prev_orders = int(prev_row.total_orders or 0)
     aov = cur_revenue / cur_orders if cur_orders else 0
 
+    # Paid orders for conversion rate
+    paid_q = await db.execute(
+        select(func.count(Order.id)).where(
+            Order.created_at >= cur_start_dt,
+            Order.created_at <= cur_end_dt,
+            Order.payment_status == "paid",
+        )
+    )
+    paid_orders = int(paid_q.scalar() or 0)
+    total_orders_all = await db.scalar(
+        select(func.count(Order.id)).where(
+            Order.created_at >= cur_start_dt,
+            Order.created_at <= cur_end_dt,
+        )
+    )
+    conversion_rate = round(paid_orders / total_orders_all * 100, 1) if total_orders_all else 0.0
+
     # ── Customer counts ───────────────────────────────────────────────────────
     # Total unique companies that ever ordered
     total_cust_q = await db.execute(
@@ -292,6 +309,7 @@ async def get_analytics(
             "revenue_change_percent": _pct_change(cur_revenue, prev_revenue),
             "orders_change_percent": _pct_change(cur_orders, prev_orders),
             "customers_change_percent": _pct_change(ordered_this_period, prev_customers),
+            "conversion_rate": conversion_rate,
         },
         "revenue_chart": revenue_chart,
         "order_status_breakdown": order_status_breakdown,
