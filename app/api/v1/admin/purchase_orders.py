@@ -459,81 +459,94 @@ async def send_po_email(po_id: UUID, db: AsyncSession = Depends(get_db)):
     if not manufacturer or not manufacturer.email:
         raise HTTPException(status_code=400, detail="Manufacturer has no email address on file")
 
-    # Build line items rows
-    rows_html = ""
+    # Build line item cards (mobile-friendly)
+    rows = ""
     for li in po.line_items:
         variant = li.variant
         product = variant.product if variant else None
-        product_name = product.name if product else (li.new_product_name or "—")
-        color = (variant.color if variant else li.new_product_color) or "—"
-        size = (variant.size if variant else li.new_product_size) or "—"
-        sku = (variant.sku if variant else li.new_product_sku) or "—"
-        qty = li.qty_ordered
-        unit_cost = float(li.unit_cost_expected)
-        rows_html += (
+        product_name = product.name if product else li.new_product_name or "—"
+        color = variant.color if variant else li.new_product_color or "—"
+        size = variant.size if variant else li.new_product_size or "—"
+        sku = variant.sku if variant else li.new_product_sku or "—"
+        total = li.qty_ordered * float(li.unit_cost_expected)
+
+        rows += (
+            f'<div style="background:#f9f9f9;border-radius:6px;padding:14px;margin-bottom:10px;border-left:3px solid #1a1a2e;">'
+            f'<div style="font-weight:bold;color:#1a1a2e;margin-bottom:6px;">{product_name}</div>'
+            f'<table style="width:100%;border-collapse:collapse;">'
             f'<tr>'
-            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;">{product_name}</td>'
-            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;font-family:monospace;font-size:12px;">{sku}</td>'
-            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;">{color}</td>'
-            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;">{size}</td>'
-            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;text-align:center;">{qty}</td>'
-            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;text-align:right;">${unit_cost:.2f}</td>'
-            f'<td style="padding:9px 12px;border:1px solid #e5e7eb;text-align:right;font-weight:600;">${qty * unit_cost:.2f}</td>'
+            f'<td style="color:#666;font-size:13px;padding:2px 8px 2px 0;width:50%;">SKU: <span style="color:#333;">{sku}</span></td>'
+            f'<td style="color:#666;font-size:13px;padding:2px 0;width:50%;">Color: <span style="color:#333;">{color}</span></td>'
             f'</tr>'
+            f'<tr>'
+            f'<td style="color:#666;font-size:13px;padding:2px 8px 2px 0;">Size: <span style="color:#333;">{size}</span></td>'
+            f'<td style="color:#666;font-size:13px;padding:2px 0;">Qty: <span style="color:#333;">{li.qty_ordered}</span></td>'
+            f'</tr>'
+            f'<tr>'
+            f'<td style="color:#666;font-size:13px;padding:2px 8px 2px 0;">Unit Cost: <span style="color:#333;">${float(li.unit_cost_expected):.2f}</span></td>'
+            f'<td style="color:#666;font-size:13px;padding:2px 0;">Total: <span style="font-weight:bold;color:#1a1a2e;">${total:.2f}</span></td>'
+            f'</tr>'
+            f'</table>'
+            f'</div>'
         )
 
     order_date_str = po.order_date.strftime("%B %d, %Y") if po.order_date else date.today().strftime("%B %d, %Y")
     delivery_str = po.expected_delivery.strftime("%B %d, %Y") if po.expected_delivery else "—"
     contact_str = manufacturer.contact_name or manufacturer.name
 
-    notes_html = (
-        f'<p style="margin:0 0 16px;"><strong>Notes:</strong> {po.notes}</p>'
+    notes_block = (
+        f'<p style="margin-top:16px;color:#555;"><strong>Notes:</strong> {po.notes}</p>'
         if po.notes else ""
     )
 
-    content_html = f"""
-<h2 style="color:#1B3A5C;margin:0 0 20px;font-size:20px;">Purchase Order: {po.po_number}</h2>
-<table style="width:100%;margin-bottom:24px;border-collapse:collapse;">
-  <tr>
-    <td style="padding:4px 0;width:50%;"><strong>To:</strong> {manufacturer.name}</td>
-    <td style="padding:4px 0;"><strong>Order Date:</strong> {order_date_str}</td>
-  </tr>
-  <tr>
-    <td style="padding:4px 0;"><strong>Contact:</strong> {contact_str}</td>
-    <td style="padding:4px 0;"><strong>Expected Delivery:</strong> {delivery_str}</td>
-  </tr>
-</table>
-<table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px;">
-  <thead>
-    <tr style="background:#1B3A5C;color:#ffffff;">
-      <th style="padding:10px 12px;text-align:left;">Product</th>
-      <th style="padding:10px 12px;text-align:left;">SKU</th>
-      <th style="padding:10px 12px;text-align:left;">Color</th>
-      <th style="padding:10px 12px;text-align:left;">Size</th>
-      <th style="padding:10px 12px;text-align:center;">Qty</th>
-      <th style="padding:10px 12px;text-align:right;">Unit Cost</th>
-      <th style="padding:10px 12px;text-align:right;">Total</th>
-    </tr>
-  </thead>
-  <tbody>{rows_html}</tbody>
-  <tfoot>
-    <tr style="background:#F3F4F6;font-weight:700;">
-      <td colspan="6" style="padding:10px 12px;border:1px solid #e5e7eb;text-align:right;">Total Expected:</td>
-      <td style="padding:10px 12px;border:1px solid #e5e7eb;text-align:right;">${float(po.total_expected):.2f}</td>
-    </tr>
-  </tfoot>
-</table>
-{notes_html}
-<p style="color:#6b7280;font-size:13px;margin:0;">
-  Please confirm receipt of this purchase order at your earliest convenience.
-</p>
-"""
+    html_body = f"""<!DOCTYPE html>
+<html>
+<head><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,sans-serif;">
+<div style="max-width:600px;margin:0 auto;background:#ffffff;">
+  <div style="background:#ffffff;padding:20px;text-align:center;border-bottom:2px solid #e63946;">
+    <img src="https://af-apparel.com/logo.png" style="max-height:60px;" alt="AF Apparels"/>
+  </div>
+  <div style="padding:24px;">
+    <h2 style="color:#1a1a2e;margin-top:0;">Purchase Order: {po.po_number}</h2>
+    <table style="width:100%;margin-bottom:20px;border-collapse:collapse;">
+      <tr>
+        <td style="padding:6px 0;color:#666;width:50%;"><strong>To:</strong> {manufacturer.name}</td>
+        <td style="padding:6px 0;color:#666;width:50%;"><strong>Order Date:</strong> {order_date_str}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 0;color:#666;"><strong>Contact:</strong> {contact_str}</td>
+        <td style="padding:6px 0;color:#666;"><strong>Expected Delivery:</strong> {delivery_str}</td>
+      </tr>
+    </table>
+    <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
+    <h3 style="color:#1a1a2e;margin-bottom:12px;">Order Items</h3>
+    {rows}
+    <div style="background:#1a1a2e;color:white;padding:14px 16px;border-radius:6px;margin-top:16px;">
+      <table style="width:100%;border-collapse:collapse;">
+        <tr>
+          <td style="font-weight:bold;">Total Expected:</td>
+          <td style="font-weight:bold;font-size:18px;text-align:right;">${float(po.total_expected):.2f}</td>
+        </tr>
+      </table>
+    </div>
+    {notes_block}
+    <p style="margin-top:24px;color:#666;font-size:14px;">
+      Please confirm receipt of this purchase order at your earliest convenience.
+    </p>
+    <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
+    <p style="color:#999;font-size:12px;margin:0;">
+      Questions? Call <strong>+1 (469) 367-9753</strong> or
+      <a href="mailto:info@afblanks.com" style="color:#e63946;">info@afblanks.com</a><br>
+      AF Apparels Wholesale Team | 10719 Turbeville Rd, Dallas, TX 75243
+    </p>
+  </div>
+</div>
+</body>
+</html>"""
 
-    from app.services.email_service import EmailService
     import resend as _resend
     from app.core.config import settings as _cfg
-
-    html_body = EmailService._base_template(content_html)
     _resend.api_key = _cfg.RESEND_API_KEY
 
     try:
