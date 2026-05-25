@@ -85,22 +85,23 @@ def _doc(buf: io.BytesIO) -> SimpleDocTemplate:
 
 def _header(doc_title: str) -> list:
     from app.core.config import settings as _cfg
+    import io as _io
+    import urllib.request as _req
+    from reportlab.platypus import Image as _RLImage
+
     logo_element = None
-    logo_url = _cfg.LOGO_URL
+    logo_url = _cfg.LOGO_URL or f"{_cfg.FRONTEND_URL}/Af-apparel%20logo.png"
     if logo_url:
         try:
-            import io as _io
-            import urllib.request as _req
             with _req.urlopen(logo_url, timeout=5) as resp:
                 img_data = resp.read()
-            from reportlab.platypus import Image as _RLImage
             logo_element = _RLImage(_io.BytesIO(img_data), width=1.5 * inch, height=0.5 * inch)
         except Exception:
             logo_element = None
 
-    elements: list = [logo_element if logo_element else Paragraph("AF Apparels", _h1)]
-    if not logo_element:
-        elements.append(Paragraph("Wholesale Division · afapparels.com", _small))
+    elements: list = []
+    if logo_element:
+        elements.append(logo_element)
     elements += [
         Spacer(1, 6),
         HRFlowable(width="100%", thickness=2, color=BRAND_BLUE),
@@ -108,6 +109,97 @@ def _header(doc_title: str) -> list:
         Paragraph(doc_title, _h2),
         Spacer(1, 8),
     ]
+    return elements
+
+
+def _mask_email(email: str) -> str:
+    if not email or "@" not in email:
+        return email or ""
+    local, domain = email.split("@", 1)
+    visible = local[:4] if len(local) >= 4 else local[:1]
+    return f"{visible}***@{domain}"
+
+
+def _bill_to(order: "Order") -> list:
+    import json as _json
+    elements: list = [Paragraph("Bill To", _h2)]
+
+    # Company name
+    company_name = ""
+    try:
+        if order.company and order.company.name:
+            company_name = order.company.name
+    except Exception:
+        pass
+    if not company_name:
+        try:
+            company_name = getattr(order.placed_by, "company_name", "") or ""
+        except Exception:
+            pass
+    if company_name:
+        elements.append(Paragraph(company_name, _body))
+
+    # Contact name, email, phone from placed_by
+    contact_name = ""
+    contact_email = ""
+    contact_phone = ""
+    try:
+        pb = order.placed_by
+        if pb:
+            first = getattr(pb, "first_name", "") or ""
+            last = getattr(pb, "last_name", "") or ""
+            contact_name = f"{first} {last}".strip()
+            contact_email = getattr(pb, "email", "") or ""
+            contact_phone = getattr(pb, "phone", "") or ""
+    except Exception:
+        pass
+
+    if contact_name:
+        elements.append(Paragraph(contact_name, _body))
+
+    # Address from snapshot
+    addr = None
+    if order.shipping_address_snapshot:
+        try:
+            addr = _json.loads(order.shipping_address_snapshot)
+        except Exception:
+            addr = None
+
+    if addr:
+        addr_name = addr.get("full_name") or ""
+        if addr_name and addr_name != contact_name:
+            elements.append(Paragraph(addr_name, _body))
+
+        line1 = addr.get("line1") or addr.get("address_line1") or ""
+        line2 = addr.get("line2") or addr.get("address_line2") or ""
+        city = addr.get("city", "")
+        state = addr.get("state", "")
+        postal = addr.get("postal_code", "") or addr.get("zip", "")
+        country = addr.get("country", "US")
+
+        if line1:
+            elements.append(Paragraph(line1, _body))
+        if line2:
+            elements.append(Paragraph(line2, _body))
+        csz = ", ".join(filter(None, [city, state, postal]))
+        if csz.strip(",").strip():
+            elements.append(Paragraph(csz, _body))
+        if country:
+            elements.append(Paragraph(country, _body))
+
+        phone = addr.get("phone") or contact_phone
+        if phone:
+            elements.append(Paragraph(phone, _small))
+    elif contact_phone:
+        elements.append(Paragraph(contact_phone, _small))
+
+    if contact_email:
+        elements.append(Paragraph(_mask_email(contact_email), _small))
+
+    if len(elements) == 1:
+        elements.append(Paragraph("Billing address on file", _body))
+
+    elements.append(Spacer(1, 12))
     return elements
 
 
@@ -270,8 +362,6 @@ class PDFService:
         return buf.getvalue()
 
     def generate_invoice(self, order: "Order") -> bytes:
-        import json as _json
-
         buf = io.BytesIO()
         doc = _doc(buf)
 
@@ -297,30 +387,7 @@ class PDFService:
             extra.append(["PO Number", order.po_number])
 
         # ── Bill To block ──────────────────────────────────────────────────────
-        bill_to: list = [Paragraph("Bill To", _h2)]
-        addr = None
-        if order.shipping_address_snapshot:
-            try:
-                addr = _json.loads(order.shipping_address_snapshot)
-            except Exception:
-                addr = None
-        if addr:
-            lines = [
-                addr.get("full_name") or "",
-                addr.get("line1") or addr.get("address_line1") or "",
-                addr.get("line2") or addr.get("address_line2") or "",
-                ", ".join(filter(None, [
-                    addr.get("city", ""), addr.get("state", ""),
-                    addr.get("postal_code", ""),
-                ])),
-                addr.get("country", "US"),
-            ]
-            for ln in lines:
-                if ln and ln.strip().strip(","):
-                    bill_to.append(Paragraph(ln.strip(), _body))
-        else:
-            bill_to.append(Paragraph("Billing address on file", _body))
-        bill_to.append(Spacer(1, 12))
+        bill_to = _bill_to(order)
 
         # ── Items table ────────────────────────────────────────────────────────
         header_row = ["Product Name", "Color", "Size", "Qty", "Unit Price", "Total"]
