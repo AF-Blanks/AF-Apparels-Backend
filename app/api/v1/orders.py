@@ -1,7 +1,10 @@
 # backend/app/api/v1/orders.py
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+
+logger = logging.getLogger(__name__)
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -168,8 +171,12 @@ async def download_invoice_pdf(
 
     order = await _load_order_for_company(order_id, company_id, db)
     from app.services.pdf_service import PDFService
-    pdf = PDFService().generate_invoice(order)
-    return _pdf_response(pdf, f"invoice-{order.order_number}.pdf")
+    try:
+        pdf = PDFService().generate_invoice(order)
+        return _pdf_response(pdf, f"invoice-{order.order_number}.pdf")
+    except Exception as e:
+        logger.error(f"Invoice PDF error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{order_id}/pdf/ship-confirmation")

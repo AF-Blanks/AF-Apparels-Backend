@@ -99,7 +99,7 @@ def _header(doc_title: str) -> list:
             with _req.urlopen(logo_url, timeout=5) as resp:
                 img_data = resp.read()
             logo_element = _RLImage(_io.BytesIO(img_data), width=1.5 * inch, height=0.6 * inch)
-            logo_element.hAlign = "CENTER"
+            logo_element.hAlign = "LEFT"
         except Exception:
             logo_element = None
 
