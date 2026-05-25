@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import io
+import logging
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -95,7 +98,8 @@ def _header(doc_title: str) -> list:
         try:
             with _req.urlopen(logo_url, timeout=5) as resp:
                 img_data = resp.read()
-            logo_element = _RLImage(_io.BytesIO(img_data), width=1.5 * inch, height=0.5 * inch)
+            logo_element = _RLImage(_io.BytesIO(img_data), width=1.5 * inch, height=0.6 * inch)
+            logo_element.hAlign = "CENTER"
         except Exception:
             logo_element = None
 
@@ -112,89 +116,111 @@ def _header(doc_title: str) -> list:
     return elements
 
 
-def _mask_email(email: str) -> str:
-    if not email or "@" not in email:
-        return email or ""
-    local, domain = email.split("@", 1)
-    visible = local[:4] if len(local) >= 4 else local[:1]
-    return f"{visible}***@{domain}"
-
-
 def _bill_to(order: "Order") -> list:
     import json as _json
     elements: list = [Paragraph("Bill To", _h2)]
 
-    # Company name
-    company_name = ""
-    try:
-        if order.company and order.company.name:
-            company_name = order.company.name
-    except Exception:
-        pass
-    if not company_name:
-        try:
-            company_name = getattr(order.placed_by, "company_name", "") or ""
-        except Exception:
-            pass
-    if company_name:
-        elements.append(Paragraph(company_name, _body))
-
-    # Contact name, email, phone from placed_by
-    contact_name = ""
-    contact_email = ""
-    contact_phone = ""
-    try:
-        pb = order.placed_by
-        if pb:
-            first = getattr(pb, "first_name", "") or ""
-            last = getattr(pb, "last_name", "") or ""
-            contact_name = f"{first} {last}".strip()
-            contact_email = getattr(pb, "email", "") or ""
-            contact_phone = getattr(pb, "phone", "") or ""
-    except Exception:
-        pass
-
-    if contact_name:
-        elements.append(Paragraph(contact_name, _body))
-
-    # Address from snapshot
-    addr = None
+    # Parse snapshot
+    snapshot: dict = {}
     if order.shipping_address_snapshot:
         try:
-            addr = _json.loads(order.shipping_address_snapshot)
+            snapshot = _json.loads(order.shipping_address_snapshot) or {}
         except Exception:
-            addr = None
+            snapshot = {}
 
-    if addr:
-        addr_name = addr.get("full_name") or ""
-        if addr_name and addr_name != contact_name:
-            elements.append(Paragraph(addr_name, _body))
+    logger.info(f"Invoice snapshot keys: {list(snapshot.keys()) if snapshot else 'EMPTY'}")
+    logger.info(f"Invoice snapshot data: {snapshot}")
 
-        line1 = addr.get("line1") or addr.get("address_line1") or ""
-        line2 = addr.get("line2") or addr.get("address_line2") or ""
-        city = addr.get("city", "")
-        state = addr.get("state", "")
-        postal = addr.get("postal_code", "") or addr.get("zip", "")
-        country = addr.get("country", "US")
+    # Company
+    company = (
+        snapshot.get("company_name")
+        or snapshot.get("company")
+        or (order.company.name if hasattr(order, "company") and order.company else "")
+        or ""
+    )
 
-        if line1:
-            elements.append(Paragraph(line1, _body))
-        if line2:
-            elements.append(Paragraph(line2, _body))
-        csz = ", ".join(filter(None, [city, state, postal]))
-        if csz.strip(",").strip():
-            elements.append(Paragraph(csz, _body))
-        if country:
-            elements.append(Paragraph(country, _body))
+    # Contact name
+    first = snapshot.get("first_name") or getattr(order, "shipping_first_name", "") or ""
+    last = snapshot.get("last_name") or getattr(order, "shipping_last_name", "") or ""
+    contact = f"{first} {last}".strip()
 
-        phone = addr.get("phone") or contact_phone
-        if phone:
-            elements.append(Paragraph(phone, _small))
-    elif contact_phone:
-        elements.append(Paragraph(contact_phone, _small))
+    # Street address
+    street = (
+        snapshot.get("address_line1")
+        or snapshot.get("street1")
+        or snapshot.get("street_address")
+        or snapshot.get("line1")
+        or getattr(order, "shipping_address_line1", "")
+        or ""
+    )
+    street2 = (
+        snapshot.get("address_line2")
+        or snapshot.get("street2")
+        or snapshot.get("line2")
+        or getattr(order, "shipping_address_line2", "")
+        or ""
+    )
 
-    if contact_email:
-        elements.append(Paragraph(_mask_email(contact_email), _small))
+    # City / state / ZIP
+    city = snapshot.get("city") or getattr(order, "shipping_city", "") or ""
+    state = (
+        snapshot.get("state")
+        or snapshot.get("state_province")
+        or getattr(order, "shipping_state", "")
+        or ""
+    )
+    postal = (
+        snapshot.get("postal_code")
+        or snapshot.get("zip")
+        or getattr(order, "shipping_postal_code", "")
+        or ""
+    )
+    country = snapshot.get("country") or "US"
+
+    # Phone
+    phone = (
+        snapshot.get("phone")
+        or snapshot.get("phone_number")
+        or getattr(order, "shipping_phone", "")
+        or ""
+    )
+
+    # Email — masked for privacy
+    raw_email = (
+        snapshot.get("email")
+        or getattr(order, "guest_email", "")
+        or ""
+    )
+    if not raw_email:
+        try:
+            if order.placed_by:
+                raw_email = order.placed_by.email or ""
+        except Exception:
+            raw_email = ""
+    if raw_email and "@" in raw_email:
+        parts = raw_email.split("@")
+        email_masked = parts[0][:3] + "***@" + parts[1]
+    else:
+        email_masked = ""
+
+    # Build output lines
+    if company:
+        elements.append(Paragraph(company, _body))
+    if contact:
+        elements.append(Paragraph(contact, _body))
+    if street:
+        elements.append(Paragraph(street, _body))
+    if street2:
+        elements.append(Paragraph(street2, _body))
+    csz = ", ".join(filter(None, [city, state, postal]))
+    if csz.strip(",").strip():
+        elements.append(Paragraph(csz, _body))
+    if country:
+        elements.append(Paragraph(country, _body))
+    if phone:
+        elements.append(Paragraph(phone, _small))
+    if email_masked:
+        elements.append(Paragraph(email_masked, _small))
 
     if len(elements) == 1:
         elements.append(Paragraph("Billing address on file", _body))
