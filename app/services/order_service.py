@@ -295,6 +295,12 @@ class OrderService:
                 logger.warning("Could not save payment_method/ACH on order %s: %s", order.id, _ach_exc)
 
         # Save shipping_rate_id + carrier from customer's selected live Shippo rate
+        logger.info(
+            "Order create - shipping_rate_id: %s, carrier: %s, service: %s",
+            getattr(confirm, "shipping_rate_id", "NOT IN DATA"),
+            getattr(confirm, "shipping_carrier", "NOT IN DATA"),
+            getattr(confirm, "shipping_service", "NOT IN DATA"),
+        )
         _rate_id = getattr(confirm, "shipping_rate_id", None)
         _s_carrier = getattr(confirm, "shipping_carrier", None)
         _s_service = getattr(confirm, "shipping_service", None)

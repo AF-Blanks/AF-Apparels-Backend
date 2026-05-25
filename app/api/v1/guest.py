@@ -91,6 +91,9 @@ class GuestCheckoutRequest(BaseModel):
     tax_rate: float | None = None
     tax_region: str | None = None
     shipping_cost: Decimal | None = None
+    shipping_rate_id: str | None = None
+    shipping_carrier: str | None = None
+    shipping_service: str | None = None
 
 
 class GuestOrderOut(BaseModel):
@@ -269,6 +272,23 @@ async def guest_checkout(
     )
     db.add(order)
     await db.flush()
+
+    # Save shipping_rate_id + carrier from customer's selected live Shippo rate
+    logger.info(
+        "Guest order create - shipping_rate_id: %s, carrier: %s",
+        payload.shipping_rate_id, payload.shipping_carrier,
+    )
+    if payload.shipping_rate_id:
+        try:
+            await db.execute(
+                _text(
+                    "UPDATE orders SET shipping_rate_id=:rid, carrier=:car, courier_service=:cs WHERE id=:oid"
+                ),
+                {"rid": payload.shipping_rate_id, "car": payload.shipping_carrier,
+                 "cs": payload.shipping_service, "oid": str(order.id)},
+            )
+        except Exception as _exc:
+            logger.warning("Could not save shipping_rate_id on guest order %s: %s", order.id, _exc)
 
     # 6. Create OrderItem records + deduct inventory
     from sqlalchemy import update as _update
