@@ -62,7 +62,12 @@ async def get_live_rates(payload: LiveRatesRequest, db: AsyncSession = Depends(g
             total_grams += weight_g * item.quantity
         weight_oz = max(total_grams / GRAMS_PER_OZ, 1.0)
     else:
+        total_grams = 0.0
         weight_oz = payload.weight_oz
+
+    logger.info("Live rates: zip=%s, state=%s", to_zip, to_state)
+    logger.info("Live rates: cart_items=%d, total_weight_grams=%.1f, weight_oz=%.2f",
+                len(payload.cart_items), total_grams, weight_oz)
 
     try:
         client = shippo_service.get_client()
