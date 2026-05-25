@@ -294,6 +294,22 @@ class OrderService:
             except Exception as _ach_exc:
                 logger.warning("Could not save payment_method/ACH on order %s: %s", order.id, _ach_exc)
 
+        # Save shipping_rate_id + carrier from customer's selected live Shippo rate
+        _rate_id = getattr(confirm, "shipping_rate_id", None)
+        _s_carrier = getattr(confirm, "shipping_carrier", None)
+        _s_service = getattr(confirm, "shipping_service", None)
+        if _rate_id:
+            try:
+                from sqlalchemy import text as _stext
+                await self.db.execute(
+                    _stext(
+                        "UPDATE orders SET shipping_rate_id=:rid, carrier=:car, courier_service=:cs WHERE id=:oid"
+                    ),
+                    {"rid": _rate_id, "car": _s_carrier, "cs": _s_service, "oid": str(order.id)},
+                )
+            except Exception as _rate_exc:
+                logger.warning("Could not save shipping_rate_id on order %s: %s", order.id, _rate_exc)
+
         # 9. Create OrderItem records
         for item_data in order_items_data:
             order_item = OrderItem(

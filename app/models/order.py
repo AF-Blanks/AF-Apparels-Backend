@@ -77,6 +77,7 @@ class Order(BaseModel):
     tracking_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     label_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     carrier: Mapped[str | None] = mapped_column(String(100))
+    shipping_rate_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     courier: Mapped[str | None] = mapped_column(String(100))
     courier_service: Mapped[str | None] = mapped_column(String(100))
     shipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

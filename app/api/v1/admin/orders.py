@@ -799,14 +799,46 @@ async def generate_shipping_label(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Generate a Shippo label for an order, mark it shipped, and email the customer."""
-    from app.services.shippo_service import create_shippo_label
+    from app.services.shippo_service import create_shippo_label, get_client
+    from app.services import shippo_service
     from sqlalchemy import text as _text
+    import logging as _logging
+    _lbl_log = _logging.getLogger(__name__)
 
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    result = await create_shippo_label(order, carrier=payload.carrier.lower())
+    # Try saved rate_id from customer's checkout selection first (may be expired)
+    saved_rate_id = getattr(order, "shipping_rate_id", None)
+    result = None
+    if saved_rate_id:
+        try:
+            from shippo.models import components as _comp
+            client = get_client()
+            txn = client.transactions.create(
+                _comp.TransactionCreateRequest(
+                    rate=saved_rate_id,
+                    label_file_type=_comp.LabelFileTypeEnum.PDF,
+                    async_=False,
+                )
+            )
+            if txn.status == _comp.TransactionStatusEnum.SUCCESS:
+                result = {
+                    "success": True,
+                    "tracking_number": txn.tracking_number,
+                    "tracking_url": txn.tracking_url_provider,
+                    "label_url": txn.label_url,
+                    "carrier": order.carrier or payload.carrier.upper(),
+                    "service": order.courier_service or "",
+                }
+            else:
+                _lbl_log.warning("Saved rate_id transaction not SUCCESS (%s), falling back", txn.status)
+        except Exception as _e:
+            _lbl_log.warning("Saved rate_id failed (likely expired): %s — falling back to fresh rate", _e)
+
+    if result is None:
+        result = await create_shippo_label(order, carrier=payload.carrier.lower())
 
     if result.get("success"):
         order.tracking_number = result["tracking_number"]

@@ -72,6 +72,10 @@ class CheckoutConfirmRequest(BaseModel):
     ach_routing_number: str | None = None
     ach_account_last4: str | None = None
     ach_account_type: str | None = None
+    # Live Shippo rate selected at checkout
+    shipping_rate_id: str | None = None
+    shipping_carrier: str | None = None
+    shipping_service: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +163,10 @@ class AdminOrderDetail(OrderOut):
     tracking_number: str | None
     tracking_url: str | None = None
     label_url: str | None = None
+    carrier: str | None = None
     courier: str | None = None
     courier_service: str | None = None
+    shipping_rate_id: str | None = None
     shipped_at: datetime | None = None
     qb_invoice_id: str | None
     # Customer contact (enriched from User record or guest fields)
