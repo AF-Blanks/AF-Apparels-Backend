@@ -139,6 +139,9 @@ class ProductDetail(BaseModel):
     print_guide: dict | None = None
     size_chart_data: list | None = None
     assets: list[ProductAssetOut] = []
+    highlight_text: str | None = None
+    review_count: int = 0
+    avg_rating: float = 0.0
 
     model_config = {"from_attributes": True}
 
@@ -203,6 +206,7 @@ class ProductUpdate(BaseModel):
     care_instructions: str | None = None
     print_guide: dict | None = None
     size_chart_data: list | None = None
+    highlight_text: str | None = None
 
 
 class ImageUploadResponse(BaseModel):

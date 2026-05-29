@@ -357,6 +357,17 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='products' AND column_name='highlight_text'
+                    ) THEN
+                        ALTER TABLE products ADD COLUMN highlight_text TEXT;
+                    END IF;
+                END$$;
+            """))
             # ── Purchase Order tables ──────────────────────────────────────────
             await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS manufacturers (

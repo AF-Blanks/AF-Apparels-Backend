@@ -15,7 +15,7 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.core.exceptions import NotFoundError
 from app.core.redis import redis_delete, redis_delete_pattern
-from app.models.product import Category, Product, ProductAsset, ProductCategory, ProductImage, ProductVariant
+from app.models.product import Category, Product, ProductAsset, ProductCategory, ProductImage, ProductReview, ProductVariant
 from app.schemas.product import (
     BulkActionRequest,
     BulkGenerateRequest,
@@ -514,6 +514,15 @@ async def get_admin_product(slug: str, db: AsyncSession = Depends(get_db)):
         variant.stock_quantity = sum(
             rec.quantity for rec in variant.inventory_records if rec.quantity > 0
         )
+
+    # Attach review stats
+    from sqlalchemy import func as _func
+    rv = (await db.execute(
+        select(_func.count(ProductReview.id).label("cnt"), _func.avg(ProductReview.rating).label("avg"))
+        .where(ProductReview.product_id == product.id, ProductReview.is_approved == True)  # noqa: E712
+    )).first()
+    product.review_count = int(rv.cnt or 0)
+    product.avg_rating = round(float(rv.avg), 1) if rv.avg else 0.0
 
     return product
 

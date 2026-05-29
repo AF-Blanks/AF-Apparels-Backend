@@ -189,6 +189,20 @@ class ProductService:
         products = await self._attach_pricing_and_stock([product], discount_percent, discount_group_id, is_guest)
         product = products[0]
 
+        # Attach review stats
+        from app.models.product import ProductReview as _ProductReview
+        rv = (await self.db.execute(
+            select(
+                func.count(_ProductReview.id).label("cnt"),
+                func.avg(_ProductReview.rating).label("avg"),
+            ).where(
+                _ProductReview.product_id == product.id,
+                _ProductReview.is_approved == True,  # noqa: E712
+            )
+        )).first()
+        product.review_count = int(rv.cnt or 0)
+        product.avg_rating = round(float(rv.avg), 1) if rv.avg else 0.0
+
         await redis_set(cache_key, json.dumps(_product_to_dict(product)), expire=_DETAIL_TTL)
         return product
 
@@ -572,6 +586,9 @@ def _product_to_dict(product: Product) -> dict:
         "print_guide": getattr(product, "print_guide", None),
         "size_chart_data": getattr(product, "size_chart_data", None),
         "assets": _loaded_assets(product),
+        "highlight_text": getattr(product, "highlight_text", None),
+        "review_count": getattr(product, "review_count", 0),
+        "avg_rating": getattr(product, "avg_rating", 0.0),
     }
 
 

@@ -38,6 +38,7 @@ class Product(BaseModel):
     slug: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(Text)
     short_description: Mapped[str | None] = mapped_column(String(500))
+    highlight_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Business rules
     moq: Mapped[int] = mapped_column(Integer, default=1, nullable=False, comment="Minimum order quantity")
