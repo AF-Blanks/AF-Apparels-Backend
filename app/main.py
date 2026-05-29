@@ -138,7 +138,7 @@
 #     CORSMiddleware,
 #     allow_origins=_cors_origins,
 #     # Wildcard for all Vercel preview + production deployments
-#     allow_origin_regex=r"https://.*\.vercel\.app",
+#     allow_origin_regex=r"https://(.*\.vercel\.app|.*\.up\.railway\.app|.*\.railway\.app)",
 #     allow_credentials=True,
 #     allow_methods=["*"],
 #     allow_headers=["*"],
@@ -662,7 +662,7 @@ _cors_origins = list({settings.FRONTEND_URL, *settings.allowed_origins_list} - {
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=r"https://(.*\.vercel\.app|.*\.up\.railway\.app|.*\.railway\.app)",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
