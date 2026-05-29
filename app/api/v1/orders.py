@@ -134,7 +134,11 @@ async def _load_order_for_company(order_id: UUID, company_id, db: AsyncSession) 
     company_uuid = _uuid.UUID(str(company_id)) if not isinstance(company_id, _uuid.UUID) else company_id
     result = await db.execute(
         select(Order)
-        .options(selectinload(Order.items))
+        .options(
+            selectinload(Order.items),
+            selectinload(Order.placed_by),
+            selectinload(Order.company),
+        )
         .where(Order.id == order_id, Order.company_id == company_uuid)
     )
     order = result.scalar_one_or_none()
