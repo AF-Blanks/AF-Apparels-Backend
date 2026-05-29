@@ -516,12 +516,45 @@ async def get_admin_product(slug: str, db: AsyncSession = Depends(get_db)):
 
 @router.delete("/{product_id}", status_code=204)
 async def delete_product(product_id: UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Product).where(Product.id == product_id))
+    from sqlalchemy import text as _text
+    from sqlalchemy.exc import IntegrityError
+
+    result = await db.execute(
+        select(Product)
+        .options(
+            selectinload(Product.variants),
+            selectinload(Product.images),
+            selectinload(Product.assets),
+            selectinload(Product.category_links),
+            selectinload(Product.reviews),
+        )
+        .where(Product.id == product_id)
+    )
     product = result.scalar_one_or_none()
     if not product:
         raise NotFoundError(f"Product {product_id} not found")
-    await db.delete(product)
-    await db.commit()
+
+    # NULL out purchase_order_items references to variants of this product
+    # (FK has no ondelete; NULLing prevents IntegrityError on cascade delete)
+    variant_ids = [str(v.id) for v in product.variants]
+    if variant_ids:
+        await db.execute(
+            _text(
+                "UPDATE purchase_order_items SET product_variant_id = NULL "
+                "WHERE product_variant_id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": "{" + ",".join(variant_ids) + "}"},
+        )
+
+    try:
+        await db.delete(product)
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete product: it is still referenced by other records. ({exc.orig})",
+        ) from exc
 
 
 @router.patch("/{product_id}/images/{image_id}")
