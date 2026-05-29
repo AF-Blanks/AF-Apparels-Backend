@@ -507,6 +507,9 @@ async def get_admin_product(slug: str, db: AsyncSession = Depends(get_db)):
     if not product:
         raise NotFoundError(f"Product '{slug}' not found")
 
+    # Exclude discontinued/archived variants from the edit page response
+    product.variants[:] = [v for v in product.variants if v.status not in ("archived", "discontinued")]
+
     for variant in product.variants:
         variant.stock_quantity = sum(
             rec.quantity for rec in variant.inventory_records if rec.quantity > 0
@@ -536,38 +539,40 @@ async def delete_product(product_id: UUID, db: AsyncSession = Depends(get_db)):
         if not product:
             raise NotFoundError(f"Product {product_id} not found")
 
-        # Pre-NULL PO line item references for all variants (prevents FK IntegrityError on hard delete)
+        # Pre-NULL PO line item references for all variants (prevents FK IntegrityError on hard delete).
+        # Per-row individual updates avoid asyncpg array-binding issues entirely.
         variant_ids = [str(v.id) for v in product.variants]
         if variant_ids:
-            await db.execute(
-                _text(
-                    "UPDATE po_line_items SET product_variant_id = NULL "
-                    "WHERE product_variant_id = ANY(CAST(:ids AS uuid[]))"
-                ),
-                {"ids": "{" + ",".join(variant_ids) + "}"},
-            )
+            logger.info("delete_product %s: nulling %d PO line item references", product_id, len(variant_ids))
+            for vid in variant_ids:
+                await db.execute(
+                    _text("UPDATE po_line_items SET product_variant_id = NULL WHERE product_variant_id = :vid::uuid"),
+                    {"vid": vid},
+                )
+            await db.flush()
 
         try:
             await db.delete(product)
             await db.commit()
             logger.info("Product %s hard-deleted", product_id)
             return {"success": True, "method": "deleted"}
-        except IntegrityError:
+        except IntegrityError as ie:
             await db.rollback()
+            logger.warning("Product %s hard delete blocked (%s) — archiving", product_id, ie)
             product.status = "archived"
             await db.commit()
-            logger.warning("Product %s archived (hard delete blocked by FK constraint)", product_id)
+            logger.info("Product %s archived", product_id)
             return {"success": True, "method": "archived",
                     "message": "Product has order history — archived instead of deleted"}
     except (NotFoundError, HTTPException):
         raise
     except Exception as exc:
-        logger.error("delete_product %s unexpected error: %s", product_id, exc, exc_info=True)
+        logger.error("delete_product %s %s: %s", product_id, type(exc).__name__, exc, exc_info=True)
         try:
             await db.rollback()
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail="Delete failed — server error")
+        raise HTTPException(status_code=500, detail=f"Delete failed: {type(exc).__name__}: {exc}")
 
 
 class _BulkVariantDeleteRequest(BaseModel):
@@ -606,15 +611,16 @@ async def delete_variants_bulk(
         if not variants:
             return {"success": True, "deleted": 0, "discontinued": 0}
 
-        # Pre-NULL PO line item references for all selected variants
+        # Pre-NULL PO line item references for all selected variants.
+        # Per-row individual updates avoid asyncpg array-binding issues entirely.
         valid_ids = [str(v.id) for v in variants]
-        await db.execute(
-            _text(
-                "UPDATE po_line_items SET product_variant_id = NULL "
-                "WHERE product_variant_id = ANY(CAST(:ids AS uuid[]))"
-            ),
-            {"ids": "{" + ",".join(valid_ids) + "}"},
-        )
+        logger.info("delete_variants_bulk %s: nulling PO refs for %d variants", product_id, len(valid_ids))
+        for vid in valid_ids:
+            await db.execute(
+                _text("UPDATE po_line_items SET product_variant_id = NULL WHERE product_variant_id = :vid::uuid"),
+                {"vid": vid},
+            )
+        await db.flush()
 
         try:
             for variant in variants:
@@ -622,29 +628,27 @@ async def delete_variants_bulk(
             await db.commit()
             logger.info("Bulk-deleted %d variants for product %s", len(variants), product_id)
             return {"success": True, "deleted": len(variants), "discontinued": 0}
-        except IntegrityError:
+        except IntegrityError as ie:
             await db.rollback()
+            logger.warning("Bulk delete blocked (%s) — discontinuing %d variants for product %s", ie, len(variants), product_id)
             refreshed = await db.execute(
                 select(ProductVariant).where(ProductVariant.id.in_(uuids))
             )
             for v in refreshed.scalars().all():
                 v.status = "discontinued"
             await db.commit()
-            logger.warning(
-                "Bulk-discontinued %d variants for product %s (hard delete blocked by FK)",
-                len(variants), product_id,
-            )
+            logger.info("Bulk-discontinued %d variants for product %s", len(variants), product_id)
             return {"success": True, "deleted": 0, "discontinued": len(variants),
                     "message": "Variants have order history — discontinued instead of deleted"}
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("delete_variants_bulk %s unexpected error: %s", product_id, exc, exc_info=True)
+        logger.error("delete_variants_bulk %s %s: %s", product_id, type(exc).__name__, exc, exc_info=True)
         try:
             await db.rollback()
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail="Bulk variant delete failed — server error")
+        raise HTTPException(status_code=500, detail=f"Bulk variant delete failed: {type(exc).__name__}: {exc}")
 
 
 @router.patch("/{product_id}/images/{image_id}")
