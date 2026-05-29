@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -514,7 +515,7 @@ async def get_admin_product(slug: str, db: AsyncSession = Depends(get_db)):
     return product
 
 
-@router.delete("/{product_id}", status_code=204)
+@router.delete("/{product_id}", status_code=200)
 async def delete_product(product_id: UUID, db: AsyncSession = Depends(get_db)):
     from sqlalchemy import text as _text
     from sqlalchemy.exc import IntegrityError
@@ -534,8 +535,7 @@ async def delete_product(product_id: UUID, db: AsyncSession = Depends(get_db)):
     if not product:
         raise NotFoundError(f"Product {product_id} not found")
 
-    # NULL out purchase_order_items references to variants of this product
-    # (FK has no ondelete; NULLing prevents IntegrityError on cascade delete)
+    # Pre-NULL PO item references for all variants (prevents FK IntegrityError on hard delete)
     variant_ids = [str(v.id) for v in product.variants]
     if variant_ids:
         await db.execute(
@@ -549,12 +549,84 @@ async def delete_product(product_id: UUID, db: AsyncSession = Depends(get_db)):
     try:
         await db.delete(product)
         await db.commit()
-    except IntegrityError as exc:
+        logger.info("Product %s hard-deleted", product_id)
+        return {"success": True, "method": "deleted"}
+    except IntegrityError:
         await db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail=f"Cannot delete product: it is still referenced by other records. ({exc.orig})",
-        ) from exc
+        # Soft delete: archive the product — preserves order history
+        product.status = "archived"
+        await db.commit()
+        logger.warning("Product %s archived (hard delete blocked by FK constraint)", product_id)
+        return {"success": True, "method": "archived",
+                "message": "Product has order history — archived instead of deleted"}
+
+
+class _BulkVariantDeleteRequest(BaseModel):
+    variant_ids: list[str]
+
+
+@router.delete("/{product_id}/variants", status_code=200)
+async def delete_variants_bulk(
+    product_id: UUID,
+    payload: _BulkVariantDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk variant delete — hard delete with soft (discontinued) fallback for FK constraints."""
+    from sqlalchemy import text as _text
+    from sqlalchemy.exc import IntegrityError
+    import uuid as _uuid
+
+    if not payload.variant_ids:
+        return {"success": True, "deleted": 0, "discontinued": 0}
+
+    # Validate + coerce IDs
+    try:
+        uuids = [_uuid.UUID(vid) for vid in payload.variant_ids]
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid variant id: {exc}") from exc
+
+    # Load all variants with inventory_records eager (prevents MissingGreenlet on cascade)
+    rows = await db.execute(
+        select(ProductVariant)
+        .options(selectinload(ProductVariant.inventory_records))
+        .where(ProductVariant.id.in_(uuids), ProductVariant.product_id == product_id)
+    )
+    variants = list(rows.scalars().all())
+
+    if not variants:
+        return {"success": True, "deleted": 0, "discontinued": 0}
+
+    # Pre-NULL PO item references for all selected variants
+    valid_ids = [str(v.id) for v in variants]
+    await db.execute(
+        _text(
+            "UPDATE purchase_order_items SET product_variant_id = NULL "
+            "WHERE product_variant_id = ANY(CAST(:ids AS uuid[]))"
+        ),
+        {"ids": "{" + ",".join(valid_ids) + "}"},
+    )
+
+    try:
+        for variant in variants:
+            await db.delete(variant)
+        await db.commit()
+        logger.info("Bulk-deleted %d variants for product %s", len(variants), product_id)
+        return {"success": True, "deleted": len(variants), "discontinued": 0}
+    except IntegrityError:
+        await db.rollback()
+        # Soft delete: mark all selected variants as discontinued
+        refreshed = await db.execute(
+            select(ProductVariant).where(ProductVariant.id.in_(uuids))
+        )
+        for v in refreshed.scalars().all():
+            v.status = "discontinued"
+        await db.commit()
+        logger.warning(
+            "Bulk-discontinued %d variants for product %s (hard delete blocked by FK)",
+            len(variants), product_id,
+        )
+        return {"success": True, "deleted": 0, "discontinued": len(variants),
+                "message": "Variants have order history — discontinued instead of deleted"}
 
 
 @router.patch("/{product_id}/images/{image_id}")
