@@ -98,8 +98,8 @@ def _header(doc_title: str) -> list:
         try:
             with _req.urlopen(logo_url, timeout=5) as resp:
                 img_data = resp.read()
-            logo_element = _RLImage(_io.BytesIO(img_data), width=1.5 * inch, height=0.6 * inch)
-            logo_element.hAlign = "LEFT"
+            logo_element = _RLImage(_io.BytesIO(img_data), width=50, height=50)
+            logo_element.hAlign = "CENTER"
         except Exception:
             logo_element = None
 
@@ -509,6 +509,11 @@ class PDFService:
     def generate_pack_slip(self, order: "Order") -> bytes:
         buf = io.BytesIO()
         doc = _doc(buf)
+        slip_extra = []
+        if order.tracking_number:
+            slip_extra.append(["Tracking #", order.tracking_number])
+        if order.carrier:
+            slip_extra.append(["Carrier", order.carrier])
         # Pack slip: no pricing, just quantities
         header_row = ["Product", "Color", "Size", "Qty Ordered", "Qty Packed"]
         data = [header_row]
@@ -543,7 +548,7 @@ class PDFService:
 
         story = (
             _header("Packing Slip")
-            + _order_meta(order)
+            + _order_meta(order, extra_rows=slip_extra or None)
             + _address_block(order)
             + [tbl, Spacer(1, 10)]
             + _footer("Please verify quantities and sign. Return this slip with any discrepancies.")

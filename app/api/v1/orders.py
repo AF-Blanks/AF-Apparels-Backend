@@ -173,10 +173,12 @@ async def download_invoice_pdf(
     from app.services.pdf_service import PDFService
     try:
         pdf = PDFService().generate_invoice(order)
+        if not pdf:
+            raise ValueError("PDF generation returned empty bytes")
         return _pdf_response(pdf, f"invoice-{order.order_number}.pdf")
     except Exception as e:
-        logger.error(f"Invoice PDF error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Invoice PDF generation failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
 
 @router.get("/{order_id}/pdf/ship-confirmation")
