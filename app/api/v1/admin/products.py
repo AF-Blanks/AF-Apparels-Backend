@@ -518,6 +518,26 @@ async def get_admin_product(slug: str, db: AsyncSession = Depends(get_db)):
     return product
 
 
+@router.post("/force-delete/{product_id}")
+async def force_delete_product(product_id: str, db: AsyncSession = Depends(get_db)):
+    """Temporary one-shot endpoint: hard-delete a specific product bypassing ORM cascade."""
+    from sqlalchemy import text as _text
+    async with db.begin():
+        await db.execute(_text(
+            "UPDATE po_line_items SET product_variant_id = NULL "
+            "WHERE product_variant_id IN "
+            "(SELECT id FROM product_variants WHERE product_id = :pid::uuid)"
+        ), {"pid": product_id})
+        await db.execute(_text(
+            "DELETE FROM product_variants WHERE product_id = :pid::uuid"
+        ), {"pid": product_id})
+        await db.execute(_text(
+            "DELETE FROM products WHERE id = :pid::uuid"
+        ), {"pid": product_id})
+    logger.info("force_delete_product: deleted %s", product_id)
+    return {"success": True, "deleted": product_id}
+
+
 @router.delete("/{product_id}", status_code=200)
 async def delete_product(product_id: UUID, db: AsyncSession = Depends(get_db)):
     from sqlalchemy import text as _text
