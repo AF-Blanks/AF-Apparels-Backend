@@ -30,14 +30,15 @@ async def calculate_tax(
         logger.warning("ZIPTAX_API_KEY is not set — skipping ZipTax, returning 0 tax")
         return {"rate": 0.0, "tax_amount": 0.0, "region": to_state.upper(), "source": "manual"}
 
-    logger.info("ZipTax request: state=%s zip=%s subtotal=%.2f api_key_prefix=%s",
-                to_state, to_zip, subtotal, api_key[:8])
+    clean_zip = str(to_zip).strip().zfill(5) if to_zip else ""
+    logger.info("ZipTax request: state=%s zip=%r clean_zip=%r subtotal=%.2f api_key_prefix=%s",
+                to_state, to_zip, clean_zip, subtotal, api_key[:8])
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
                 ZIPTAX_BASE_URL,
-                params={"key": api_key, "postalcode": to_zip},
+                params={"key": api_key, "postalcode": clean_zip},
             )
             logger.info("ZipTax HTTP status: %s", response.status_code)
             response.raise_for_status()

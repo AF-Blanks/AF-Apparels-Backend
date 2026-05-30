@@ -32,6 +32,14 @@ async def calculate_tax(
         "Tax calculate: raw_state=%r state=%s zip=%r subtotal=%.2f discount=%.2f taxable=%.2f",
         body.state, state, body.zip_code, body.subtotal, body.discount, taxable_subtotal,
     )
+    logger.info(
+        "Tax endpoint received: zip_code=%r type=%s state=%r",
+        body.zip_code, type(body.zip_code).__name__, body.state,
+    )
+
+    # Strip and clean zip before calling ZipTax (rCode 108 = invalid format)
+    clean_zip = str(body.zip_code).strip().zfill(5) if body.zip_code else ""
+    logger.info("Clean zip: %r length=%d", clean_zip, len(clean_zip))
 
     # Tax-exempt companies pay no tax
     company_id = getattr(request.state, "company_id", None)
@@ -47,12 +55,12 @@ async def calculate_tax(
     api_key_present = get_ziptax_client() is not None
     logger.info("Tax: zip_code=%r taxable_subtotal=%.2f ziptax_key_present=%s", body.zip_code, taxable_subtotal, api_key_present)
 
-    if body.zip_code and taxable_subtotal > 0:
+    if clean_zip and taxable_subtotal > 0:
         if api_key_present:
             from app.services.tax_service import calculate_tax as ziptax_calc
             result = await ziptax_calc(
                 to_state=state,
-                to_zip=body.zip_code,
+                to_zip=clean_zip,
                 to_city="",
                 subtotal=taxable_subtotal,
                 shipping=0,
@@ -61,7 +69,7 @@ async def calculate_tax(
             if result.get("source") == "ziptax":
                 logger.info(
                     "ZipTax success: %s %s → rate=%.4f%% amount=$%.2f",
-                    state, body.zip_code, result["rate"], result["tax_amount"],
+                    state, clean_zip, result["rate"], result["tax_amount"],
                 )
                 return {
                     "tax_rate": result["rate"],
@@ -74,7 +82,7 @@ async def calculate_tax(
         else:
             logger.warning("ZIPTAX_API_KEY not set in environment — skipping ZipTax")
     else:
-        logger.info("Tax: skipping ZipTax — zip_code empty or taxable_subtotal=0")
+        logger.info("Tax: skipping ZipTax — clean_zip=%r empty or taxable_subtotal=0", clean_zip)
 
     # Fallback: manual tax_rates table
     from app.api.v1.admin.taxes import TaxRate
