@@ -106,6 +106,18 @@ async def calculate_tax(
     return {"tax_rate": 0.0, "tax_amount": 0.0, "region": state, "taxable": False, "source": "none"}
 
 
+@router.get("/outbound-ip")
+async def outbound_ip():
+    """Debug endpoint — returns this service's outbound IP. Remove after use."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            ip = (await client.get("https://ifconfig.me/ip")).text.strip()
+        return {"outbound_ip": ip}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 @router.get("/test-ziptax")
 async def test_ziptax(zip_code: str = "75215"):
     """Debug endpoint — tests ZipTax API directly. Remove after debugging."""
