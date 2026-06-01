@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     APP_ENV: Literal["development", "test", "staging", "production"] = "development"
     APP_SECRET_KEY: str = "dev-secret-key-change-in-production"
     DEBUG: bool = False
-    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:3001,https://af-apparel.vercel.app,https://af-apparel-sigma.vercel.app,https://af-apparels.vercel.app"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:3001,https://af-apparel.vercel.app,https://af-apparel-sigma.vercel.app,https://af-apparels.vercel.app,https://af-apparels-sigma.vercel.app"
 
     @property
     def allowed_origins_list(self) -> list[str]:
@@ -91,7 +91,7 @@ class Settings(BaseSettings):
         if self.RESEND_FROM_EMAIL:
             self.EMAIL_FROM_ADDRESS = self.RESEND_FROM_EMAIL
         return self
-    FRONTEND_URL: str = "http://localhost:3000"
+    FRONTEND_URL: str = "https://af-apparels.vercel.app"
 
     # ── AWS S3 ────────────────────────────────────────────────────────────────
     AWS_ACCESS_KEY_ID: str = ""
