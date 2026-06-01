@@ -368,6 +368,23 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            # Fix wholesale_applications.business_type — DB created it as a
+            # PostgreSQL ENUM but the model expects plain VARCHAR; convert it.
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'wholesale_applications'
+                          AND column_name = 'business_type'
+                          AND data_type = 'USER-DEFINED'
+                    ) THEN
+                        ALTER TABLE wholesale_applications
+                            ALTER COLUMN business_type TYPE VARCHAR(100)
+                            USING business_type::text;
+                    END IF;
+                END$$;
+            """))
             # ── Purchase Order tables ──────────────────────────────────────────
             await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS manufacturers (
