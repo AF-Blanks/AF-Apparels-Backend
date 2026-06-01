@@ -368,11 +368,12 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
-            # Fix wholesale_applications.business_type — DB created it as a
-            # PostgreSQL ENUM but the model expects plain VARCHAR; convert it.
+            # Fix wholesale_applications column type mismatches — DB may have
+            # created these as wrong types vs what the model expects (VARCHAR).
             await conn.execute(text("""
                 DO $$
                 BEGIN
+                    -- business_type: DB created as ENUM, model expects VARCHAR
                     IF EXISTS (
                         SELECT 1 FROM information_schema.columns
                         WHERE table_name = 'wholesale_applications'
@@ -382,6 +383,17 @@ async def _ensure_content_tables() -> None:
                         ALTER TABLE wholesale_applications
                             ALTER COLUMN business_type TYPE VARCHAR(100)
                             USING business_type::text;
+                    END IF;
+                    -- estimated_annual_volume: DB created as NUMERIC, model expects VARCHAR
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'wholesale_applications'
+                          AND column_name = 'estimated_annual_volume'
+                          AND data_type = 'numeric'
+                    ) THEN
+                        ALTER TABLE wholesale_applications
+                            ALTER COLUMN estimated_annual_volume TYPE VARCHAR(100)
+                            USING estimated_annual_volume::text;
                     END IF;
                 END$$;
             """))
