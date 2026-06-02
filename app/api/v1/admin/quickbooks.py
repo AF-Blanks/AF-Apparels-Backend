@@ -123,7 +123,7 @@ async def quickbooks_connect(_: None = Depends(require_admin)):
         "state": "afapparels_qb_auth",
     }
     auth_url = "https://appcenter.intuit.com/connect/oauth2?" + urlencode(params)
-    return {"auth_url": auth_url}
+    return RedirectResponse(url=auth_url)
 
 
 @router.get("/quickbooks/callback")
