@@ -108,8 +108,8 @@ async def retry_qb_sync(
 
 
 @router.get("/quickbooks/connect")
-async def quickbooks_connect(_: None = Depends(require_admin)):
-    """Return the Intuit OAuth2 authorization URL for the admin to open."""
+async def quickbooks_connect():
+    """Redirect to Intuit OAuth2 authorization page."""
     client_id = os.getenv("QB_CLIENT_ID", "")
     redirect_uri = os.getenv("QB_REDIRECT_URI", "")
     if not client_id or not redirect_uri:
