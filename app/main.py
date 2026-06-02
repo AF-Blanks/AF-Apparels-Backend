@@ -501,6 +501,13 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key VARCHAR(100) PRIMARY KEY,
+                    value TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+            """))
         print("Content tables: OK")
     except Exception as exc:
         print(f"Content tables warning (non-fatal): {exc}")

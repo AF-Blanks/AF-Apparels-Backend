@@ -1,11 +1,18 @@
 """Admin — QuickBooks sync dashboard endpoints.
 
 T195: GET /admin/quickbooks/status, POST /admin/quickbooks/retry/{log_id}
+      GET /admin/quickbooks/connect, GET /admin/quickbooks/callback
 """
+import base64
+import os
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from fastapi.responses import RedirectResponse
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -98,3 +105,85 @@ async def retry_qb_sync(
     await db.commit()
 
     return {"status": "queued", "task_id": task.id, "entity_type": log.entity_type, "entity_id": entity_id}
+
+
+@router.get("/quickbooks/connect")
+async def quickbooks_connect(_: None = Depends(require_admin)):
+    """Return the Intuit OAuth2 authorization URL for the admin to open."""
+    client_id = os.getenv("QB_CLIENT_ID", "")
+    redirect_uri = os.getenv("QB_REDIRECT_URI", "")
+    if not client_id or not redirect_uri:
+        raise HTTPException(status_code=500, detail="QB_CLIENT_ID or QB_REDIRECT_URI not configured")
+
+    params = {
+        "client_id": client_id,
+        "response_type": "code",
+        "scope": "com.intuit.quickbooks.accounting",
+        "redirect_uri": redirect_uri,
+        "state": "afapparels_qb_auth",
+    }
+    auth_url = "https://appcenter.intuit.com/connect/oauth2?" + urlencode(params)
+    return {"auth_url": auth_url}
+
+
+@router.get("/quickbooks/callback")
+async def quickbooks_callback(
+    code: str,
+    realmId: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Handle Intuit OAuth2 callback — exchange code for tokens and persist them."""
+    client_id = os.getenv("QB_CLIENT_ID", "")
+    client_secret = os.getenv("QB_CLIENT_SECRET", "")
+    redirect_uri = os.getenv("QB_REDIRECT_URI", "")
+    frontend_url = os.getenv("FRONTEND_URL", "https://af-apparels.vercel.app")
+
+    if not client_id or not client_secret or not redirect_uri:
+        raise HTTPException(status_code=500, detail="QuickBooks OAuth env vars not configured")
+
+    credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+            headers={
+                "Authorization": f"Basic {credentials}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+        )
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to exchange QB code for tokens: {response.text}",
+        )
+
+    tokens = response.json()
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=tokens.get("expires_in", 3600))
+    ).isoformat()
+
+    # Upsert all four QB settings into app_settings
+    await db.execute(text("""
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES
+            ('qb_access_token',    :access_token,  now()),
+            ('qb_refresh_token',   :refresh_token, now()),
+            ('qb_realm_id',        :realm_id,      now()),
+            ('qb_token_expires_at',:expires_at,    now())
+        ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value, updated_at = now()
+    """), {
+        "access_token":  tokens["access_token"],
+        "refresh_token": tokens["refresh_token"],
+        "realm_id":      realmId,
+        "expires_at":    expires_at,
+    })
+    await db.commit()
+
+    return RedirectResponse(url=f"{frontend_url}/admin/quickbooks?connected=true")
