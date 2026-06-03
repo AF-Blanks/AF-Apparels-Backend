@@ -3,18 +3,78 @@
 Provides create_customer, create_invoice, token refresh, and rate limiting.
 Uses the intuitlib + quickbooks-python SDK pattern via raw requests for
 maximum control over token management.
+
+Token priority: app_settings DB table (set via OAuth callback) > env vars.
+Tokens are saved back to app_settings after every successful refresh.
 """
 import asyncio
-import json
 import time
-import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any
 
 import httpx
 
 from app.core.config import settings
+
+
+# ── DB token helpers (async, called via _run_sync_safe) ──────────────────────
+
+async def _load_tokens_from_db() -> dict[str, str]:
+    """Read QB token fields from app_settings. Returns {} if table is empty."""
+    from app.core.database import AsyncSessionLocal
+    from sqlalchemy import text
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                text("SELECT key, value FROM app_settings "
+                     "WHERE key IN ('qb_access_token','qb_refresh_token','qb_realm_id','qb_token_expires_at')")
+            )).fetchall()
+            return {r.key: r.value for r in rows if r.value}
+    except Exception:
+        return {}
+
+
+async def _save_tokens_to_db(
+    access_token: str,
+    refresh_token: str,
+    expires_at_iso: str,
+    realm_id: str | None = None,
+) -> None:
+    """Upsert QB tokens into app_settings."""
+    from app.core.database import AsyncSessionLocal
+    from sqlalchemy import text
+    pairs = [
+        ("qb_access_token",    access_token),
+        ("qb_refresh_token",   refresh_token),
+        ("qb_token_expires_at", expires_at_iso),
+    ]
+    if realm_id:
+        pairs.append(("qb_realm_id", realm_id))
+    try:
+        async with AsyncSessionLocal() as session:
+            for key, value in pairs:
+                await session.execute(text("""
+                    INSERT INTO app_settings (key, value, updated_at)
+                    VALUES (:k, :v, now())
+                    ON CONFLICT (key) DO UPDATE
+                        SET value = EXCLUDED.value, updated_at = now()
+                """), {"k": key, "v": value})
+            await session.commit()
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("QB token save to DB failed: %s", exc)
+
+
+def _run_sync_safe(coro) -> Any:
+    """Run an async coroutine from synchronous code safely."""
+    try:
+        loop = asyncio.get_event_loop()
+        if not loop.is_running():
+            return loop.run_until_complete(coro)
+    except RuntimeError:
+        pass
+    return asyncio.run(coro)
 
 
 class _TokenBucket:
@@ -58,49 +118,86 @@ TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
 
 
 class QuickBooksService:
-    """Stateless service — tokens are read from settings / passed per call."""
+    """Token-aware QB service. Loads live tokens from app_settings DB (set via
+    OAuth callback); falls back to env vars. Saves updated tokens after refresh.
+    """
 
     def __init__(self):
-        self._access_token: str = settings.QB_ACCESS_TOKEN
-        self._refresh_token: str = settings.QB_REFRESH_TOKEN
-        self._company_id: str = settings.QB_COMPANY_ID
         self._base_url: str = QB_BASE_URL[settings.QB_ENVIRONMENT]
-        self._token_expiry: datetime | None = None  # unknown on init — will refresh if needed
+        self._token_expiry: datetime | None = None
+
+        # Load tokens from DB first; fall back to env vars
+        try:
+            db = _run_sync_safe(_load_tokens_from_db())
+        except Exception:
+            db = {}
+
+        self._access_token: str  = db.get("qb_access_token")  or settings.QB_ACCESS_TOKEN
+        self._refresh_token: str = db.get("qb_refresh_token") or settings.QB_REFRESH_TOKEN
+        self._company_id: str    = db.get("qb_realm_id")      or settings.QB_COMPANY_ID
+
+        # Parse stored expiry so we can decide before the first API call
+        expires_str = db.get("qb_token_expires_at")
+        if expires_str:
+            try:
+                # ISO format stored by the OAuth callback
+                dt = datetime.fromisoformat(expires_str)
+                # Normalise to naive UTC for consistent comparison
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                self._token_expiry = dt
+            except ValueError:
+                pass  # unparseable — will refresh on first 401
 
     # ── Token management ──────────────────────────────────────────────────────
 
     def refresh_token_if_expired(self) -> bool:
-        """Refresh access token using the stored refresh token.
+        """Exchange the refresh token for a new access token.
 
-        Returns True on success. On network failure, logs a warning and
-        continues using the existing token rather than crashing the request.
+        Saves updated tokens to app_settings DB so they survive restarts.
+        Returns True on success; logs a warning and returns False on failure
+        so the caller can still attempt the request with the current token.
         """
         import logging
         _log = logging.getLogger(__name__)
 
-        if not settings.QB_CLIENT_ID or not settings.QB_REFRESH_TOKEN:
+        refresh_token = self._refresh_token or settings.QB_REFRESH_TOKEN
+        client_id     = settings.QB_CLIENT_ID
+        client_secret = settings.QB_CLIENT_SECRET
+
+        if not client_id or not refresh_token:
+            _log.warning("QB token refresh skipped — QB_CLIENT_ID or refresh_token not set")
             return False
+
         try:
             with httpx.Client(transport=httpx.HTTPTransport(retries=3)) as client:
                 resp = client.post(
                     TOKEN_URL,
-                    auth=(settings.QB_CLIENT_ID, settings.QB_CLIENT_SECRET),
-                    data={
-                        "grant_type": "refresh_token",
-                        "refresh_token": self._refresh_token or settings.QB_REFRESH_TOKEN,
-                    },
+                    auth=(client_id, client_secret),
+                    data={"grant_type": "refresh_token", "refresh_token": refresh_token},
                     timeout=10,
                 )
             resp.raise_for_status()
             data = resp.json()
-            self._access_token = data["access_token"]
-            self._refresh_token = data.get("refresh_token", self._refresh_token)
-            expires_in = data.get("expires_in", 3600)
-            self._token_expiry = datetime.utcnow() + timedelta(seconds=expires_in - 60)
+
+            new_access  = data["access_token"]
+            new_refresh = data.get("refresh_token", refresh_token)
+            expires_in  = data.get("expires_in", 3600)
+            # Subtract 5 min so we refresh before the window actually closes
+            expiry_dt   = datetime.utcnow() + timedelta(seconds=expires_in - 300)
+            expires_iso = (expiry_dt.replace(tzinfo=timezone.utc)).isoformat()
+
+            # Update in-memory state
+            self._access_token  = new_access
+            self._refresh_token = new_refresh
+            self._token_expiry  = expiry_dt
+
+            # Persist to DB so other workers and restarts pick up the new tokens
+            _run_sync_safe(_save_tokens_to_db(new_access, new_refresh, expires_iso))
+            _log.info("QB access token refreshed; expires ~%s", expiry_dt.strftime("%Y-%m-%dT%H:%M"))
             return True
+
         except (httpx.ConnectError, httpx.TimeoutException, OSError) as exc:
-            # Network unreachable — fall back to the current token and try anyway.
-            # If the token is truly expired the downstream 401 handler will surface it.
             _log.warning("QB token refresh skipped (network): %s — using existing token", exc)
             return False
         except Exception as exc:
@@ -114,10 +211,10 @@ class QuickBooksService:
         return self._access_token
 
     def _needs_refresh(self) -> bool:
-        # If expiry is unknown but a token is already loaded, trust it.
-        # A 401 response will trigger an explicit refresh via the caller.
         if self._token_expiry is None:
+            # Expiry unknown — trust the token if present; 401 will trigger a retry
             return not bool(self._access_token)
+        # Refresh when within 5 minutes of expiry (expiry already has 5-min buffer baked in)
         return datetime.utcnow() >= self._token_expiry
 
     def _headers(self) -> dict[str, str]:
