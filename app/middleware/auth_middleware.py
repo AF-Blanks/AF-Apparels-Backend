@@ -191,4 +191,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Invoice summary — public for pay-now email link access
         if path.endswith('/invoice-summary'):
             return True
+        # QB OAuth flow — Intuit redirects to callback without a Bearer token;
+        # connect is also public so the browser can navigate to it directly.
+        if path in ("/api/v1/admin/quickbooks/connect", "/api/v1/admin/quickbooks/callback"):
+            return True
         return False
