@@ -5,9 +5,14 @@ Both use exponential backoff with max 5 retries.
 All attempts are logged to qb_sync_log.
 """
 import asyncio
+import logging
 import uuid
 
 from app.core.celery import celery_app
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+logger.info("quickbooks_tasks loaded — broker=%s", settings.CELERY_BROKER_URL)
 
 
 def _run_async(coro):
@@ -53,6 +58,7 @@ async def _log_attempt(entity_type: str, entity_id: str, status: str, error: str
 )
 def sync_customer_to_qb(self, company_id: str):
     """Sync a Company to QuickBooks as a Customer."""
+    logger.info("sync_customer_to_qb started — company_id=%s", company_id)
 
     async def _fetch():
         from app.core.database import AsyncSessionLocal
