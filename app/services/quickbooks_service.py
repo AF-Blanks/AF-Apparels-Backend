@@ -118,36 +118,38 @@ TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
 
 
 class QuickBooksService:
-    """Token-aware QB service. Loads live tokens from app_settings DB (set via
-    OAuth callback); falls back to env vars. Saves updated tokens after refresh.
+    """Token-aware QB service. Call `await svc.initialize()` after construction
+    to load live tokens from app_settings DB; falls back to env vars.
+    Saves updated tokens back to DB after every successful refresh.
     """
 
     def __init__(self):
-        self._base_url: str = QB_BASE_URL[settings.QB_ENVIRONMENT]
+        # Synchronous defaults from env vars — no async work here
+        self._access_token: str  = settings.QB_ACCESS_TOKEN
+        self._refresh_token: str = settings.QB_REFRESH_TOKEN
+        self._company_id: str    = settings.QB_COMPANY_ID
+        self._base_url: str      = QB_BASE_URL[settings.QB_ENVIRONMENT]
         self._token_expiry: datetime | None = None
 
-        # Load tokens from DB first; fall back to env vars
-        try:
-            db = _run_sync_safe(_load_tokens_from_db())
-        except Exception:
-            db = {}
-
-        self._access_token: str  = db.get("qb_access_token")  or settings.QB_ACCESS_TOKEN
-        self._refresh_token: str = db.get("qb_refresh_token") or settings.QB_REFRESH_TOKEN
-        self._company_id: str    = db.get("qb_realm_id")      or settings.QB_COMPANY_ID
-
-        # Parse stored expiry so we can decide before the first API call
+    async def initialize(self) -> "QuickBooksService":
+        """Load live tokens from app_settings DB. Await this before first API use."""
+        db = await _load_tokens_from_db()
+        if db.get("qb_access_token"):
+            self._access_token  = db["qb_access_token"]
+        if db.get("qb_refresh_token"):
+            self._refresh_token = db["qb_refresh_token"]
+        if db.get("qb_realm_id"):
+            self._company_id    = db["qb_realm_id"]
         expires_str = db.get("qb_token_expires_at")
         if expires_str:
             try:
-                # ISO format stored by the OAuth callback
                 dt = datetime.fromisoformat(expires_str)
-                # Normalise to naive UTC for consistent comparison
                 if dt.tzinfo is not None:
                     dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
                 self._token_expiry = dt
             except ValueError:
-                pass  # unparseable — will refresh on first 401
+                pass
+        return self
 
     # ── Token management ──────────────────────────────────────────────────────
 

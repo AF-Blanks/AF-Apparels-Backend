@@ -58,6 +58,7 @@ def sync_customer_to_qb(self, company_id: str):
         from app.core.database import AsyncSessionLocal
         from app.models.company import Company
         from app.models.user import User
+        from app.services.quickbooks_service import QuickBooksService
         from sqlalchemy import select
 
         async with AsyncSessionLocal() as session:
@@ -75,7 +76,11 @@ def sync_customer_to_qb(self, company_id: str):
             )
             owner = user_result.scalar_one_or_none()
             email = owner.email if owner else f"noreply+{company_id[:8]}@afapparels.com"
-            return company.name, email, str(company.id)
+            name, ref = company.name, str(company.id)
+
+        # Initialize service with live DB tokens (outside the company session)
+        svc = await QuickBooksService().initialize()
+        return name, email, ref, svc
 
     try:
         result = _run_async(_fetch())
@@ -83,9 +88,7 @@ def sync_customer_to_qb(self, company_id: str):
             _run_async(_log_attempt("company", company_id, "failed", "Company not found"))
             return
 
-        company_name, email, ref_id = result
-        from app.services.quickbooks_service import QuickBooksService
-        svc = QuickBooksService()
+        company_name, email, ref_id, svc = result
         qb_id = svc.create_customer(company_name, email, ref_id=ref_id)
         _run_async(_log_attempt("company", company_id, "success", None, qb_entity_id=qb_id))
         return {"status": "success", "qb_customer_id": qb_id}
@@ -107,6 +110,7 @@ def sync_order_invoice_to_qb(self, order_id: str):
         from app.core.database import AsyncSessionLocal
         from app.models.order import Order
         from app.models.system import QBSyncLog
+        from app.services.quickbooks_service import QuickBooksService
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
 
@@ -130,7 +134,25 @@ def sync_order_invoice_to_qb(self, order_id: str):
             )
             log = log_result.scalar_one_or_none()
             qb_customer_id = log.qb_entity_id if log else None
-            return order, qb_customer_id
+            # Snapshot the fields we need before the session closes
+            order_data = {
+                "company_id": str(order.company_id),
+                "order_number": order.order_number,
+                "total": float(order.total),
+                "items": [
+                    {
+                        "description": f"{i.product_name} ({i.sku})",
+                        "quantity": i.quantity,
+                        "unit_price": float(i.unit_price),
+                        "amount": float(i.line_total),
+                    }
+                    for i in order.items
+                ],
+            }
+
+        # Initialize service with live DB tokens (outside the order session)
+        svc = await QuickBooksService().initialize()
+        return order_data, qb_customer_id, svc
 
     try:
         result = _run_async(_fetch())
@@ -138,30 +160,17 @@ def sync_order_invoice_to_qb(self, order_id: str):
             _run_async(_log_attempt("order", order_id, "failed", "Order not found"))
             return
 
-        order, qb_customer_id = result
+        order_data, qb_customer_id, svc = result
 
         if not qb_customer_id:
-            sync_customer_to_qb.delay(str(order.company_id))
+            sync_customer_to_qb.delay(order_data["company_id"])
             raise RuntimeError("QB customer not yet synced — will retry after company sync")
-
-        from app.services.quickbooks_service import QuickBooksService
-        svc = QuickBooksService()
-
-        line_items = [
-            {
-                "description": f"{item.product_name} ({item.sku})",
-                "quantity": item.quantity,
-                "unit_price": float(item.unit_price),
-                "amount": float(item.line_total),
-            }
-            for item in order.items
-        ]
 
         qb_invoice_id = svc.create_invoice(
             qb_customer_id=qb_customer_id,
-            order_number=order.order_number,
-            line_items=line_items,
-            total=float(order.total),
+            order_number=order_data["order_number"],
+            line_items=order_data["items"],
+            total=order_data["total"],
         )
 
         async def _update():
