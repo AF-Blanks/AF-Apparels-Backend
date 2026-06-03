@@ -68,6 +68,8 @@ async def approve_application(
         data=data,
         admin_user_id=uuid.UUID(request.state.user_id),
     )
+    from app.tasks.quickbooks_tasks import sync_customer_to_qb
+    sync_customer_to_qb.delay(str(company.id))
     return {"message": "Application approved", "company_id": str(company.id)}
 
 
