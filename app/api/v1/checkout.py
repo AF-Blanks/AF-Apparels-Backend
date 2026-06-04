@@ -177,12 +177,14 @@ async def _confirm_checkout_inner(
     )
 
     # Validate: at least one payment method supplied
-    has_qb = bool(payload.qb_token or payload.saved_card_id)
+    has_qb     = bool(payload.qb_token or payload.saved_card_id)
     has_stripe = bool(payload.payment_intent_id)
-    has_ach = payload.payment_method == "ach"
-    if not has_qb and not has_stripe and not has_ach:
+    has_ach    = payload.payment_method == "ach"
+    has_net30  = payload.payment_method == "net_30"  # wholesale invoice/NET 30 — no upfront charge
+    if not has_qb and not has_stripe and not has_ach and not has_net30:
         raise ValidationError(
-            "Payment required: supply qb_token, saved_card_id, payment_intent_id, or payment_method=ach"
+            "Payment required: supply qb_token, saved_card_id, payment_intent_id, "
+            "payment_method=ach, or payment_method=net_30"
         )
 
     discount_percent = getattr(request.state, "tier_discount_percent", Decimal("0"))
