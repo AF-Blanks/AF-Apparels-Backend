@@ -342,4 +342,11 @@ async def _confirm_checkout_inner(
     except Exception as _exc:
         _log.warning("Order confirmation email failed: %s", _exc)
 
+    # ── QB invoice sync ───────────────────────────────────────────────────────
+    try:
+        from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+        sync_order_invoice_to_qb.delay(str(order.id))
+    except Exception as _exc:
+        _log.warning("QB invoice sync dispatch failed: %s", _exc)
+
     return order

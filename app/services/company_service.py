@@ -41,7 +41,7 @@ class CompanyService:
                 Order.company_id,
                 func.coalesce(func.sum(Order.total), 0).label("total_spend"),
             )
-            .where(Order.payment_status == "paid")
+            .where(Order.status.not_in(["cancelled", "refunded"]))
             .group_by(Order.company_id)
             .subquery()
         )
@@ -142,7 +142,7 @@ class CompanyService:
                     retail_order_counts[uid] = cnt
                 rs = await self.db.execute(
                     select(Order.placed_by_id, func.coalesce(func.sum(Order.total), 0).label("total"))
-                    .where(Order.placed_by_id.in_(retail_ids), Order.payment_status == "paid")
+                    .where(Order.placed_by_id.in_(retail_ids), Order.status.not_in(["cancelled", "refunded"]))
                     .group_by(Order.placed_by_id)
                 )
                 for uid, tot in rs.all():
@@ -226,7 +226,7 @@ class CompanyService:
         )
         total_result = await self.db.execute(
             select(func.coalesce(func.sum(Order.total), 0)).where(
-                Order.company_id == company_id, Order.payment_status == "paid"
+                Order.company_id == company_id, Order.status.not_in(["cancelled", "refunded"])
             )
         )
         return {

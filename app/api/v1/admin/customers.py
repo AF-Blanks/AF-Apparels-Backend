@@ -299,7 +299,7 @@ async def get_customer_stats(company_id: UUID, db: AsyncSession = Depends(get_db
             func.count(Order.id).label("total_orders"),
             func.coalesce(func.sum(Order.total), 0).label("total_spent"),
             func.max(Order.created_at).label("last_order_date"),
-        ).where(Order.company_id == company_id)
+        ).where(Order.company_id == company_id, Order.status.not_in(["cancelled", "refunded"]))
     )
     row = result.one()
     return {
