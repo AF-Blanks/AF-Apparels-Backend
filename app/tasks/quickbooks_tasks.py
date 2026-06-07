@@ -129,7 +129,13 @@ def sync_customer_to_qb(self, company_id: str):
 
 @celery_app.task(bind=True, max_retries=5)
 def sync_order_invoice_to_qb(self, order_id: str):
-    """Sync an Order to QuickBooks as an Invoice."""
+    """Sync an Order to QuickBooks as an Invoice.
+
+    Handles three customer types:
+    - True guest (company_id is NULL): create QB customer on-the-fly from guest fields.
+    - Retail/wholesale with company: use company.qb_customer_id, fall back to QBSyncLog.
+    - Company not yet in QB: dispatch sync_customer_to_qb and retry.
+    """
 
     async def _run_all():
         from app.core.database import AsyncSessionLocal
@@ -140,7 +146,12 @@ def sync_order_invoice_to_qb(self, order_id: str):
         from sqlalchemy.orm import selectinload
 
         try:
-            # ── 1. Fetch order + check if company is already in QB ────────────
+            # ── 1. Fetch order and resolve QB customer identity ───────────────
+            qb_customer_id: str | None = None
+            is_guest_no_company = False
+            guest_display_name: str | None = None
+            guest_email_addr: str | None = None
+
             async with AsyncSessionLocal() as session:
                 order = (await session.execute(
                     select(Order)
@@ -152,20 +163,33 @@ def sync_order_invoice_to_qb(self, order_id: str):
                     await _log_attempt("order", order_id, "failed", "Order not found")
                     return None
 
-                log = (await session.execute(
-                    select(QBSyncLog)
-                    .where(QBSyncLog.entity_type == "company")
-                    .where(QBSyncLog.entity_id == order.company_id)
-                    .where(QBSyncLog.status == "success")
-                    .order_by(QBSyncLog.created_at.desc())
-                    .limit(1)
-                )).scalar_one_or_none()
-
-                qb_customer_id = log.qb_entity_id if log else None
+                if order.company_id is None:
+                    # True guest — no Company row; will create QB customer on-the-fly
+                    is_guest_no_company = True
+                    guest_display_name = order.guest_name or f"Guest {order.order_number}"
+                    guest_email_addr = (
+                        order.guest_email or f"guest+{order_id[:8]}@afapparels.com"
+                    )
+                else:
+                    # Wholesale or retail-with-company order
+                    # Check company.qb_customer_id column first (fastest path)
+                    if order.company and order.company.qb_customer_id:
+                        qb_customer_id = order.company.qb_customer_id
+                    else:
+                        # Fall back to QBSyncLog for a prior successful sync
+                        log = (await session.execute(
+                            select(QBSyncLog)
+                            .where(QBSyncLog.entity_type == "company")
+                            .where(QBSyncLog.entity_id == order.company_id)
+                            .where(QBSyncLog.status == "success")
+                            .order_by(QBSyncLog.created_at.desc())
+                            .limit(1)
+                        )).scalar_one_or_none()
+                        qb_customer_id = log.qb_entity_id if log else None
 
                 # Snapshot all needed fields before the session closes
                 order_data = {
-                    "company_id": str(order.company_id),
+                    "company_id": str(order.company_id) if order.company_id else None,
                     "order_number": order.order_number,
                     "total": float(order.total),
                     "items": [
@@ -179,14 +203,25 @@ def sync_order_invoice_to_qb(self, order_id: str):
                     ],
                 }
 
-            if not qb_customer_id:
-                sync_customer_to_qb.delay(order_data["company_id"])
-                raise RuntimeError("QB customer not yet synced — retrying after company sync")
-
             # ── 2. Load live QB tokens ────────────────────────────────────────
             svc = await QuickBooksService().initialize()
 
-            # ── 3. Create invoice (sync, run in thread) ───────────────────────
+            # ── 3. Resolve QB customer ────────────────────────────────────────
+            if is_guest_no_company:
+                # Create (or find by DisplayName) a QB customer from guest fields
+                qb_customer_id = await asyncio.to_thread(
+                    svc.create_customer, guest_display_name, guest_email_addr
+                )
+                logger.info(
+                    "sync_order_invoice_to_qb guest customer resolved — qb_id=%s",
+                    qb_customer_id,
+                )
+            elif not qb_customer_id:
+                # Company exists but hasn't been synced to QB yet — dispatch and retry
+                sync_customer_to_qb.delay(order_data["company_id"])
+                raise RuntimeError("QB customer not yet synced — retrying after company sync")
+
+            # ── 4. Create invoice (sync, run in thread) ───────────────────────
             qb_invoice_id = await asyncio.to_thread(
                 svc.create_invoice,
                 qb_customer_id=qb_customer_id,
@@ -196,7 +231,7 @@ def sync_order_invoice_to_qb(self, order_id: str):
             )
             logger.info("sync_order_invoice_to_qb success — qb_invoice_id=%s", qb_invoice_id)
 
-            # ── 4. Persist QB invoice ID back to the order row ────────────────
+            # ── 5. Persist QB invoice ID back to the order row ────────────────
             async with AsyncSessionLocal() as session:
                 o = (await session.execute(
                     select(Order).where(Order.id == uuid.UUID(order_id))
@@ -206,7 +241,7 @@ def sync_order_invoice_to_qb(self, order_id: str):
                     o.qb_sync_status = "synced"
                     await session.commit()
 
-            # ── 5. Log success ────────────────────────────────────────────────
+            # ── 6. Log success ────────────────────────────────────────────────
             await _log_attempt("order", order_id, "success", None, qb_entity_id=qb_invoice_id)
             return {"status": "success", "qb_invoice_id": qb_invoice_id}
 

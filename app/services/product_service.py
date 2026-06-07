@@ -92,6 +92,7 @@ class ProductService:
                         func.plainto_tsquery("english", params.q)
                     ),
                     Product.name.ilike(f"%{params.q}%"),
+                    Product.product_code.ilike(f"%{params.q}%"),
                 )
             )
 
@@ -107,7 +108,21 @@ class ProductService:
                 ProductVariant.status == "active",
             )
         if params.gender:
-            query = query.where(Product.gender == params.gender)
+            g = params.gender.lower().replace("'", "").replace(" ", "")
+            if g in ("mens", "men", "male"):
+                query = query.where(
+                    or_(Product.gender == "mens", Product.gender == "unisex")
+                )
+            elif g in ("womens", "women", "female"):
+                query = query.where(
+                    or_(Product.gender == "womens", Product.gender == "unisex")
+                )
+            elif g == "unisex":
+                query = query.where(Product.gender == "unisex")
+            elif g in ("youth", "kids", "children"):
+                query = query.where(Product.gender == "youth")
+            else:
+                query = query.where(func.lower(Product.gender) == g)
 
         if params.fabric:
             query = query.where(Product.fabric.ilike(f"%{params.fabric}%"))

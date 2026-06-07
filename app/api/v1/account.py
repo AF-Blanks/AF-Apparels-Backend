@@ -1969,3 +1969,87 @@ async def get_sales_history(
             result_items.append({**g, "variants": variants})
 
     return {"items": result_items, "year": year, "display": display}
+
+
+# ---------------------------------------------------------------------------
+# QuickBooks Invoices
+# ---------------------------------------------------------------------------
+
+@router.get("/invoices")
+async def list_qb_invoices(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch all QB invoices for the authenticated company customer."""
+    company_id = getattr(request.state, "company_id", None)
+    if not company_id:
+        raise ForbiddenError("Company account required")
+
+    from app.models.company import Company
+
+    company = (await db.execute(
+        select(Company).where(Company.id == company_id)
+    )).scalar_one_or_none()
+
+    if not company or not company.qb_customer_id:
+        return []
+
+    try:
+        import httpx
+        from app.services.quickbooks_service import QuickBooksService
+
+        qb_svc = QuickBooksService()
+        access_token = qb_svc.get_access_token()
+
+        base_url = (
+            "https://sandbox-quickbooks.api.intuit.com"
+            if settings.QB_ENVIRONMENT == "sandbox"
+            else "https://quickbooks.api.intuit.com"
+        )
+        query = (
+            f"SELECT * FROM Invoice WHERE CustomerRef = '{company.qb_customer_id}' "
+            "ORDER BY TxnDate DESC MAXRESULTS 100"
+        )
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{base_url}/v3/company/{settings.QB_COMPANY_ID}/query",
+                params={"query": query, "minorversion": "65"},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/json",
+                },
+            )
+
+        if resp.status_code != 200:
+            return []
+
+        raw_invoices = resp.json().get("QueryResponse", {}).get("Invoice", [])
+
+        invoices = []
+        for inv in raw_invoices:
+            total = float(inv.get("TotalAmt", 0))
+            balance = float(inv.get("Balance", 0))
+            if balance <= 0:
+                inv_status = "paid"
+            elif balance < total:
+                inv_status = "partial"
+            else:
+                inv_status = "open"
+
+            invoices.append({
+                "id": inv.get("Id"),
+                "doc_number": inv.get("DocNumber"),
+                "txn_date": inv.get("TxnDate"),
+                "due_date": inv.get("DueDate"),
+                "total_amt": total,
+                "balance": balance,
+                "status": inv_status,
+                "email_status": inv.get("EmailStatus"),
+                "customer_memo": (inv.get("CustomerMemo") or {}).get("value"),
+            })
+
+        return invoices
+
+    except Exception:
+        return []

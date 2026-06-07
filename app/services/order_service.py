@@ -622,19 +622,20 @@ class OrderService:
     async def _generate_order_number(self) -> str:
         from sqlalchemy import text as _text
         try:
+            # Find highest numeric order number (new #1001+ format)
             result = await self.db.execute(_text(
                 "SELECT order_number FROM orders "
-                "WHERE order_number LIKE 'AF-%' "
-                "ORDER BY SUBSTRING(order_number FROM 4)::INTEGER DESC "
+                "WHERE order_number ~ '^[0-9]+$' "
+                "ORDER BY order_number::INTEGER DESC "
                 "LIMIT 1"
             ))
             row = result.fetchone()
             if row and row[0]:
-                counter = int(row[0].split("-", 1)[-1]) + 1
+                next_num = int(row[0]) + 1
             else:
-                counter = 1
+                next_num = 1001
         except Exception as _exc:
             logger.warning("order number DB query failed, using random fallback: %s", _exc)
             import random
-            counter = random.randint(10000, 99999)
-        return f"AF-{counter:06d}"
+            next_num = random.randint(1001, 9999)
+        return str(next_num)
