@@ -111,7 +111,17 @@ def sync_customer_to_qb(self, company_id: str):
             qb_id = await asyncio.to_thread(svc.create_customer, name, email, ref_id=ref)
             logger.info("sync_customer_to_qb success — qb_id=%s", qb_id)
 
-            # ── 4. Log success ────────────────────────────────────────────────
+            # ── 4. Persist QB customer ID back to company row ─────────────────
+            from app.models.company import Company
+            async with AsyncSessionLocal() as session:
+                company = (await session.execute(
+                    select(Company).where(Company.id == uuid.UUID(company_id))
+                )).scalar_one_or_none()
+                if company:
+                    company.qb_customer_id = qb_id
+                    await session.commit()
+
+            # ── 5. Log success ────────────────────────────────────────────────
             await _log_attempt("company", company_id, "success", None, qb_entity_id=qb_id)
             return {"status": "success", "qb_customer_id": qb_id}
 
