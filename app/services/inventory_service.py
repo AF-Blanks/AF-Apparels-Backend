@@ -174,7 +174,7 @@ class InventoryService:
 
         try:
             from app.tasks.quickbooks_tasks import sync_inventory_to_qb
-            sync_inventory_to_qb.delay(str(variant_id))
+            sync_inventory_to_qb.apply_async(args=[str(variant_id)], countdown=10)
         except Exception as _exc:
             logger.warning("QB inventory sync dispatch failed: %s", _exc)
 

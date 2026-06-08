@@ -322,6 +322,28 @@ def sync_variant_to_qb(self, variant_id: str):
         from sqlalchemy.orm import selectinload
 
         try:
+            # ── 0. Row-level lock: bail early if a concurrent worker already synced ──
+            async with AsyncSessionLocal() as session:
+                locked = (await session.execute(
+                    select(ProductVariant)
+                    .where(ProductVariant.id == uuid.UUID(variant_id))
+                    .with_for_update()
+                )).scalar_one_or_none()
+
+                if not locked:
+                    logger.warning("sync_variant_to_qb: variant %s not found", variant_id)
+                    return None
+
+                if locked.qb_item_id:
+                    logger.info(
+                        "sync_variant_to_qb — already synced by concurrent worker, skipping:"
+                        " variant=%s qb_item_id=%s",
+                        variant_id, locked.qb_item_id,
+                    )
+                    return {"status": "success", "qb_item_id": locked.qb_item_id}
+            # Lock released here; safe to do slow QB call below
+
+            # ── 1. Snapshot variant data ──────────────────────────────────────────
             async with AsyncSessionLocal() as session:
                 variant = (await session.execute(
                     select(ProductVariant)
@@ -330,7 +352,6 @@ def sync_variant_to_qb(self, variant_id: str):
                 )).scalar_one_or_none()
 
                 if not variant:
-                    logger.warning("sync_variant_to_qb: variant %s not found", variant_id)
                     return None
 
                 total_stock = int((await session.execute(
