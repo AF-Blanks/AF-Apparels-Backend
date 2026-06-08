@@ -147,6 +147,52 @@ async def _load_order_for_company(order_id: UUID, company_id, db: AsyncSession) 
     return order
 
 
+async def _load_order_for_auth(order_id_str: str, request: Request, db: AsyncSession) -> Order:
+    """Load an order by UUID or order_number for the authenticated user (retail or wholesale)."""
+    import uuid as _uuid
+    from sqlalchemy.orm import selectinload
+
+    company_id = getattr(request.state, "company_id", None)
+    user_id = getattr(request.state, "user_id", None)
+    account_type = getattr(request.state, "account_type", "wholesale")
+
+    def _q(where_clauses):
+        return (
+            select(Order)
+            .options(
+                selectinload(Order.items),
+                selectinload(Order.placed_by),
+                selectinload(Order.company),
+            )
+            .where(*where_clauses)
+        )
+
+    if order_id_str.upper().startswith(("AF-", "DRAFT-")) or order_id_str.isdigit():
+        order_num = order_id_str.upper() if order_id_str.upper().startswith(("AF-", "DRAFT-")) else order_id_str
+        if account_type == "retail" and user_id:
+            stmt = _q([Order.order_number == order_num, Order.placed_by_id == _uuid.UUID(user_id)])
+        elif company_id:
+            stmt = _q([Order.order_number == order_num, Order.company_id == _uuid.UUID(str(company_id))])
+        else:
+            raise ForbiddenError("Company account required")
+    else:
+        try:
+            oid = _uuid.UUID(order_id_str)
+        except ValueError:
+            raise NotFoundError(f"Order {order_id_str} not found")
+        if account_type == "retail" and user_id:
+            stmt = _q([Order.id == oid, Order.placed_by_id == _uuid.UUID(user_id)])
+        elif company_id:
+            stmt = _q([Order.id == oid, Order.company_id == _uuid.UUID(str(company_id))])
+        else:
+            raise ForbiddenError("Company account required")
+
+    order = (await db.execute(stmt)).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id_str} not found")
+    return order
+
+
 @router.get("/{order_id}/pdf/confirmation")
 async def download_order_confirmation_pdf(
     order_id: UUID,
@@ -165,15 +211,40 @@ async def download_order_confirmation_pdf(
 
 @router.get("/{order_id}/pdf/invoice")
 async def download_invoice_pdf(
-    order_id: UUID,
+    order_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    company_id = getattr(request.state, "company_id", None)
-    if not company_id:
-        raise ForbiddenError("Company account required")
+    order = await _load_order_for_auth(order_id, request, db)
 
-    order = await _load_order_for_company(order_id, company_id, db)
+    # Proxy QB invoice PDF when available
+    if order.qb_invoice_id:
+        try:
+            import io
+            import httpx as _httpx
+            from app.services.quickbooks_service import QuickBooksService
+
+            svc = await QuickBooksService().initialize()
+            async with _httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    svc._url(f"invoice/{order.qb_invoice_id}/pdf"),
+                    params={"minorversion": "65"},
+                    headers={
+                        "Authorization": f"Bearer {svc._access_token}",
+                        "Accept": "application/pdf",
+                    },
+                )
+            if resp.status_code == 200:
+                return StreamingResponse(
+                    io.BytesIO(resp.content),
+                    media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="invoice-{order.order_number}.pdf"'},
+                )
+            logger.warning("QB PDF returned %s for invoice %s — falling back to local PDF", resp.status_code, order.qb_invoice_id)
+        except Exception as exc:
+            logger.error("QB PDF fetch failed: %s — falling back to local PDF", exc)
+
+    # Local PDF fallback
     from app.services.pdf_service import PDFService
     try:
         pdf = PDFService().generate_invoice(order)
