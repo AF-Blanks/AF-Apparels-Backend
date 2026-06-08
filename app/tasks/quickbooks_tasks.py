@@ -419,6 +419,8 @@ def sync_inventory_to_qb(self, variant_id: str):
 
                 if not variant.qb_item_id:
                     sync_variant_to_qb.delay(variant_id)
+                    # Re-queue this inventory sync to run after variant sync completes
+                    sync_inventory_to_qb.apply_async(args=[variant_id], countdown=30)
                     return {"status": "deferred", "reason": "variant not yet synced to QB"}
 
                 total_stock = int((await session.execute(
