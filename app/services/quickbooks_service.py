@@ -398,7 +398,11 @@ class QuickBooksService:
         if cost is not None:
             payload["PurchaseCost"] = cost
 
-        logger.info("QB find_or_create_item — creating sku=%s name=%s qty=%d", sku, name[:40], qty_on_hand)
+        import json as _json
+        logger.info(
+            "QB find_or_create_item — creating sku=%s name=%s qty=%d PAYLOAD: %s",
+            sku, name[:40], qty_on_hand, _json.dumps(payload, default=str),
+        )
         resp = self._request("POST", "item", json=payload)
         return str(resp["Item"]["Id"])
 
