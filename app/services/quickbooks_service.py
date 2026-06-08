@@ -435,6 +435,8 @@ class QuickBooksService:
                 payload["QtyOnHand"] = qty_on_hand
                 payload["InvStartDate"] = str(date.today())
 
+            import json as _json
+            logger.info("QB update_item payload — id=%s: %s", qb_item_id, _json.dumps(payload, default=str))
             self._request("POST", "item", json=payload)
             logger.info("QB update_item success — id=%s", qb_item_id)
             return True
