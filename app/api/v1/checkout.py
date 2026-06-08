@@ -102,14 +102,13 @@ async def tokenize_card(
         )).scalar_one_or_none()
         _log.info("Card save attempt — company: %s, qb_customer_id: %s", company_id, company.qb_customer_id if company else None)
         if company:
-            if not company.qb_customer_id:
-                qb_cust_id = qb_pay.create_customer(str(company_id))
-                company.qb_customer_id = qb_cust_id
-                await db.flush()
-                _log.info("QB Payments customer created: %s", qb_cust_id)
-            if company.qb_customer_id:
+            # QB Payments customer ID is always str(company_id) — derive directly,
+            # never write to company.qb_customer_id (that column is for QB Accounting).
+            qb_payments_cust_id = qb_pay.create_customer(str(company_id))
+            _log.info("QB Payments customer ready: %s", qb_payments_cust_id)
+            if qb_payments_cust_id:
                 saved = qb_pay.save_card(
-                    customer_id=company.qb_customer_id,
+                    customer_id=qb_payments_cust_id,
                     card_number=card["number"],
                     exp_month=card["expMonth"],
                     exp_year=card["expYear"],
@@ -240,7 +239,8 @@ async def _confirm_checkout_inner(
                 company = (await db.execute(
                     _select(_Company).where(_Company.id == company_id)
                 )).scalar_one_or_none()
-                qb_cust_id = payload.qb_customer_id or (company.qb_customer_id if company else None)
+                # QB Payments customer ID is always str(company_id)
+                qb_cust_id = payload.qb_customer_id or str(company_id)
                 if not qb_cust_id:
                     raise ValidationError(
                         "No QB Payments profile found. Complete a checkout with a new card first."

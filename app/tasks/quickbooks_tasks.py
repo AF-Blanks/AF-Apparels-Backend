@@ -192,10 +192,23 @@ def sync_order_invoice_to_qb(self, order_id: str):
                     )
                 else:
                     # Wholesale or retail-with-company order
-                    # Check company.qb_customer_id column first (fastest path)
-                    if order.company and order.company.qb_customer_id:
-                        qb_customer_id = order.company.qb_customer_id
+                    # Fast path: company.qb_customer_id (QB Accounting integer like "2").
+                    # Guard: QB Payments flow may have written the company UUID here —
+                    # UUIDs contain hyphens; reject them and fall back to QBSyncLog.
+                    raw_qb_id = order.company.qb_customer_id if order.company else None
+                    if raw_qb_id and "-" not in raw_qb_id:
+                        qb_customer_id = raw_qb_id
+                        logger.info(
+                            "sync_order_invoice_to_qb qb_customer_id from company column: %s",
+                            qb_customer_id,
+                        )
                     else:
+                        if raw_qb_id:
+                            logger.warning(
+                                "sync_order_invoice_to_qb company.qb_customer_id is a UUID (%s)"
+                                " — QB Payments overwrote it; falling back to QBSyncLog",
+                                raw_qb_id,
+                            )
                         # Fall back to QBSyncLog for a prior successful sync
                         log = (await session.execute(
                             select(QBSyncLog)
@@ -206,6 +219,10 @@ def sync_order_invoice_to_qb(self, order_id: str):
                             .limit(1)
                         )).scalar_one_or_none()
                         qb_customer_id = log.qb_entity_id if log else None
+                        logger.info(
+                            "sync_order_invoice_to_qb qb_customer_id from QBSyncLog: %s",
+                            qb_customer_id,
+                        )
 
                 # Snapshot all needed fields before the session closes
                 order_data = {

@@ -265,12 +265,13 @@ async def list_payment_methods(request: Request, db: AsyncSession = Depends(get_
     from app.services.qb_payments_service import QBPaymentsService
 
     company = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
-    if not company or not company.qb_customer_id:
+    if not company:
         return []
 
     try:
         svc = QBPaymentsService()
-        cards = svc.list_saved_cards(company.qb_customer_id)
+        # QB Payments customer ID is always str(company_id) — never use qb_customer_id here
+        cards = svc.list_saved_cards(str(company_id))
         default_id = company.default_payment_method_id
         return [
             {
@@ -310,17 +311,14 @@ async def add_payment_method(
 
     svc = QBPaymentsService()
 
-    # Ensure the company has a QB customer profile
-    if not company.qb_customer_id:
-        qb_id = svc.create_customer(str(_uuid.uuid4()))
-        company.qb_customer_id = qb_id
-        await db.commit()
-        await db.refresh(company)
+    # QB Payments customer ID is always str(company_id) — derive directly,
+    # never write to company.qb_customer_id (that column is for QB Accounting).
+    qb_payments_cust_id = svc.create_customer(str(company_id))
 
     card = payload.get("card", {})
     try:
         saved = svc.save_card(
-            customer_id=company.qb_customer_id,
+            customer_id=qb_payments_cust_id,
             card_number=card.get("number", ""),
             exp_month=card.get("expMonth", ""),
             exp_year=card.get("expYear", ""),
