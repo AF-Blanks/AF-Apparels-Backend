@@ -22,12 +22,22 @@ logger.info("quickbooks_tasks loaded — broker=%s", settings.CELERY_BROKER_URL)
 
 
 def _run_async(coro):
-    """Run a coroutine in a fresh event loop. Call only ONCE per task execution."""
+    """Run a coroutine in a fresh event loop. Call only ONCE per task execution.
+
+    Disposes the shared asyncpg engine pool before closing the loop so that
+    on Celery retries the new event loop gets fresh connections instead of
+    hitting 'Future attached to a different loop'.
+    """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         return loop.run_until_complete(coro)
     finally:
+        try:
+            from app.core.database import engine as _engine
+            loop.run_until_complete(_engine.dispose())
+        except Exception:
+            pass
         loop.close()
 
 

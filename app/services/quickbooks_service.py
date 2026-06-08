@@ -8,6 +8,7 @@ Token priority: app_settings DB table (set via OAuth callback) > env vars.
 Tokens are saved back to app_settings after every successful refresh.
 """
 import asyncio
+import logging
 import time
 from datetime import datetime, timedelta, timezone
 from threading import Lock
@@ -16,6 +17,8 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 # ── DB token helpers (async, called via _run_sync_safe) ──────────────────────
