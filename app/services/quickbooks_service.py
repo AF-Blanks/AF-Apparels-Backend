@@ -361,7 +361,7 @@ class QuickBooksService:
             "QtyOnHand": qty_on_hand,
             "InvStartDate": str(date.today()),
             "UnitPrice": unit_price,
-            "IncomeAccountRef": {"name": "Sales"},
+            "IncomeAccountRef": {"name": "Sales of Product Income"},
             "AssetAccountRef": {"name": "Inventory Asset"},
             "ExpenseAccountRef": {"name": "Cost of Goods Sold"},
         }
