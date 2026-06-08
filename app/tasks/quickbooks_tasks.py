@@ -322,38 +322,33 @@ def sync_variant_to_qb(self, variant_id: str):
         from sqlalchemy.orm import selectinload
 
         try:
-            # ── 0. Row-level lock: bail early if a concurrent worker already synced ──
+            # Single session holds the FOR UPDATE lock from check through commit.
+            # A concurrent worker blocks on SELECT FOR UPDATE until this session
+            # commits (releasing the lock), then it re-reads and sees qb_item_id
+            # already set — so it skips creation and returns immediately.
             async with AsyncSessionLocal() as session:
-                locked = (await session.execute(
-                    select(ProductVariant)
-                    .where(ProductVariant.id == uuid.UUID(variant_id))
-                    .with_for_update()
-                )).scalar_one_or_none()
-
-                if not locked:
-                    logger.warning("sync_variant_to_qb: variant %s not found", variant_id)
-                    return None
-
-                if locked.qb_item_id:
-                    logger.info(
-                        "sync_variant_to_qb — already synced by concurrent worker, skipping:"
-                        " variant=%s qb_item_id=%s",
-                        variant_id, locked.qb_item_id,
-                    )
-                    return {"status": "success", "qb_item_id": locked.qb_item_id}
-            # Lock released here; safe to do slow QB call below
-
-            # ── 1. Snapshot variant data ──────────────────────────────────────────
-            async with AsyncSessionLocal() as session:
+                # ── 1. Lock the row ───────────────────────────────────────────
                 variant = (await session.execute(
                     select(ProductVariant)
                     .options(selectinload(ProductVariant.product))
                     .where(ProductVariant.id == uuid.UUID(variant_id))
+                    .with_for_update()
                 )).scalar_one_or_none()
 
                 if not variant:
+                    logger.warning("sync_variant_to_qb: variant %s not found", variant_id)
                     return None
 
+                # ── 2. Already synced? Return immediately ─────────────────────
+                if variant.qb_item_id:
+                    logger.info(
+                        "sync_variant_to_qb — already synced, skipping:"
+                        " variant=%s qb_item_id=%s",
+                        variant_id, variant.qb_item_id,
+                    )
+                    return {"status": "success", "qb_item_id": variant.qb_item_id}
+
+                # ── 3. Snapshot data (session + lock still held) ──────────────
                 total_stock = int((await session.execute(
                     select(func.coalesce(func.sum(InventoryRecord.quantity), 0))
                     .where(InventoryRecord.variant_id == uuid.UUID(variant_id))
@@ -364,27 +359,24 @@ def sync_variant_to_qb(self, variant_id: str):
                 item_name = f"{product_name} - {sku}"
                 unit_price = float(variant.retail_price)
                 cost = float(variant.cost_per_item) if variant.cost_per_item else None
-                existing_qb_item_id = variant.qb_item_id
 
-            svc = await QuickBooksService().initialize()
-
-            if existing_qb_item_id:
-                await asyncio.to_thread(svc.update_item, existing_qb_item_id, unit_price, cost)
-                qb_item_id = existing_qb_item_id
-                logger.info("sync_variant_to_qb updated — variant=%s qb_item_id=%s", variant_id, qb_item_id)
-            else:
+                # ── 4. QB API call (session stays open, lock held throughout) ─
+                svc = await QuickBooksService().initialize()
                 qb_item_id = await asyncio.to_thread(
                     svc.find_or_create_item, sku, item_name, unit_price, cost, total_stock,
                 )
-                logger.info("sync_variant_to_qb created — variant=%s qb_item_id=%s", variant_id, qb_item_id)
-
-            from sqlalchemy import text as _text
-            async with AsyncSessionLocal() as session:
-                await session.execute(
-                    _text("UPDATE product_variants SET qb_item_id = :qb_id WHERE id = :vid"),
-                    {"qb_id": qb_item_id, "vid": str(variant_id)},
+                logger.info(
+                    "sync_variant_to_qb QB item ready — variant=%s qb_item_id=%s",
+                    variant_id, qb_item_id,
                 )
+
+                # ── 5. Save in the SAME session and commit atomically ─────────
+                # variant is tracked by this session (loaded above), so ORM
+                # dirty-tracking will flush the change on commit.
+                variant.qb_item_id = qb_item_id
                 await session.commit()
+                # Lock released here — concurrent worker now unblocks and sees
+                # qb_item_id already set, skipping duplicate creation.
                 logger.info("qb_item_id saved to DB: variant=%s qb_item_id=%s", variant_id, qb_item_id)
 
             return {"status": "success", "qb_item_id": qb_item_id}
