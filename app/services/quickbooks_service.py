@@ -133,6 +133,7 @@ class QuickBooksService:
         self._company_id: str    = settings.QB_COMPANY_ID
         self._base_url: str      = QB_BASE_URL[settings.QB_ENVIRONMENT]
         self._token_expiry: datetime | None = None
+        self._account_id_cache: dict[str, str] = {}
 
     async def initialize(self) -> "QuickBooksService":
         """Load live tokens from app_settings DB. Await this before first API use."""
@@ -327,6 +328,31 @@ class QuickBooksService:
 
     # ── Items (Products / Inventory) ─────────────────────────────────────────
 
+    def _get_account_id(self, name: str, account_type: str) -> str:
+        """Return the QB account Id for the given name+type, caching per instance.
+
+        Raises ValueError if QB returns no matching account.
+        """
+        cache_key = f"{account_type}:{name}"
+        if cache_key in self._account_id_cache:
+            return self._account_id_cache[cache_key]
+
+        escaped_name = name.replace("'", "\\'")
+        escaped_type = account_type.replace("'", "\\'")
+        result = self._request(
+            "GET",
+            f"query?query=SELECT * FROM Account WHERE Name = '{escaped_name}'"
+            f" AND AccountType = '{escaped_type}'&minorversion=65",
+        )
+        accounts = result.get("QueryResponse", {}).get("Account", [])
+        if not accounts:
+            raise ValueError(f"QB account not found: name='{name}' type='{account_type}'")
+
+        account_id = str(accounts[0]["Id"])
+        self._account_id_cache[cache_key] = account_id
+        logger.info("QB _get_account_id — name=%s type=%s → id=%s", name, account_type, account_id)
+        return account_id
+
     def get_item(self, qb_item_id: str) -> dict[str, Any]:
         """Fetch a QB Item by ID. Returns the Item dict (includes SyncToken)."""
         resp = self._request("GET", f"item/{qb_item_id}?minorversion=65")
@@ -353,6 +379,10 @@ class QuickBooksService:
             logger.info("QB find_or_create_item — found existing for sku=%s id=%s", sku, items[0]["Id"])
             return str(items[0]["Id"])
 
+        income_id  = self._get_account_id("Sales of Product Income", "Income")
+        asset_id   = self._get_account_id("Inventory Asset", "Other Current Asset")
+        expense_id = self._get_account_id("Cost of Goods Sold", "Cost of Goods Sold")
+
         payload: dict[str, Any] = {
             "Name": name[:100],
             "Sku": sku,
@@ -361,9 +391,9 @@ class QuickBooksService:
             "QtyOnHand": qty_on_hand,
             "InvStartDate": str(date.today()),
             "UnitPrice": unit_price,
-            "IncomeAccountRef": {"name": "Sales of Product Income"},
-            "AssetAccountRef": {"name": "Inventory Asset"},
-            "ExpenseAccountRef": {"name": "Cost of Goods Sold"},
+            "IncomeAccountRef":  {"value": income_id,  "name": "Sales of Product Income"},
+            "AssetAccountRef":   {"value": asset_id,   "name": "Inventory Asset"},
+            "ExpenseAccountRef": {"value": expense_id, "name": "Cost of Goods Sold"},
         }
         if cost is not None:
             payload["PurchaseCost"] = cost
