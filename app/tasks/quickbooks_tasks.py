@@ -357,13 +357,24 @@ def sync_variant_to_qb(self, variant_id: str):
                 )
                 logger.info("sync_variant_to_qb created — variant=%s qb_item_id=%s", variant_id, qb_item_id)
 
+            from sqlalchemy import update as _update
             async with AsyncSessionLocal() as session:
-                v = (await session.execute(
-                    select(ProductVariant).where(ProductVariant.id == uuid.UUID(variant_id))
-                )).scalar_one_or_none()
-                if v:
-                    v.qb_item_id = qb_item_id
-                    await session.commit()
+                result = await session.execute(
+                    _update(ProductVariant)
+                    .where(ProductVariant.id == uuid.UUID(variant_id))
+                    .values(qb_item_id=qb_item_id)
+                )
+                await session.commit()
+                if result.rowcount:
+                    logger.info(
+                        "sync_variant_to_qb — DB write confirmed: variant=%s qb_item_id=%s",
+                        variant_id, qb_item_id,
+                    )
+                else:
+                    logger.warning(
+                        "sync_variant_to_qb — DB write matched 0 rows: variant=%s",
+                        variant_id,
+                    )
 
             return {"status": "success", "qb_item_id": qb_item_id}
 
