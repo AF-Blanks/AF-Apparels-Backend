@@ -240,6 +240,11 @@ class QuickBooksService:
                 # Token may have been revoked externally — try one refresh
                 self.refresh_token_if_expired()
                 resp = client.request(method, url, headers=self._headers(), timeout=15, **kwargs)
+        if resp.status_code >= 400:
+            logger.error(
+                "QB API %s %s → %s: %s",
+                method, url, resp.status_code, resp.text,
+            )
         resp.raise_for_status()
         return resp.json()
 
@@ -310,6 +315,7 @@ class QuickBooksService:
         if due_date:
             payload["DueDate"] = due_date
 
+        logger.info("QB create_invoice payload: %s", payload)
         resp = self._request("POST", "invoice", json=payload)
         return str(resp["Invoice"]["Id"])
 
