@@ -255,6 +255,13 @@ async def add_variant(
     db.add(variant)
     await db.commit()
     await db.refresh(variant)
+
+    try:
+        from app.tasks.quickbooks_tasks import sync_variant_to_qb
+        sync_variant_to_qb.delay(str(variant.id))
+    except Exception as _exc:
+        logger.warning("QB variant sync dispatch failed: %s", _exc)
+
     variant.stock_quantity = 0
     return variant
 
@@ -268,6 +275,14 @@ async def bulk_generate_variants(
         product_id, payload.colors, payload.sizes, payload.base_retail_price
     )
     await db.commit()
+
+    try:
+        from app.tasks.quickbooks_tasks import sync_variant_to_qb
+        for v in variants:
+            sync_variant_to_qb.delay(str(v.id))
+    except Exception as _exc:
+        logger.warning("QB bulk variant sync dispatch failed: %s", _exc)
+
     return {"generated": len(variants), "variants": [{"id": str(v.id), "sku": v.sku} for v in variants]}
 
 
@@ -298,6 +313,14 @@ async def create_variants_batch(
 
     await db.flush()
     await db.commit()
+
+    try:
+        from app.tasks.quickbooks_tasks import sync_variant_to_qb
+        for v in created:
+            sync_variant_to_qb.delay(str(v.id))
+    except Exception as _exc:
+        logger.warning("QB batch variant sync dispatch failed: %s", _exc)
+
     return {"created": len(created), "variants": [{"id": str(v.id), "sku": v.sku} for v in created]}
 
 
@@ -384,6 +407,13 @@ async def update_variant(
             )
 
     await db.commit()
+
+    try:
+        from app.tasks.quickbooks_tasks import sync_variant_to_qb
+        sync_variant_to_qb.delay(str(variant.id))
+    except Exception as _exc:
+        logger.warning("QB variant sync dispatch failed: %s", _exc)
+
     return {"id": str(variant.id), "sku": variant.sku}
 
 

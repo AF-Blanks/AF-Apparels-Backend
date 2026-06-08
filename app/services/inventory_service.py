@@ -171,6 +171,13 @@ class InventoryService:
         )
         self.db.add(adj)
         await self.db.flush()
+
+        try:
+            from app.tasks.quickbooks_tasks import sync_inventory_to_qb
+            sync_inventory_to_qb.delay(str(variant_id))
+        except Exception as _exc:
+            logger.warning("QB inventory sync dispatch failed: %s", _exc)
+
         return record
 
     async def bulk_import_csv(self, csv_content: str, adjusted_by: UUID | None = None) -> dict:

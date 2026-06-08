@@ -300,14 +300,17 @@ class QuickBooksService:
         """
         lines = []
         for item in line_items:
+            line_detail: dict[str, Any] = {
+                "Qty": item["quantity"],
+                "UnitPrice": float(item["unit_price"]),
+            }
+            if item.get("qb_item_id"):
+                line_detail["ItemRef"] = {"value": item["qb_item_id"]}
             lines.append({
                 "Amount": float(item["amount"]),
                 "DetailType": "SalesItemLineDetail",
                 "Description": item["description"],
-                "SalesItemLineDetail": {
-                    "Qty": item["quantity"],
-                    "UnitPrice": float(item["unit_price"]),
-                },
+                "SalesItemLineDetail": line_detail,
             })
 
         payload: dict[str, Any] = {
@@ -321,6 +324,89 @@ class QuickBooksService:
         logger.info("QB create_invoice payload: %s", payload)
         resp = self._request("POST", "invoice", json=payload)
         return str(resp["Invoice"]["Id"])
+
+    # ── Items (Products / Inventory) ─────────────────────────────────────────
+
+    def get_item(self, qb_item_id: str) -> dict[str, Any]:
+        """Fetch a QB Item by ID. Returns the Item dict (includes SyncToken)."""
+        resp = self._request("GET", f"item/{qb_item_id}?minorversion=65")
+        return resp.get("Item", {})
+
+    def find_or_create_item(
+        self,
+        sku: str,
+        name: str,
+        unit_price: float,
+        cost: float | None,
+        qty_on_hand: int = 0,
+    ) -> str:
+        """Find a QB Inventory Item by SKU or create one. Returns QB item Id."""
+        from datetime import date
+
+        escaped = sku.replace("'", "\\'")
+        result = self._request(
+            "GET",
+            f"query?query=SELECT * FROM Item WHERE Sku = '{escaped}'&minorversion=65",
+        )
+        items = result.get("QueryResponse", {}).get("Item", [])
+        if items:
+            logger.info("QB find_or_create_item — found existing for sku=%s id=%s", sku, items[0]["Id"])
+            return str(items[0]["Id"])
+
+        payload: dict[str, Any] = {
+            "Name": name[:100],
+            "Sku": sku,
+            "Type": "Inventory",
+            "TrackQtyOnHand": True,
+            "QtyOnHand": qty_on_hand,
+            "InvStartDate": str(date.today()),
+            "UnitPrice": unit_price,
+            "IncomeAccountRef": {"name": "Sales"},
+            "AssetAccountRef": {"name": "Inventory Asset"},
+            "ExpenseAccountRef": {"name": "Cost of Goods Sold"},
+        }
+        if cost is not None:
+            payload["PurchaseCost"] = cost
+
+        logger.info("QB find_or_create_item — creating sku=%s name=%s qty=%d", sku, name[:40], qty_on_hand)
+        resp = self._request("POST", "item", json=payload)
+        return str(resp["Item"]["Id"])
+
+    def update_item(
+        self,
+        qb_item_id: str,
+        unit_price: float | None = None,
+        cost: float | None = None,
+        qty_on_hand: int | None = None,
+    ) -> bool:
+        """Sparse-update a QB Item's price and/or inventory quantity."""
+        from datetime import date
+
+        try:
+            item = self.get_item(qb_item_id)
+            if not item:
+                logger.warning("QB update_item — item %s not found in QB", qb_item_id)
+                return False
+
+            payload: dict[str, Any] = {
+                "Id": qb_item_id,
+                "SyncToken": item["SyncToken"],
+                "sparse": True,
+            }
+            if unit_price is not None:
+                payload["UnitPrice"] = unit_price
+            if cost is not None:
+                payload["PurchaseCost"] = cost
+            if qty_on_hand is not None:
+                payload["QtyOnHand"] = qty_on_hand
+                payload["InvStartDate"] = str(date.today())
+
+            self._request("POST", "item", json=payload)
+            logger.info("QB update_item success — id=%s", qb_item_id)
+            return True
+        except Exception as exc:
+            logger.error("QB update_item failed for %s: %s", qb_item_id, exc)
+            return False
 
     def void_invoice(self, invoice_id: str) -> bool:
         """Void a QB invoice by ID."""

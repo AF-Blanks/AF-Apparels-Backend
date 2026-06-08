@@ -224,7 +224,17 @@ def sync_order_invoice_to_qb(self, order_id: str):
                             qb_customer_id,
                         )
 
-                # Snapshot all needed fields before the session closes
+                # Snapshot all needed fields before the session closes.
+                # Also look up qb_item_id per SKU so invoices can reference QB items.
+                from app.models.product import ProductVariant as _PV
+                sku_to_qb_item: dict[str, str | None] = {}
+                for i in order.items:
+                    if i.sku and i.sku not in sku_to_qb_item:
+                        pv = (await session.execute(
+                            select(_PV).where(_PV.sku == i.sku)
+                        )).scalar_one_or_none()
+                        sku_to_qb_item[i.sku] = pv.qb_item_id if pv else None
+
                 order_data = {
                     "company_id": str(order.company_id) if order.company_id else None,
                     "order_number": order.order_number,
@@ -235,6 +245,7 @@ def sync_order_invoice_to_qb(self, order_id: str):
                             "quantity": i.quantity,
                             "unit_price": float(i.unit_price),
                             "amount": float(i.line_total),
+                            "qb_item_id": sku_to_qb_item.get(i.sku),
                         }
                         for i in order.items
                     ],
@@ -285,6 +296,133 @@ def sync_order_invoice_to_qb(self, order_id: str):
         except Exception as exc:
             logger.exception("sync_order_invoice_to_qb error: %s", exc)
             await _log_attempt("order", order_id, "retry", str(exc))
+            raise
+
+    try:
+        return _run_async(_run_all())
+    except Exception as exc:
+        delay = 60 * (2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)
+
+
+@celery_app.task(bind=True, max_retries=5)
+def sync_variant_to_qb(self, variant_id: str):
+    """Sync a ProductVariant to QuickBooks as an Inventory Item.
+
+    Creates the QB item if it doesn't exist, or updates price/cost if it does.
+    Writes the QB item Id back to product_variants.qb_item_id.
+    """
+
+    async def _run_all():
+        from app.core.database import AsyncSessionLocal
+        from app.models.product import ProductVariant
+        from app.models.inventory import InventoryRecord
+        from app.services.quickbooks_service import QuickBooksService
+        from sqlalchemy import select, func
+        from sqlalchemy.orm import selectinload
+
+        try:
+            async with AsyncSessionLocal() as session:
+                variant = (await session.execute(
+                    select(ProductVariant)
+                    .options(selectinload(ProductVariant.product))
+                    .where(ProductVariant.id == uuid.UUID(variant_id))
+                )).scalar_one_or_none()
+
+                if not variant:
+                    logger.warning("sync_variant_to_qb: variant %s not found", variant_id)
+                    return None
+
+                total_stock = int((await session.execute(
+                    select(func.coalesce(func.sum(InventoryRecord.quantity), 0))
+                    .where(InventoryRecord.variant_id == uuid.UUID(variant_id))
+                )).scalar() or 0)
+
+                product_name = variant.product.name if variant.product else "Product"
+                sku = variant.sku
+                item_name = f"{product_name} - {sku}"
+                unit_price = float(variant.retail_price)
+                cost = float(variant.cost_per_item) if variant.cost_per_item else None
+                existing_qb_item_id = variant.qb_item_id
+
+            svc = await QuickBooksService().initialize()
+
+            if existing_qb_item_id:
+                await asyncio.to_thread(svc.update_item, existing_qb_item_id, unit_price, cost)
+                qb_item_id = existing_qb_item_id
+                logger.info("sync_variant_to_qb updated — variant=%s qb_item_id=%s", variant_id, qb_item_id)
+            else:
+                qb_item_id = await asyncio.to_thread(
+                    svc.find_or_create_item, sku, item_name, unit_price, cost, total_stock,
+                )
+                logger.info("sync_variant_to_qb created — variant=%s qb_item_id=%s", variant_id, qb_item_id)
+
+            async with AsyncSessionLocal() as session:
+                v = (await session.execute(
+                    select(ProductVariant).where(ProductVariant.id == uuid.UUID(variant_id))
+                )).scalar_one_or_none()
+                if v:
+                    v.qb_item_id = qb_item_id
+                    await session.commit()
+
+            return {"status": "success", "qb_item_id": qb_item_id}
+
+        except Exception as exc:
+            logger.exception("sync_variant_to_qb error: %s", exc)
+            raise
+
+    try:
+        return _run_async(_run_all())
+    except Exception as exc:
+        delay = 60 * (2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)
+
+
+@celery_app.task(bind=True, max_retries=5)
+def sync_inventory_to_qb(self, variant_id: str):
+    """Push the current total stock for a variant to QuickBooks.
+
+    If the variant has no QB item yet, falls back to sync_variant_to_qb
+    (which creates the item and sets initial QtyOnHand in one call).
+    """
+
+    async def _run_all():
+        from app.core.database import AsyncSessionLocal
+        from app.models.product import ProductVariant
+        from app.models.inventory import InventoryRecord
+        from app.services.quickbooks_service import QuickBooksService
+        from sqlalchemy import select, func
+
+        try:
+            async with AsyncSessionLocal() as session:
+                variant = (await session.execute(
+                    select(ProductVariant).where(ProductVariant.id == uuid.UUID(variant_id))
+                )).scalar_one_or_none()
+
+                if not variant:
+                    logger.warning("sync_inventory_to_qb: variant %s not found", variant_id)
+                    return None
+
+                if not variant.qb_item_id:
+                    sync_variant_to_qb.delay(variant_id)
+                    return {"status": "deferred", "reason": "variant not yet synced to QB"}
+
+                total_stock = int((await session.execute(
+                    select(func.coalesce(func.sum(InventoryRecord.quantity), 0))
+                    .where(InventoryRecord.variant_id == uuid.UUID(variant_id))
+                )).scalar() or 0)
+
+                qb_item_id = variant.qb_item_id
+                unit_price = float(variant.retail_price)
+                cost = float(variant.cost_per_item) if variant.cost_per_item else None
+
+            svc = await QuickBooksService().initialize()
+            await asyncio.to_thread(svc.update_item, qb_item_id, unit_price, cost, total_stock)
+            logger.info("sync_inventory_to_qb success — variant=%s qty=%d", variant_id, total_stock)
+            return {"status": "success", "qty_on_hand": total_stock}
+
+        except Exception as exc:
+            logger.exception("sync_inventory_to_qb error: %s", exc)
             raise
 
     try:
