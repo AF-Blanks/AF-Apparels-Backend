@@ -357,6 +357,13 @@ async def guest_checkout(
 
     await db.commit()
 
+    # ── QB invoice sync ───────────────────────────────────────────────────────
+    try:
+        from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+        sync_order_invoice_to_qb.delay(str(order.id))
+    except Exception as _exc:
+        logger.warning("QB invoice sync dispatch failed: %s", _exc)
+
     return GuestOrderOut(
         order_id=str(order.id),
         order_number=order.order_number,
