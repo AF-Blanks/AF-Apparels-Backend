@@ -66,9 +66,9 @@ async def get_order(
 
     svc = OrderService(db)
 
-    # Support order_number (AF-XXXXXX / DRAFT-XXXXXX) or UUID in URL
-    if order_id.upper().startswith(("AF-", "DRAFT-")):
-        order_num = order_id.upper()
+    # Support order_number (AF-XXXXXX / DRAFT-XXXXXX / numeric 1001+) or UUID in URL
+    if order_id.upper().startswith(("AF-", "DRAFT-")) or order_id.isdigit():
+        order_num = order_id.upper() if order_id.upper().startswith(("AF-", "DRAFT-")) else order_id
         if account_type == "retail" and user_id:
             result = await db.execute(
                 select(Order).options(_sil(Order.items))
