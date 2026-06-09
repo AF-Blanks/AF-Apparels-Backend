@@ -528,9 +528,9 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
                 has_variant_weights = True
 
         if has_variant_weights and total_grams > 0:
-            calculated_weight_lbs = max(round(total_grams / _GRAMS_PER_LB, 2), 1.0)
+            calculated_weight_lbs = max(round(total_grams / _GRAMS_PER_LB, 2), 0.5)
         else:
-            calculated_weight_lbs = max(round(total_qty * _DEFAULT_LBS_PER_UNIT, 2), 1.0)
+            calculated_weight_lbs = max(round(total_qty * _DEFAULT_LBS_PER_UNIT, 2), 0.5)
     except Exception:
         calculated_weight_lbs = 1.0
 
@@ -956,7 +956,7 @@ async def fetch_order_rates(
     if not to_address["state"] or not to_address["zip"]:
         raise HTTPException(status_code=422, detail="Incomplete shipping address on order (missing state or ZIP)")
 
-    weight_oz = payload.weight_lbs * 16.0
+    weight_lbs = max(payload.weight_lbs, 0.5)
     wh = WAREHOUSE_ADDRESS
 
     try:
@@ -976,8 +976,8 @@ async def fetch_order_rates(
                 parcels=[_comp.ParcelCreateRequest(
                     length="12", width="10", height="6",
                     distance_unit=_comp.DistanceUnitEnum.IN,
-                    weight=str(round(weight_oz, 2)),
-                    mass_unit=_comp.WeightUnitEnum.OZ,
+                    weight=str(round(weight_lbs, 2)),
+                    mass_unit=_comp.WeightUnitEnum.LB,
                 )],
                 async_=False,
             )
