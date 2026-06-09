@@ -893,6 +893,79 @@ async def generate_shipping_label(
     return result
 
 
+class _ManualLabelRequest(BaseModel):
+    carrier: str       # "USPS" | "UPS" | "FEDEX"
+    weight_lbs: float = 1.0
+
+
+@router.post("/orders/{order_id}/generate-label-manual", status_code=200)
+async def generate_label_manual(
+    order_id: UUID,
+    payload: _ManualLabelRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Generate a Shippo label for Standard Ground (no saved rate ID) orders using admin-supplied weight."""
+    from app.services.shippo_service import create_label, CARRIER_TOKENS
+    from sqlalchemy import text as _text2
+
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    addr = _json.loads(order.shipping_address_snapshot or "{}")
+    to_address = {
+        "name": addr.get("full_name") or addr.get("name") or "",
+        "street1": addr.get("address_line1") or addr.get("street1") or "",
+        "city": addr.get("city", ""),
+        "state": addr.get("state") or addr.get("state_province", ""),
+        "zip": addr.get("zip_code") or addr.get("postal_code") or addr.get("zip", ""),
+        "country": addr.get("country", "US"),
+    }
+    if not all([to_address["street1"], to_address["city"], to_address["state"], to_address["zip"]]):
+        raise HTTPException(status_code=422, detail="Incomplete shipping address on order")
+
+    carrier_key = payload.carrier.lower()
+    carrier_token = CARRIER_TOKENS.get(carrier_key, "usps_priority")
+    weight_oz = payload.weight_lbs * 16.0
+
+    result = await create_label(str(order_id), to_address, carrier_token, weight_oz=weight_oz)
+
+    if result.get("success"):
+        order.tracking_number = result["tracking_number"]
+        order.carrier = result["carrier"]
+        order.courier = result["carrier"]
+        order.courier_service = result["service"]
+        order.status = "shipped"
+        if not order.shipped_at:
+            order.shipped_at = datetime.now(timezone.utc)
+
+        await db.execute(
+            _text2("UPDATE orders SET label_url=:lu, tracking_url=:tu WHERE id=:oid"),
+            {"lu": result.get("label_url"), "tu": result.get("tracking_url"), "oid": str(order_id)},
+        )
+
+        entry = {
+            "status": "shipped",
+            "message": (
+                f"Shippo label generated (manual) via {result['carrier']} {result['service']}"
+                f" — Tracking: {result['tracking_number']}"
+            ),
+            "created_by": "admin",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        current = list(order.timeline or [])
+        current.append(entry)
+        await db.execute(
+            _text2("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
+            {"tl": _json.dumps(current), "oid": str(order_id)},
+        )
+
+        await db.commit()
+        await _send_order_status_email(order, "shipped", db)
+
+    return result
+
+
 @router.post("/orders/{order_id}/cancel", response_model=dict)
 async def cancel_admin_order(
     order_id: UUID,
