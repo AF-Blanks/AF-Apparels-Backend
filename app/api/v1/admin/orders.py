@@ -893,9 +893,87 @@ async def generate_shipping_label(
     return result
 
 
-class _ManualLabelRequest(BaseModel):
-    carrier: str       # "USPS" | "UPS" | "FEDEX"
+class _FetchRatesRequest(BaseModel):
     weight_lbs: float = 1.0
+
+
+@router.post("/orders/{order_id}/fetch-rates", status_code=200)
+async def fetch_order_rates(
+    order_id: UUID,
+    payload: _FetchRatesRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return live Shippo rates for a Standard Ground order so the admin can pick one."""
+    from app.services.shippo_service import get_client, WAREHOUSE_ADDRESS
+    from shippo.models import components as _comp
+
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    addr = _json.loads(order.shipping_address_snapshot or "{}")
+    to_address = {
+        "name": addr.get("full_name") or addr.get("name") or "Customer",
+        "street1": addr.get("address_line1") or addr.get("street1") or "123 Main St",
+        "city": addr.get("city") or "Unknown",
+        "state": addr.get("state") or addr.get("state_province", ""),
+        "zip": addr.get("zip_code") or addr.get("postal_code") or addr.get("zip", ""),
+        "country": addr.get("country", "US"),
+    }
+    if not to_address["state"] or not to_address["zip"]:
+        raise HTTPException(status_code=422, detail="Incomplete shipping address on order (missing state or ZIP)")
+
+    weight_oz = payload.weight_lbs * 16.0
+    wh = WAREHOUSE_ADDRESS
+
+    try:
+        client = get_client()
+        shipment = client.shipments.create(
+            _comp.ShipmentCreateRequest(
+                address_from=_comp.AddressCreateRequest(
+                    name=wh["name"], street1=wh["street1"], city=wh["city"],
+                    state=wh["state"], zip=wh["zip"], country=wh["country"],
+                    phone=wh["phone"], email=wh["email"],
+                ),
+                address_to=_comp.AddressCreateRequest(
+                    name=to_address["name"], street1=to_address["street1"],
+                    city=to_address["city"], state=to_address["state"],
+                    zip=to_address["zip"], country=to_address["country"],
+                ),
+                parcels=[_comp.ParcelCreateRequest(
+                    length="12", width="10", height="6",
+                    distance_unit=_comp.DistanceUnitEnum.IN,
+                    weight=str(round(weight_oz, 2)),
+                    mass_unit=_comp.WeightUnitEnum.OZ,
+                )],
+                async_=False,
+            )
+        )
+        rates = []
+        for rate in (shipment.rates or []):
+            try:
+                rates.append({
+                    "rate_id": rate.object_id,
+                    "carrier": rate.provider or "Unknown",
+                    "service": rate.servicelevel.name if rate.servicelevel else "Standard",
+                    "cost": float(rate.amount),
+                    "currency": rate.currency or "USD",
+                    "days": rate.estimated_days,
+                })
+            except Exception:
+                continue
+        rates.sort(key=lambda r: r["cost"])
+        return {"rates": rates}
+    except Exception as exc:
+        logger.warning("Admin fetch-rates error: %s", exc)
+        return {"rates": [], "error": str(exc)}
+
+
+class _ManualLabelRequest(BaseModel):
+    rate_id: str | None = None    # if provided, purchase this specific Shippo rate
+    carrier: str = ""             # carrier name (metadata when rate_id used; fallback key otherwise)
+    service: str = ""             # service name (metadata when rate_id used)
+    weight_lbs: float = 1.0      # used only when rate_id is not provided
 
 
 @router.post("/orders/{order_id}/generate-label-manual", status_code=200)
@@ -904,31 +982,60 @@ async def generate_label_manual(
     payload: _ManualLabelRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Generate a Shippo label for Standard Ground (no saved rate ID) orders using admin-supplied weight."""
-    from app.services.shippo_service import create_label, CARRIER_TOKENS
+    """Generate a Shippo label for Standard Ground orders.
+
+    If rate_id is provided (admin selected a live rate), purchases that specific rate.
+    Otherwise falls back to weight-based carrier selection.
+    """
     from sqlalchemy import text as _text2
 
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    addr = _json.loads(order.shipping_address_snapshot or "{}")
-    to_address = {
-        "name": addr.get("full_name") or addr.get("name") or "",
-        "street1": addr.get("address_line1") or addr.get("street1") or "",
-        "city": addr.get("city", ""),
-        "state": addr.get("state") or addr.get("state_province", ""),
-        "zip": addr.get("zip_code") or addr.get("postal_code") or addr.get("zip", ""),
-        "country": addr.get("country", "US"),
-    }
-    if not all([to_address["street1"], to_address["city"], to_address["state"], to_address["zip"]]):
-        raise HTTPException(status_code=422, detail="Incomplete shipping address on order")
-
-    carrier_key = payload.carrier.lower()
-    carrier_token = CARRIER_TOKENS.get(carrier_key, "usps_priority")
-    weight_oz = payload.weight_lbs * 16.0
-
-    result = await create_label(str(order_id), to_address, carrier_token, weight_oz=weight_oz)
+    if payload.rate_id:
+        # Purchase the specific rate the admin selected from fetch-rates
+        from app.services.shippo_service import get_client
+        from shippo.models import components as _comp2
+        try:
+            client = get_client()
+            txn = client.transactions.create(
+                _comp2.TransactionCreateRequest(
+                    rate=payload.rate_id,
+                    label_file_type=_comp2.LabelFileTypeEnum.PDF,
+                    async_=False,
+                )
+            )
+            if txn.status == _comp2.TransactionStatusEnum.SUCCESS:
+                result: dict = {
+                    "success": True,
+                    "tracking_number": txn.tracking_number,
+                    "tracking_url": txn.tracking_url_provider,
+                    "label_url": txn.label_url,
+                    "carrier": payload.carrier or "",
+                    "service": payload.service or "",
+                }
+            else:
+                msgs = " | ".join([m.text for m in (txn.messages or []) if hasattr(m, "text")])
+                result = {"success": False, "error": msgs or "Label creation failed"}
+        except Exception as exc:
+            result = {"success": False, "error": str(exc)}
+    else:
+        # Fallback: weight-based — extract address and call create_label
+        from app.services.shippo_service import create_label, CARRIER_TOKENS
+        addr = _json.loads(order.shipping_address_snapshot or "{}")
+        to_address = {
+            "name": addr.get("full_name") or addr.get("name") or "",
+            "street1": addr.get("address_line1") or addr.get("street1") or "",
+            "city": addr.get("city", ""),
+            "state": addr.get("state") or addr.get("state_province", ""),
+            "zip": addr.get("zip_code") or addr.get("postal_code") or addr.get("zip", ""),
+            "country": addr.get("country", "US"),
+        }
+        if not all([to_address["street1"], to_address["city"], to_address["state"], to_address["zip"]]):
+            raise HTTPException(status_code=422, detail="Incomplete shipping address on order")
+        carrier_token = CARRIER_TOKENS.get(payload.carrier.lower(), "usps_priority")
+        result = await create_label(str(order_id), to_address, carrier_token, weight_oz=payload.weight_lbs * 16.0)
 
     if result.get("success"):
         order.tracking_number = result["tracking_number"]
