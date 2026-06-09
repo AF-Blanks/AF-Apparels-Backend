@@ -229,10 +229,13 @@ class OrderService:
 
         # 8. Create Order record
         import json as _json
-        # Determine payment_status: map QB status strings to our enum values
-        # QB returns "CAPTURED" but our enum only accepts: unpaid|pending|paid|refunded|failed
-        _qb_status = qb_payment_status or ""
-        _payment_status = "paid" if _qb_status == "CAPTURED" else "pending"
+        # Determine payment_status based on payment method:
+        # Net 30 = unpaid (pay later via invoice), all other methods (card/ach/bank) = paid immediately.
+        _pm = getattr(confirm, "payment_method", None) or ""
+        if _pm == "net_30":
+            _payment_status = "unpaid"
+        else:
+            _payment_status = "paid"
 
         order = Order(
             company_id=company_id,

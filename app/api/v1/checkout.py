@@ -186,6 +186,16 @@ async def _confirm_checkout_inner(
             "payment_method=ach, or payment_method=net_30"
         )
 
+    # Validate Net 30 is explicitly enabled for this company
+    if has_net30:
+        from sqlalchemy import select as _sel
+        from app.models.company import Company as _Company
+        _company = (await db.execute(
+            _sel(_Company).where(_Company.id == company_id)
+        )).scalar_one_or_none()
+        if not _company or not getattr(_company, "net30_enabled", False):
+            raise ValidationError("Net 30 payment terms are not available for your account. Contact AF Apparels to request Net 30.")
+
     discount_percent = getattr(request.state, "tier_discount_percent", Decimal("0"))
     group_id = getattr(request.state, "discount_group_id", None)
 

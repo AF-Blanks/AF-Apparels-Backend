@@ -85,6 +85,9 @@ class Company(BaseModel):
     # Tax exemption flag — when True, no tax is charged or shown at checkout
     tax_exempt: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
 
+    # Net 30 payment terms — when True, wholesale customer can place orders and pay within 30 days
+    net30_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
+
     # ── Relationships ─────────────────────────────────────────────────────────
     users: Mapped[list["CompanyUser"]] = relationship(
         "CompanyUser", back_populates="company", cascade="all, delete-orphan"

@@ -444,6 +444,45 @@ class QuickBooksService:
             logger.error("QB update_item failed for %s: %s", qb_item_id, exc)
             return False
 
+    def create_payment_for_invoice(
+        self,
+        invoice_id: str,
+        amount: float,
+        payment_method: str = "card",
+        payment_date: str | None = None,
+    ) -> dict:
+        """Create a QB Payment record linked to an invoice (marks it as paid).
+
+        Used to record card/ACH payments on QB invoices created for non-Net-30 orders.
+        Returns the QB Payment dict on success; raises on failure.
+        """
+        from datetime import date as _date
+        txn_date = payment_date or str(_date.today())
+
+        # Fetch the invoice to get CustomerRef
+        invoice_resp = self._request("GET", f"invoice/{invoice_id}?minorversion=65")
+        customer_ref = invoice_resp.get("Invoice", {}).get("CustomerRef", {})
+        if not customer_ref:
+            raise ValueError(f"Cannot create QB payment — invoice {invoice_id} has no CustomerRef")
+
+        payment_method_name = "Credit Card" if "card" in (payment_method or "").lower() else "Check"
+
+        payload: dict[str, Any] = {
+            "TotalAmt": round(float(amount), 2),
+            "CustomerRef": customer_ref,
+            "TxnDate": txn_date,
+            "Line": [
+                {
+                    "Amount": round(float(amount), 2),
+                    "LinkedTxn": [{"TxnId": invoice_id, "TxnType": "Invoice"}],
+                }
+            ],
+            "PaymentMethodRef": {"name": payment_method_name},
+        }
+        logger.info("QB create_payment_for_invoice — invoice_id=%s amount=%.2f", invoice_id, amount)
+        resp = self._request("POST", "payment", json=payload)
+        return resp.get("Payment", {})
+
     def void_invoice(self, invoice_id: str) -> bool:
         """Void a QB invoice by ID."""
         try:

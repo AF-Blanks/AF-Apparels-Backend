@@ -191,11 +191,11 @@ async def guest_checkout(
     tax_amount_val = payload.tax_amount or Decimal("0")
     total = subtotal + shipping_cost + tax_amount_val
 
-    # 3. Charge card via QB Payments (skip for ACH — verified manually)
+    # 3. Charge card via QB Payments (skip for ACH — collected manually)
     if payload.payment_method == "ach":
         qb_charge_id = None
         qb_payment_status = "ACH_PENDING"
-        _payment_status = "pending"
+        _payment_status = "paid"  # ACH / bank transfer treated as immediately paid
     else:
         if not payload.qb_token:
             raise ValidationError("Card token is required for card payments")

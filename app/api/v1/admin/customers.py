@@ -274,6 +274,28 @@ async def update_company(
     return company
 
 
+class _Net30Request(BaseModel):
+    net30_enabled: bool
+
+
+@router.patch("/companies/{company_id}/net30", status_code=status.HTTP_200_OK)
+async def toggle_net30(
+    company_id: UUID, payload: _Net30Request, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Enable or disable Net 30 payment terms for a wholesale company."""
+    from sqlalchemy import select as _sel
+    company = (await db.execute(_sel(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if not company:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Company not found")
+    if company.status != "active":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Net 30 can only be enabled for active (approved) wholesale companies")
+    company.net30_enabled = payload.net30_enabled
+    await db.commit()
+    return {"net30_enabled": company.net30_enabled, "company_id": str(company.id)}
+
+
 @router.post("/companies/{company_id}/suspend", status_code=status.HTTP_200_OK)
 async def suspend_company(
     company_id: UUID, payload: SuspendRequest, db: AsyncSession = Depends(get_db)
