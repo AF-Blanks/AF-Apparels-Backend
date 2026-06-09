@@ -201,6 +201,8 @@ class AdminOrderDetail(OrderOut):
     is_fully_paid: bool = False
     # Order timeline
     timeline: list[dict] = []
+    # Pre-calculated shipment weight from order items (lbs), for Shippo label generation
+    calculated_weight_lbs: float = 1.0
 
     model_config = {"from_attributes": True}
 

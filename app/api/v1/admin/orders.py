@@ -1,4 +1,5 @@
 """Admin — order management and RMA."""
+import asyncio
 import csv
 import io
 import json as _json
@@ -502,6 +503,37 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
     items_result = await db.execute(select(OrderItem).where(OrderItem.order_id == order.id))
     items = items_result.scalars().all()
 
+    # Calculate shipment weight from variant weights (used to pre-fill Shippo label weight)
+    _GRAMS_PER_LB = 453.592
+    _DEFAULT_LBS_PER_UNIT = 0.5  # standard apparel blank fallback
+    try:
+        from app.models.product import ProductVariant as _PV
+        variant_ids = [str(item.variant_id) for item in items if item.variant_id]
+        variant_weight_g: dict[str, float] = {}
+        if variant_ids:
+            _vr = await db.execute(
+                select(_PV.id, _PV.weight_grams).where(_PV.id.in_(variant_ids))
+            )
+            for _vid, _wg in _vr.all():
+                if _wg:
+                    variant_weight_g[str(_vid)] = float(_wg)
+
+        total_grams = 0.0
+        total_qty = sum(item.quantity for item in items)
+        has_variant_weights = False
+        for item in items:
+            _vid_s = str(item.variant_id) if item.variant_id else None
+            if _vid_s and _vid_s in variant_weight_g:
+                total_grams += variant_weight_g[_vid_s] * item.quantity
+                has_variant_weights = True
+
+        if has_variant_weights and total_grams > 0:
+            calculated_weight_lbs = max(round(total_grams / _GRAMS_PER_LB, 2), 1.0)
+        else:
+            calculated_weight_lbs = max(round(total_qty * _DEFAULT_LBS_PER_UNIT, 2), 1.0)
+    except Exception:
+        calculated_weight_lbs = 1.0
+
     # Enrich with customer contact — from placing user or guest fields
     customer_name: str | None = order.guest_name if order.is_guest_order else None
     customer_email: str | None = order.guest_email if order.is_guest_order else None
@@ -584,6 +616,7 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
             balance_due=order.balance_due,
             is_fully_paid=order.is_fully_paid,
             timeline=order.timeline or [],
+            calculated_weight_lbs=calculated_weight_lbs,
         )
     except Exception as exc:
         logger.exception("get_admin_order serialization error for order %s: %s", order_id, exc)
@@ -949,6 +982,25 @@ async def fetch_order_rates(
                 async_=False,
             )
         )
+        # Retry if major carriers are missing (Shippo may return partial results)
+        _expected = {"ups", "usps", "fedex"}
+        for _attempt in range(5):
+            _present = {(r.provider or "").lower() for r in (shipment.rates or [])}
+            _missing = _expected - _present
+            if not _missing or _attempt == 4:
+                if _missing:
+                    logger.warning("fetch-rates: %s absent after %d attempts", _missing, _attempt + 1)
+                break
+            logger.info("fetch-rates attempt %d: %s missing, retrying in 1.5 s", _attempt + 1, _missing)
+            await asyncio.sleep(1.5)
+            try:
+                updated = client.shipments.get(shipment_id=shipment.object_id)
+                if updated and (updated.rates or []):
+                    shipment = updated
+            except Exception as _re:
+                logger.warning("fetch-rates re-fetch attempt %d failed: %s", _attempt + 1, _re)
+                break
+
         rates = []
         for rate in (shipment.rates or []):
             try:
