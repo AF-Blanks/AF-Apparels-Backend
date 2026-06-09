@@ -513,6 +513,42 @@ async def _ensure_content_tables() -> None:
         print(f"Content tables warning (non-fatal): {exc}")
 
 
+# ── QB token seed ─────────────────────────────────────────────────────────────
+async def _seed_qb_tokens() -> None:
+    """Copy QB env-var tokens into app_settings rows that are null/absent.
+
+    Rows that already have values (e.g. set by the OAuth callback) are never
+    overwritten — COALESCE keeps the existing value.  qb_token_expires_at is
+    seeded to epoch so the service auto-refreshes on first use.
+    """
+    from sqlalchemy import text
+    from app.core.database import engine
+    try:
+        async with engine.begin() as conn:
+            seeds = [
+                ("qb_access_token",     settings.QB_ACCESS_TOKEN or None),
+                ("qb_refresh_token",    settings.QB_REFRESH_TOKEN or None),
+                ("qb_realm_id",         settings.QB_COMPANY_ID or None),
+                ("qb_token_expires_at", "1970-01-01T00:00:00+00:00"),
+            ]
+            for key, value in seeds:
+                if value is None:
+                    continue
+                await conn.execute(text("""
+                    INSERT INTO app_settings (key, value, updated_at)
+                    VALUES (:k, :v, now())
+                    ON CONFLICT (key) DO UPDATE
+                        SET value      = COALESCE(app_settings.value, EXCLUDED.value),
+                            updated_at = CASE
+                                WHEN app_settings.value IS NULL THEN now()
+                                ELSE app_settings.updated_at
+                            END
+                """), {"k": key, "v": value})
+        print("QB token rows: OK")
+    except Exception as exc:
+        print(f"QB token seed warning (non-fatal): {exc}")
+
+
 # ── Email templates seed ──────────────────────────────────────────────────────
 async def _seed_email_templates() -> None:
     """Insert default email templates if they don't exist."""
@@ -621,6 +657,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Seed email templates
     await _seed_email_templates()
+
+    # Seed QB token rows from env vars (no-op if rows already have values)
+    await _seed_qb_tokens()
 
     yield
 
