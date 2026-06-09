@@ -151,6 +151,8 @@ async def get_variant_pricing(db: AsyncSession = Depends(get_db)):
 
 @router.post("/variant-pricing")
 async def save_variant_pricing(body: VariantPricingIn, db: AsyncSession = Depends(get_db)):
+    affected_product_ids = set(body.overrides.keys())
+
     for product_id, tier_map in body.overrides.items():
         for tier_id, vals in tier_map.items():
             price_str = (vals.get("price") or "").strip()
@@ -183,6 +185,22 @@ async def save_variant_pricing(body: VariantPricingIn, db: AsyncSession = Depend
                 ))
 
     await db.commit()
+
+    # Bust product detail cache for every affected product
+    try:
+        from app.models.product import Product as _Product
+        from app.core.redis import redis_delete_pattern as _rdp
+        from sqlalchemy import select as _select
+        slugs_result = await db.execute(
+            _select(_Product.slug).where(_Product.id.in_(list(affected_product_ids)))
+        )
+        for (slug,) in slugs_result.all():
+            if slug:
+                await _rdp(f"products:detail:{slug}:*")
+        await _rdp("products:list:*")
+    except Exception:
+        pass
+
     return {"ok": True}
 
 
@@ -208,6 +226,8 @@ async def get_variant_level_pricing(db: AsyncSession = Depends(get_db)):
 
 @router.post("/variant-level-pricing")
 async def save_variant_level_pricing(body: VariantLevelPricingIn, db: AsyncSession = Depends(get_db)):
+    affected_variant_ids = set(body.overrides.keys())
+
     for variant_id, group_map in body.overrides.items():
         for group_id, price_str in group_map.items():
             price_val = (price_str or "").strip()
@@ -236,4 +256,23 @@ async def save_variant_level_pricing(body: VariantLevelPricingIn, db: AsyncSessi
                 ))
 
     await db.commit()
+
+    # Bust product detail cache for every product whose variants were affected
+    try:
+        from app.models.product import Product as _Product, ProductVariant as _PV
+        from app.core.redis import redis_delete_pattern as _rdp
+        from sqlalchemy import select as _select
+        slugs_result = await db.execute(
+            _select(_Product.slug)
+            .join(_PV, _PV.product_id == _Product.id)
+            .where(_PV.id.in_(list(affected_variant_ids)))
+            .distinct()
+        )
+        for (slug,) in slugs_result.all():
+            if slug:
+                await _rdp(f"products:detail:{slug}:*")
+        await _rdp("products:list:*")
+    except Exception:
+        pass
+
     return {"ok": True}

@@ -122,6 +122,7 @@ async def guest_checkout(
 
     # 1. Validate + price each item using MSRP
     order_items_data = []
+    ordered_product_slugs: set[str] = set()
     subtotal = Decimal("0")
 
     for cart_item in payload.items:
@@ -138,6 +139,8 @@ async def guest_checkout(
         if not row:
             raise NotFoundError(f"Variant {cart_item.variant_id} not found")
         variant, product = row
+        if product.slug:
+            ordered_product_slugs.add(product.slug)
 
         if variant.status != "active":
             import logging as _log
@@ -306,6 +309,16 @@ async def guest_checkout(
             _siqb.apply_async(args=[str(item_data["variant_id"])], countdown=15)
         except Exception as _exc:
             logger.warning("QB inventory sync dispatch failed: %s", _exc)
+
+    # Bust product detail Redis cache so stock shows correctly for everyone
+    try:
+        from app.core.redis import redis_delete_pattern as _rdp
+        for _slug in ordered_product_slugs:
+            await _rdp(f"products:detail:{_slug}:*")
+        if ordered_product_slugs:
+            await _rdp("products:list:*")
+    except Exception:
+        pass
 
     await db.flush()
 
