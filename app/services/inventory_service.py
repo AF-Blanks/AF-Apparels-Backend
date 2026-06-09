@@ -178,6 +178,22 @@ class InventoryService:
         except Exception as _exc:
             logger.warning("QB inventory sync dispatch failed: %s", _exc)
 
+        # Invalidate Redis product detail cache so updated stock shows on all pages
+        try:
+            from app.core.redis import redis_delete_pattern as _rdp
+            from app.models.product import Product as _Product
+            pv = (await self.db.execute(
+                select(ProductVariant).where(ProductVariant.id == variant_id)
+            )).scalar_one_or_none()
+            if pv:
+                prod = (await self.db.execute(
+                    select(_Product).where(_Product.id == pv.product_id)
+                )).scalar_one_or_none()
+                if prod:
+                    await _rdp(f"products:detail:{prod.slug}:*")
+        except Exception as _exc:
+            logger.warning("Product cache invalidation failed: %s", _exc)
+
         return record
 
     async def bulk_import_csv(self, csv_content: str, adjusted_by: UUID | None = None) -> dict:

@@ -211,24 +211,10 @@ async def guest_checkout(
         qb_payment_status = charge_resp.get("status", "UNKNOWN")
         _payment_status = "paid" if qb_payment_status == "CAPTURED" else "pending"
 
-    # 4. Generate order number — query DB for max to avoid Redis-reset collisions
-    from sqlalchemy import text as _text
-    try:
-        _num_result = await db.execute(_text(
-            "SELECT order_number FROM orders "
-            "WHERE order_number LIKE 'AF-%' "
-            "ORDER BY SUBSTRING(order_number FROM 4)::INTEGER DESC "
-            "LIMIT 1"
-        ))
-        _num_row = _num_result.fetchone()
-        if _num_row and _num_row[0]:
-            _counter = int(_num_row[0].split("-", 1)[-1]) + 1
-        else:
-            _counter = 1
-    except Exception:
-        import random
-        _counter = random.randint(10000, 99999)
-    order_number = f"AF-{_counter:06d}"
+    # 4. Generate order number — delegate to the single shared generator so
+    #    retail/guest and wholesale order numbers form one sequential series.
+    from app.services.order_service import OrderService as _OrderSvc
+    order_number = await _OrderSvc(db)._generate_order_number()
 
     # 5. Create Order record
     address_snapshot = json.dumps({
@@ -313,6 +299,13 @@ async def guest_checkout(
                     .values(quantity=int(record.quantity) - deduct)
                 )
                 qty_to_deduct -= deduct
+
+        # Sync updated stock to QB after each variant deduction
+        try:
+            from app.tasks.quickbooks_tasks import sync_inventory_to_qb as _siqb
+            _siqb.apply_async(args=[str(item_data["variant_id"])], countdown=15)
+        except Exception as _exc:
+            logger.warning("QB inventory sync dispatch failed: %s", _exc)
 
     await db.flush()
 

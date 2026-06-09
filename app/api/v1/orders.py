@@ -69,22 +69,18 @@ async def get_order(
     # Support order_number (AF-XXXXXX / DRAFT-XXXXXX / numeric 1001+) or UUID in URL
     if order_id.upper().startswith(("AF-", "DRAFT-")) or order_id.isdigit():
         order_num = order_id.upper() if order_id.upper().startswith(("AF-", "DRAFT-")) else order_id
+        # Resolve order_number → UUID, then delegate to service methods so all
+        # required relationships are eagerly loaded (prevents MissingGreenlet 500s).
+        row = await db.execute(select(Order.id).where(Order.order_number == order_num))
+        found_id = row.scalar_one_or_none()
+        if not found_id:
+            raise NotFoundError(f"Order {order_id} not found")
         if account_type == "retail" and user_id:
-            result = await db.execute(
-                select(Order).options(_sil(Order.items))
-                .where(Order.order_number == order_num, Order.placed_by_id == _uuid.UUID(user_id))
-            )
+            return await svc.get_order_for_retail_user(found_id, user_id)
         elif company_id:
-            result = await db.execute(
-                select(Order).options(_sil(Order.items))
-                .where(Order.order_number == order_num, Order.company_id == _uuid.UUID(str(company_id)))
-            )
+            return await svc.get_order(found_id, company_id)
         else:
             raise ForbiddenError("Company account required")
-        order = result.scalar_one_or_none()
-        if not order:
-            raise NotFoundError(f"Order {order_id} not found")
-        return order
 
     oid = _uuid.UUID(order_id)
     if account_type == "retail" and user_id:

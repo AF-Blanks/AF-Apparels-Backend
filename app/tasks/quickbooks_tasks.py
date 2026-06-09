@@ -86,17 +86,30 @@ def sync_customer_to_qb(self, company_id: str):
         from sqlalchemy.orm import selectinload
 
         try:
-            # ── 1. Fetch company + owner email ────────────────────────────────
+            # Single session holds FOR UPDATE from check through commit — same
+            # race-free pattern as sync_variant_to_qb.
             async with AsyncSessionLocal() as session:
+                # ── 1. Lock the company row ───────────────────────────────────
                 company = (await session.execute(
-                    select(Company).where(Company.id == uuid.UUID(company_id))
+                    select(Company)
+                    .where(Company.id == uuid.UUID(company_id))
+                    .with_for_update()
                 )).scalar_one_or_none()
 
                 if not company:
                     await _log_attempt("company", company_id, "failed", "Company not found")
                     return None
 
-                # User model has no company_id — look up owner via CompanyUser
+                # ── 2. Already synced? Return immediately ─────────────────────
+                if company.qb_customer_id:
+                    logger.info(
+                        "sync_customer_to_qb — already synced, skipping:"
+                        " company=%s qb_customer_id=%s",
+                        company_id, company.qb_customer_id,
+                    )
+                    return {"status": "success", "qb_customer_id": company.qb_customer_id}
+
+                # ── 3. Snapshot data (lock still held) ───────────────────────
                 cu = (await session.execute(
                     select(CompanyUser)
                     .options(selectinload(CompanyUser.user))
@@ -114,24 +127,22 @@ def sync_customer_to_qb(self, company_id: str):
                 )
                 name, ref = company.name, str(company.id)
 
-            # ── 2. Load live QB tokens from app_settings ──────────────────────
-            svc = await QuickBooksService().initialize()
+                # ── 4. QB API call (session + lock still held) ────────────────
+                # create_customer already does find-or-create by DisplayName,
+                # so this is idempotent even without the DB lock.
+                svc = await QuickBooksService().initialize()
+                qb_id = await asyncio.to_thread(svc.create_customer, name, email, ref_id=ref)
+                logger.info("sync_customer_to_qb QB customer ready — qb_id=%s", qb_id)
 
-            # ── 3. Call QB API (sync, run in thread so it doesn't block loop) ─
-            qb_id = await asyncio.to_thread(svc.create_customer, name, email, ref_id=ref)
-            logger.info("sync_customer_to_qb success — qb_id=%s", qb_id)
+                # ── 5. Save in the SAME session and commit atomically ─────────
+                company.qb_customer_id = qb_id
+                await session.commit()
+                logger.info(
+                    "qb_customer_id saved to DB: company=%s qb_customer_id=%s",
+                    company_id, qb_id,
+                )
 
-            # ── 4. Persist QB customer ID back to company row ─────────────────
-            from app.models.company import Company
-            async with AsyncSessionLocal() as session:
-                company = (await session.execute(
-                    select(Company).where(Company.id == uuid.UUID(company_id))
-                )).scalar_one_or_none()
-                if company:
-                    company.qb_customer_id = qb_id
-                    await session.commit()
-
-            # ── 5. Log success ────────────────────────────────────────────────
+            # ── 6. Log success ────────────────────────────────────────────────
             await _log_attempt("company", company_id, "success", None, qb_entity_id=qb_id)
             return {"status": "success", "qb_customer_id": qb_id}
 

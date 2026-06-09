@@ -2,8 +2,11 @@
 import csv
 import io
 import json as _json
+import logging
 from datetime import date, datetime, timezone
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -473,12 +476,18 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
     import uuid as _uuid
     from sqlalchemy import outerjoin
 
-    # Accept order_number (AF-..., DRAFT-...) or UUID
+    # Resolve by order_number for prefixed ("AF-...", "DRAFT-...") and numeric ("1008")
+    # formats; fall back to UUID only when the value looks like one.
     upper = order_id.upper()
     if upper.startswith("AF-") or upper.startswith("DRAFT-"):
         where_clause = Order.order_number == upper
+    elif order_id.isdigit():
+        where_clause = Order.order_number == order_id
     else:
-        where_clause = Order.id == _uuid.UUID(order_id)
+        try:
+            where_clause = Order.id == _uuid.UUID(order_id)
+        except ValueError:
+            raise NotFoundError(f"Order {order_id} not found")
 
     result = await db.execute(
         select(Order, Company.name.label("company_name"))
@@ -513,7 +522,6 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
     if order.shipping_address_snapshot:
         try:
             raw = _json.loads(order.shipping_address_snapshot)
-            # Normalize to frontend-expected keys
             shipping_address = {
                 "full_name": raw.get("full_name") or raw.get("label"),
                 "address_line1": raw.get("address_line1") or raw.get("line1"),
@@ -527,55 +535,59 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
         except Exception:
             pass
 
-    return AdminOrderDetail(
-        id=order.id,
-        order_number=order.order_number,
-        status=order.status,
-        payment_status=order.payment_status,
-        po_number=order.po_number,
-        order_notes=order.notes,
-        subtotal=order.subtotal,
-        shipping_cost=order.shipping_cost,
-        tax_amount=order.tax_amount,
-        total=order.total,
-        company_id=order.company_id,
-        company_name=company_name,
-        tracking_number=order.tracking_number,
-        tracking_url=getattr(order, "tracking_url", None),
-        label_url=getattr(order, "label_url", None),
-        carrier=getattr(order, "carrier", None),
-        shipping_rate_id=getattr(order, "shipping_rate_id", None),
-        shipping_method=getattr(order, "shipping_method", None),
-        courier=order.courier,
-        courier_service=order.courier_service,
-        shipped_at=order.shipped_at,
-        qb_invoice_id=order.qb_invoice_id,
-        created_at=order.created_at,
-        updated_at=order.updated_at,
-        items=[OrderItemOut.model_validate(i) for i in items],
-        customer_name=customer_name,
-        customer_email=customer_email,
-        customer_phone=customer_phone,
-        shipping_address=shipping_address,
-        is_guest_order=order.is_guest_order,
-        guest_email=order.guest_email,
-        guest_name=order.guest_name,
-        guest_phone=order.guest_phone,
-        payment_method=getattr(order, "payment_method", None),
-        ach_bank_name=getattr(order, "ach_bank_name", None),
-        ach_account_holder=getattr(order, "ach_account_holder", None),
-        ach_account_last4=getattr(order, "ach_account_last4", None),
-        ach_account_type=getattr(order, "ach_account_type", None),
-        ach_verified=getattr(order, "ach_verified", None),
-        payment_terms=getattr(order, "payment_terms", None),
-        invoice_sent_at=getattr(order, "invoice_sent_at", None),
-        marked_paid_at=getattr(order, "marked_paid_at", None),
-        marked_paid_by=getattr(order, "marked_paid_by", None),
-        amount_paid=order.amount_paid,
-        balance_due=order.balance_due,
-        is_fully_paid=order.is_fully_paid,
-        timeline=order.timeline or [],
-    )
+    try:
+        return AdminOrderDetail(
+            id=order.id,
+            order_number=order.order_number,
+            status=order.status,
+            payment_status=order.payment_status,
+            po_number=order.po_number,
+            order_notes=order.notes,
+            subtotal=order.subtotal,
+            shipping_cost=order.shipping_cost,
+            tax_amount=order.tax_amount,
+            total=order.total,
+            company_id=order.company_id,
+            company_name=company_name,
+            tracking_number=order.tracking_number,
+            tracking_url=getattr(order, "tracking_url", None),
+            label_url=getattr(order, "label_url", None),
+            carrier=getattr(order, "carrier", None),
+            shipping_rate_id=getattr(order, "shipping_rate_id", None),
+            shipping_method=getattr(order, "shipping_method", None),
+            courier=order.courier,
+            courier_service=order.courier_service,
+            shipped_at=order.shipped_at,
+            qb_invoice_id=order.qb_invoice_id,
+            created_at=order.created_at,
+            updated_at=order.updated_at,
+            items=[OrderItemOut.model_validate(i) for i in items],
+            customer_name=customer_name,
+            customer_email=customer_email,
+            customer_phone=customer_phone,
+            shipping_address=shipping_address,
+            is_guest_order=order.is_guest_order,
+            guest_email=order.guest_email,
+            guest_name=order.guest_name,
+            guest_phone=order.guest_phone,
+            payment_method=getattr(order, "payment_method", None),
+            ach_bank_name=getattr(order, "ach_bank_name", None),
+            ach_account_holder=getattr(order, "ach_account_holder", None),
+            ach_account_last4=getattr(order, "ach_account_last4", None),
+            ach_account_type=getattr(order, "ach_account_type", None),
+            ach_verified=getattr(order, "ach_verified", None),
+            payment_terms=getattr(order, "payment_terms", None),
+            invoice_sent_at=getattr(order, "invoice_sent_at", None),
+            marked_paid_at=getattr(order, "marked_paid_at", None),
+            marked_paid_by=getattr(order, "marked_paid_by", None),
+            amount_paid=order.amount_paid,
+            balance_due=order.balance_due,
+            is_fully_paid=order.is_fully_paid,
+            timeline=order.timeline or [],
+        )
+    except Exception as exc:
+        logger.exception("get_admin_order serialization error for order %s: %s", order_id, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/orders/{order_id}/verify-ach", status_code=200)

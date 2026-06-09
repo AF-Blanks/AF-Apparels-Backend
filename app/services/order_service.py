@@ -350,6 +350,13 @@ class OrderService:
                     )
                     qty_to_deduct -= deduct
 
+            # Sync updated stock to QB after each variant deduction
+            try:
+                from app.tasks.quickbooks_tasks import sync_inventory_to_qb as _siqb
+                _siqb.apply_async(args=[str(variant_id)], countdown=15)
+            except Exception as _exc:
+                logger.warning("QB inventory sync dispatch failed for variant %s: %s", variant_id, _exc)
+
         # 9.6. Invalidate product detail cache so stock shows immediately
         try:
             from app.core.redis import redis_delete_pattern as _rdp
