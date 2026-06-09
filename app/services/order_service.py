@@ -219,7 +219,15 @@ class OrderService:
             shipping_cost = Decimal(str(confirm.shipping_cost))
 
         tax_amount_val = Decimal(str(confirm.tax_amount or 0))
-        total = subtotal + shipping_cost + tax_amount_val - coupon_discount_amount
+
+        # 3% convenience fee for card payments (subtotal only, not shipping/tax)
+        _payment_method_for_fee = getattr(confirm, "payment_method", None) or ""
+        if _payment_method_for_fee in ("card", "credit_card", "qb_payments"):
+            convenience_fee = (subtotal * Decimal("0.03")).quantize(Decimal("0.01"))
+        else:
+            convenience_fee = Decimal("0.00")
+
+        total = subtotal + shipping_cost + tax_amount_val - coupon_discount_amount + convenience_fee
 
         # 6. Resolve shipping address
         shipping_address = await self._resolve_address(confirm, company_id)
@@ -296,6 +304,17 @@ class OrderService:
                 )
             except Exception as _ach_exc:
                 logger.warning("Could not save payment_method/ACH on order %s: %s", order.id, _ach_exc)
+
+        # Save convenience_fee via raw SQL (column added post-deploy)
+        if convenience_fee > 0:
+            try:
+                from sqlalchemy import text as _cftext
+                await self.db.execute(
+                    _cftext("UPDATE orders SET convenience_fee=:cf WHERE id=:oid"),
+                    {"cf": float(convenience_fee), "oid": str(order.id)},
+                )
+            except Exception as _cf_exc:
+                logger.warning("Could not save convenience_fee on order %s: %s", order.id, _cf_exc)
 
         # Save shipping_rate_id + carrier from customer's selected live Shippo rate
         logger.info(

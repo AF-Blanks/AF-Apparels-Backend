@@ -189,7 +189,8 @@ async def guest_checkout(
         shipping_cost = payload.shipping_cost
 
     tax_amount_val = payload.tax_amount or Decimal("0")
-    total = subtotal + shipping_cost + tax_amount_val
+    convenience_fee = (subtotal * Decimal("0.03")).quantize(Decimal("0.01")) if payload.payment_method == "card" else Decimal("0.00")
+    total = subtotal + shipping_cost + tax_amount_val + convenience_fee
 
     # 3. Charge card via QB Payments (skip for ACH — collected manually)
     if payload.payment_method == "ach":
@@ -278,6 +279,15 @@ async def guest_checkout(
             )
         except Exception as _exc:
             logger.warning("Could not save shipping_rate_id on guest order %s: %s", order.id, _exc)
+
+    if convenience_fee > 0:
+        try:
+            await db.execute(
+                _text("UPDATE orders SET convenience_fee=:cf WHERE id=:oid"),
+                {"cf": float(convenience_fee), "oid": str(order.id)},
+            )
+        except Exception as _exc:
+            logger.warning("Could not save convenience_fee on guest order %s: %s", order.id, _exc)
 
     # 6. Create OrderItem records + deduct inventory
     from sqlalchemy import update as _update

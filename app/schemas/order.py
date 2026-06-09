@@ -109,6 +109,7 @@ class OrderOut(BaseModel):
     amount_paid: Decimal | None = None
     balance_due: Decimal | None = None
     is_fully_paid: bool = False
+    convenience_fee: Decimal | None = None
     items: list[OrderItemOut]
     created_at: datetime
     updated_at: datetime
@@ -203,6 +204,9 @@ class AdminOrderDetail(OrderOut):
     timeline: list[dict] = []
     # Pre-calculated shipment weight from order items (lbs), for Shippo label generation
     calculated_weight_lbs: float = 1.0
+    # Admin edits flag + convenience fee
+    items_edited: bool = False
+    convenience_fee: Decimal | None = None
 
     model_config = {"from_attributes": True}
 

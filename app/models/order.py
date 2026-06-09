@@ -110,6 +110,10 @@ class Order(BaseModel):
     marked_paid_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     amount_paid: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
 
+    # Admin edits + fees (columns added post-deploy — use raw SQL fallback in service)
+    items_edited: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=False)
+    convenience_fee: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True, default=0.0)
+
     # ── Schema compatibility aliases ────────────────────────────────────────────
     @property
     def order_notes(self) -> str | None:

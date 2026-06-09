@@ -617,6 +617,8 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
             is_fully_paid=order.is_fully_paid,
             timeline=order.timeline or [],
             calculated_weight_lbs=calculated_weight_lbs,
+            items_edited=bool(getattr(order, "items_edited", False)),
+            convenience_fee=getattr(order, "convenience_fee", None),
         )
     except Exception as exc:
         logger.exception("get_admin_order serialization error for order %s: %s", order_id, exc)
@@ -696,6 +698,10 @@ async def add_order_item(
     # Recalculate order totals
     order.subtotal = float(order.subtotal or 0) + line_total
     order.total = float(order.subtotal) + float(order.shipping_cost or 0) + float(order.tax_amount or 0)
+    try:
+        order.items_edited = True
+    except Exception:
+        pass
 
     await db.commit()
     return {"message": "Item added", "item_id": str(item.id), "subtotal": float(order.subtotal), "total": float(order.total)}
@@ -718,6 +724,10 @@ async def remove_order_item(
     if order and order.status not in ("delivered", "cancelled", "refunded"):
         order.subtotal = max(0, float(order.subtotal or 0) - float(item.line_total or 0))
         order.total = float(order.subtotal) + float(order.shipping_cost or 0) + float(order.tax_amount or 0)
+        try:
+            order.items_edited = True
+        except Exception:
+            pass
 
     await db.delete(item)
     await db.commit()

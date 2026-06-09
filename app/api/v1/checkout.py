@@ -238,7 +238,8 @@ async def _confirm_checkout_inner(
             ))
 
         tax_amount_dc = Decimal(str(payload.tax_amount or 0))
-        total_float = float(cart.subtotal + base_shipping + expedited_surcharge + tax_amount_dc - coupon_discount_amount)
+        _convenience_fee_dc = (cart.subtotal * Decimal("0.03")).quantize(Decimal("0.01"))
+        total_float = float(cart.subtotal + base_shipping + expedited_surcharge + tax_amount_dc - coupon_discount_amount + _convenience_fee_dc)
 
         qb_pay = QBPaymentsService()
         try:

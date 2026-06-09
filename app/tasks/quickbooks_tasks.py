@@ -177,6 +177,8 @@ def sync_order_invoice_to_qb(self, order_id: str):
         from sqlalchemy.orm import selectinload
 
         try:
+            logger.info("QB sync starting — order_id=%s", order_id)
+
             # ── 1. Fetch order and resolve QB customer identity ───────────────
             qb_customer_id: str | None = None
             is_guest_no_company = False
@@ -193,6 +195,12 @@ def sync_order_invoice_to_qb(self, order_id: str):
                 if not order:
                     await _log_attempt("order", order_id, "failed", "Order not found")
                     return None
+
+                logger.info(
+                    "QB sync order found — order_number=%s total=%.2f payment_status=%s payment_method=%s company_id=%s",
+                    order.order_number, float(order.total), order.payment_status,
+                    order.payment_method, order.company_id,
+                )
 
                 if order.company_id is None:
                     # True guest — no Company row; will create QB customer on-the-fly
@@ -284,6 +292,10 @@ def sync_order_invoice_to_qb(self, order_id: str):
                 raise RuntimeError("QB customer not yet synced — retrying after company sync")
 
             # ── 4. Create invoice (sync, run in thread) ───────────────────────
+            logger.info(
+                "QB sync creating invoice — order=%s customer=%s total=%.2f items=%d",
+                order_data["order_number"], qb_customer_id, order_data["total"], len(order_data["items"]),
+            )
             qb_invoice_id = await asyncio.to_thread(
                 svc.create_invoice,
                 qb_customer_id=qb_customer_id,
@@ -291,7 +303,7 @@ def sync_order_invoice_to_qb(self, order_id: str):
                 line_items=order_data["items"],
                 total=order_data["total"],
             )
-            logger.info("sync_order_invoice_to_qb success — qb_invoice_id=%s", qb_invoice_id)
+            logger.info("sync_order_invoice_to_qb success — qb_invoice_id=%s order=%s", qb_invoice_id, order_data["order_number"])
 
             # ── 5. Persist QB invoice ID back to the order row ────────────────
             async with AsyncSessionLocal() as session:
