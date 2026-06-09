@@ -306,14 +306,28 @@ def sync_order_invoice_to_qb(self, order_id: str):
             logger.info("sync_order_invoice_to_qb success — qb_invoice_id=%s order=%s", qb_invoice_id, order_data["order_number"])
 
             # ── 5. Persist QB invoice ID back to the order row ────────────────
+            # Use raw SQL to avoid ORM Enum commit issues with qb_sync_status
+            from sqlalchemy import text as _sql_text
             async with AsyncSessionLocal() as session:
-                o = (await session.execute(
-                    select(Order).where(Order.id == uuid.UUID(order_id))
-                )).scalar_one_or_none()
-                if o:
-                    o.qb_invoice_id = qb_invoice_id
-                    o.qb_sync_status = "synced"
+                try:
+                    await session.execute(
+                        _sql_text(
+                            "UPDATE orders SET qb_invoice_id=:iid, qb_sync_status='synced' WHERE id=:oid"
+                        ),
+                        {"iid": str(qb_invoice_id), "oid": order_id},
+                    )
                     await session.commit()
+                    logger.info(
+                        "QB invoice ID %s saved to DB for order %s",
+                        qb_invoice_id, order_data["order_number"],
+                    )
+                except Exception as _save_exc:
+                    await session.rollback()
+                    logger.error(
+                        "Failed to save qb_invoice_id to DB for order %s: %s",
+                        order_data["order_number"], _save_exc, exc_info=True,
+                    )
+                    raise  # re-raise so task retries; create_invoice is now idempotent
 
             # ── 5b. If order is paid (card/ACH), record QB payment on the invoice ──
             if order_data.get("payment_status") == "paid" and order_data.get("payment_method") != "net_30":
