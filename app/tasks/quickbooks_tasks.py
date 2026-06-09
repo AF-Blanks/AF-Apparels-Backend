@@ -306,16 +306,24 @@ def sync_order_invoice_to_qb(self, order_id: str):
             # ── 5b. If order is paid (card/ACH), record QB payment on the invoice ──
             if order_data.get("payment_status") == "paid" and order_data.get("payment_method") != "net_30":
                 try:
-                    await asyncio.to_thread(
+                    payment = await asyncio.to_thread(
                         svc.create_payment_for_invoice,
                         qb_invoice_id,
                         order_data["total"],
                         order_data.get("payment_method", "card"),
                         order_data.get("created_at_date"),
                     )
-                    logger.info("QB payment created for invoice %s (order paid)", qb_invoice_id)
+                    logger.info(
+                        "QB payment created for invoice %s (order %s) — payment_id=%s",
+                        qb_invoice_id,
+                        order_data["order_number"],
+                        payment.get("Id"),
+                    )
                 except Exception as _pay_exc:
-                    logger.warning("QB create_payment_for_invoice failed (non-fatal): %s", _pay_exc)
+                    logger.error(
+                        "QB create_payment_for_invoice failed for order %s invoice %s: %s",
+                        order_data["order_number"], qb_invoice_id, _pay_exc, exc_info=True,
+                    )
 
             # ── 6. Log success ────────────────────────────────────────────────
             await _log_attempt("order", order_id, "success", None, qb_entity_id=qb_invoice_id)

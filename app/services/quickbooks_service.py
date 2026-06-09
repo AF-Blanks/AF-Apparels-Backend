@@ -465,8 +465,6 @@ class QuickBooksService:
         if not customer_ref:
             raise ValueError(f"Cannot create QB payment — invoice {invoice_id} has no CustomerRef")
 
-        payment_method_name = "Credit Card" if "card" in (payment_method or "").lower() else "Check"
-
         payload: dict[str, Any] = {
             "TotalAmt": round(float(amount), 2),
             "CustomerRef": customer_ref,
@@ -477,7 +475,6 @@ class QuickBooksService:
                     "LinkedTxn": [{"TxnId": invoice_id, "TxnType": "Invoice"}],
                 }
             ],
-            "PaymentMethodRef": {"name": payment_method_name},
         }
         logger.info("QB create_payment_for_invoice — invoice_id=%s amount=%.2f", invoice_id, amount)
         resp = self._request("POST", "payment", json=payload)
