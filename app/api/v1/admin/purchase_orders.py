@@ -288,6 +288,52 @@ class ReceivingCreate(BaseModel):
     items: list[ReceivingItemCreate]
 
 
+async def _create_new_product_variant(db: AsyncSession, line_item: "POLineItem") -> "UUID | None":
+    """Create a draft Product + ProductVariant for a new-product PO line item. Idempotent by SKU."""
+    import re as _re
+    product_name = line_item.new_product_name or "Unnamed Product"
+    raw_sku = line_item.new_product_sku or ""
+    color = line_item.new_product_color or ""
+    size = line_item.new_product_size or ""
+
+    # Check existing variant by SKU first
+    if raw_sku:
+        existing_v = (await db.execute(
+            select(ProductVariant).where(ProductVariant.sku == raw_sku)
+        )).scalar_one_or_none()
+        if existing_v:
+            return existing_v.id
+
+    # Find or create the parent product by name
+    product = (await db.execute(
+        select(Product).where(Product.name == product_name)
+    )).scalar_one_or_none()
+
+    if not product:
+        base_slug = _re.sub(r"[^a-z0-9]+", "-", product_name.lower()).strip("-") or "product"
+        slug, i = base_slug, 1
+        while (await db.execute(select(Product).where(Product.slug == slug))).scalar_one_or_none():
+            slug = f"{base_slug}-{i}"
+            i += 1
+        product = Product(name=product_name, slug=slug, status="draft")
+        db.add(product)
+        await db.flush()
+
+    sku = raw_sku or f"{product.slug}-{color.upper() or 'NA'}-{size.upper() or 'NA'}"
+    variant = ProductVariant(
+        product_id=product.id,
+        sku=sku,
+        color=color or None,
+        size=size or None,
+        retail_price=0.0,
+        status="active",
+    )
+    db.add(variant)
+    await db.flush()
+    logger.info("Created draft product '%s' variant %s from PO line item", product_name, variant.id)
+    return variant.id
+
+
 @router.post("/{po_id}/receive")
 async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
@@ -323,6 +369,13 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
             select(POLineItem).where(POLineItem.id == UUID(item_data.po_line_item_id))
         )
         line_item = line_result.scalar_one_or_none()
+
+        # Auto-create draft product + variant for new-product line items
+        if line_item and not line_item.product_variant_id and line_item.new_product_name:
+            new_variant_id = await _create_new_product_variant(db, line_item)
+            if new_variant_id:
+                line_item.product_variant_id = new_variant_id
+
         if line_item and line_item.product_variant_id:
             try:
                 inv_result = await db.execute(
@@ -367,6 +420,15 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
         po.status = "partial"
 
     await db.commit()
+
+    # Dispatch QB vendor bill sync asynchronously (fire-and-forget)
+    try:
+        from app.tasks.quickbooks_tasks import sync_po_receipt_to_qb
+        sync_po_receipt_to_qb.delay(str(po_id), str(receiving.id))
+        logger.info("Dispatched sync_po_receipt_to_qb po=%s receiving=%s", po_id, receiving.id)
+    except Exception as _e:
+        logger.warning("Could not dispatch QB sync task: %s", _e)
+
     return {"success": True, "receiving_id": str(receiving.id)}
 
 

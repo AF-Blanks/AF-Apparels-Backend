@@ -540,3 +540,98 @@ def sync_inventory_to_qb(self, variant_id: str):
     except Exception as exc:
         delay = 60 * (2 ** self.request.retries)
         raise self.retry(exc=exc, countdown=delay)
+
+
+@celery_app.task(bind=True, max_retries=3)
+def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
+    """Create a QuickBooks Vendor Bill when a PO receiving is recorded.
+
+    Looks up the manufacturer name from the PO, builds line items from the
+    receiving's items, then calls quickbooks_service.create_vendor_bill.
+    Writes qb_bill_id back to the POReceiving row.
+    """
+    logger.info("sync_po_receipt_to_qb started — po=%s receiving=%s", po_id, receiving_id)
+
+    async def _run_all():
+        from app.core.database import AsyncSessionLocal
+        from app.models.purchase_order import PurchaseOrder, POReceiving, POLineItem  # noqa: F401
+        from app.services.quickbooks_service import QuickBooksService
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+
+        try:
+            async with AsyncSessionLocal() as session:
+                po = (await session.execute(
+                    select(PurchaseOrder)
+                    .options(
+                        selectinload(PurchaseOrder.manufacturer),
+                        selectinload(PurchaseOrder.line_items),
+                    )
+                    .where(PurchaseOrder.id == uuid.UUID(po_id))
+                )).scalar_one_or_none()
+
+                receiving = (await session.execute(
+                    select(POReceiving)
+                    .options(selectinload(POReceiving.items))
+                    .where(POReceiving.id == uuid.UUID(receiving_id))
+                )).scalar_one_or_none()
+
+                if not po or not receiving:
+                    logger.error(
+                        "sync_po_receipt_to_qb: po or receiving not found po=%s receiving=%s",
+                        po_id, receiving_id,
+                    )
+                    return None
+
+                if receiving.qb_bill_id:
+                    logger.info(
+                        "sync_po_receipt_to_qb: already synced receiving=%s bill=%s",
+                        receiving_id, receiving.qb_bill_id,
+                    )
+                    return {"status": "success", "qb_bill_id": receiving.qb_bill_id}
+
+                vendor_name = po.manufacturer.name if po.manufacturer else "Unknown Vendor"
+                li_map = {str(li.id): li for li in po.line_items}
+                bill_lines = []
+                for ri in receiving.items:
+                    li = li_map.get(str(ri.po_line_item_id)) if ri.po_line_item_id else None
+                    desc = (
+                        (li.new_product_name if li else None)
+                        or (f"SKU {li.new_product_sku}" if li and li.new_product_sku else None)
+                        or "Item"
+                    )
+                    bill_lines.append({
+                        "description": desc,
+                        "qty": ri.qty_received,
+                        "unit_price": float(ri.unit_cost_actual),
+                    })
+
+                if not bill_lines:
+                    logger.warning("sync_po_receipt_to_qb: no line items for receiving=%s", receiving_id)
+                    return None
+
+                svc = await QuickBooksService().initialize()
+                qb_bill_id = await asyncio.to_thread(
+                    svc.create_vendor_bill,
+                    vendor_name,
+                    bill_lines,
+                    po.po_number,
+                    receiving.received_date.isoformat() if receiving.received_date else None,
+                )
+                logger.info("sync_po_receipt_to_qb QB bill created — bill_id=%s", qb_bill_id)
+
+                receiving.qb_bill_id = qb_bill_id
+                receiving.qb_synced = True
+                await session.commit()
+
+            return {"status": "success", "qb_bill_id": qb_bill_id}
+
+        except Exception as exc:
+            logger.exception("sync_po_receipt_to_qb error: %s", exc)
+            raise
+
+    try:
+        return _run_async(_run_all())
+    except Exception as exc:
+        delay = 60 * (2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)
