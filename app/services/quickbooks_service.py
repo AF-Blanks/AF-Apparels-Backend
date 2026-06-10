@@ -566,24 +566,91 @@ class QuickBooksService:
 
     # ── Vendor ────────────────────────────────────────────────────────────────
 
-    async def find_or_create_vendor(self, vendor_name: str) -> str:
-        """Find vendor in QB by name; create if not found. Returns QB vendor Id."""
-        import logging
-        _log = logging.getLogger(__name__)
+    async def find_or_create_vendor(self, vendor_name: str, email: str = "") -> str:
+        """Find vendor in QB by name; create if not found. Returns QB vendor Id.
+
+        Handles QB error 6240 (Duplicate Name Exists) — raised when the same
+        DisplayName is already in use by a Customer.  The error detail contains
+        the existing entity's Id, which we extract and return so the PO/bill
+        sync can proceed without crashing.
+        """
+        import re
         escaped = vendor_name.replace("'", "\\'")
+
+        # ── 1. Search existing vendor ─────────────────────────────────────────
         result = await self._make_request(
             "GET",
             f"query?query=SELECT * FROM Vendor WHERE DisplayName = '{escaped}'&minorversion=65",
         )
         vendors = result.get("QueryResponse", {}).get("Vendor", [])
         if vendors:
-            return str(vendors[0]["Id"])
-        result = await self._make_request("POST", "vendor", {"DisplayName": vendor_name})
-        vendor_id = result.get("Vendor", {}).get("Id")
-        if not vendor_id:
-            _log.error("QB create vendor returned no Id: %s", result)
-            raise ValueError(f"Could not create QB vendor for '{vendor_name}'")
-        return str(vendor_id)
+            vid = str(vendors[0]["Id"])
+            logger.info("find_or_create_vendor: found existing vendor Id=%s", vid)
+            return vid
+
+        # ── 2. Try to create ──────────────────────────────────────────────────
+        vendor_data: dict[str, Any] = {"DisplayName": vendor_name}
+        if email:
+            vendor_data["PrimaryEmailAddr"] = {"Address": email}
+
+        try:
+            create_result = await self._make_request("POST", "vendor", vendor_data)
+            vendor_id = create_result.get("Vendor", {}).get("Id")
+            if not vendor_id:
+                logger.error("QB create vendor returned no Id: %s", create_result)
+                raise ValueError(f"Could not create QB vendor for '{vendor_name}'")
+            vid = str(vendor_id)
+            logger.info("find_or_create_vendor: created vendor Id=%s", vid)
+            return vid
+
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text if exc.response is not None else ""
+            is_duplicate = exc.response is not None and exc.response.status_code == 400 and (
+                "6240" in body or "Duplicate Name" in body
+            )
+            if not is_duplicate:
+                raise
+
+            # QB error 6240 — "Duplicate Name Exists" because the same DisplayName
+            # is already used by a Customer (or other entity).
+            # The error detail includes "Id=NUMBER" — extract and reuse it.
+            match = re.search(r'\bId=(\d+)', body)
+            if match:
+                vid = match.group(1)
+                logger.warning(
+                    "find_or_create_vendor: '%s' exists as Customer/other entity "
+                    "in QB; reusing Id=%s as vendor reference",
+                    vendor_name, vid,
+                )
+                return vid
+
+            # ID not in error body — retry vendor search in case of a race condition
+            logger.warning(
+                "find_or_create_vendor: duplicate name error but no Id in error "
+                "body; retrying vendor search for '%s'",
+                vendor_name,
+            )
+            retry = await self._make_request(
+                "GET",
+                f"query?query=SELECT * FROM Vendor WHERE DisplayName = '{escaped}'&minorversion=65",
+            )
+            retry_vendors = retry.get("QueryResponse", {}).get("Vendor", [])
+            if retry_vendors:
+                return str(retry_vendors[0]["Id"])
+
+            # Last resort: suffix the name to avoid the conflict
+            logger.warning(
+                "find_or_create_vendor: creating '%s (Vendor)' to avoid name conflict",
+                vendor_name,
+            )
+            vendor_data["DisplayName"] = f"{vendor_name} (Vendor)"
+            suffix_result = await self._make_request("POST", "vendor", vendor_data)
+            suffix_id = suffix_result.get("Vendor", {}).get("Id")
+            if not suffix_id:
+                raise ValueError(
+                    f"Could not create QB vendor for '{vendor_name}' (with suffix)"
+                )
+            return str(suffix_id)
 
     # ── Purchase Order ────────────────────────────────────────────────────────
 
