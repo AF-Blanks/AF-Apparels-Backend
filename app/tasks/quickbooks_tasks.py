@@ -611,14 +611,19 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
                     return None
 
                 svc = await QuickBooksService().initialize()
-                # create_vendor_bill is async def — call with await, NOT asyncio.to_thread
+                logger.info(
+                    "sync_po_receipt_to_qb v3: calling create_vendor_bill(await) "
+                    "vendor=%s lines=%d",
+                    vendor_name, len(bill_lines),
+                )
                 qb_result = await svc.create_vendor_bill(
                     vendor_name,
                     bill_lines,
                     po.po_number,
                     receiving.received_date.isoformat() if receiving.received_date else None,
                 )
-                qb_bill_id = str(qb_result.get("id") or "")
+                # QB returns "Id" (capital-I) natively; we also inject lowercase "id" alias
+                qb_bill_id = str(qb_result.get("Id") or qb_result.get("id") or "")
                 if not qb_bill_id:
                     raise ValueError(f"QB create_vendor_bill returned no id: {qb_result}")
                 logger.info("sync_po_receipt_to_qb QB bill created — bill_id=%s", qb_bill_id)
