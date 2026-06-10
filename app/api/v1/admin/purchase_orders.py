@@ -454,40 +454,27 @@ async def sync_to_quickbooks(po_id: UUID, db: AsyncSession = Depends(get_db)):
     if not manufacturer:
         raise HTTPException(status_code=400, detail="PO has no manufacturer")
 
-    try:
-        if po.status in ("draft", "sent"):
-            qb_result = await quickbooks_service.create_purchase_order(
-                vendor_name=manufacturer.name,
-                line_items=[
-                    {
-                        "description": li.new_product_name or f"SKU {li.new_product_sku or li.product_variant_id}",
-                        "qty": li.qty_ordered,
-                        "unit_price": float(li.unit_cost_expected),
-                    }
-                    for li in po.line_items
-                ],
-                po_number=po.po_number,
-                expected_date=str(po.expected_delivery) if po.expected_delivery else None,
-            )
-            po.qb_po_id = qb_result.get("id")
-        else:
-            all_items = []
-            for receiving in po.receivings:
-                for ri in receiving.items:
-                    li = ri.line_item
-                    all_items.append({
-                        "description": li.new_product_name if li else "Item",
-                        "qty": ri.qty_received,
-                        "unit_price": float(ri.unit_cost_actual),
-                    })
-            qb_result = await quickbooks_service.create_vendor_bill(
-                vendor_name=manufacturer.name,
-                line_items=all_items,
-                po_number=po.po_number,
-                bill_date=str(date.today()),
-            )
-            po.qb_bill_id = qb_result.get("id")
+    if po.status not in ("draft", "sent"):
+        raise HTTPException(
+            status_code=400,
+            detail="QB PO sync is only available for draft/sent POs. Vendor bill is created automatically on receive.",
+        )
 
+    try:
+        qb_result = await quickbooks_service.create_purchase_order(
+            vendor_name=manufacturer.name,
+            line_items=[
+                {
+                    "description": li.new_product_name or f"SKU {li.new_product_sku or li.product_variant_id}",
+                    "qty": li.qty_ordered,
+                    "unit_price": float(li.unit_cost_expected),
+                }
+                for li in po.line_items
+            ],
+            po_number=po.po_number,
+            expected_date=str(po.expected_delivery) if po.expected_delivery else None,
+        )
+        po.qb_po_id = qb_result.get("id")
         po.qb_synced = True
         await db.commit()
         return {"success": True, "qb_id": qb_result.get("id")}

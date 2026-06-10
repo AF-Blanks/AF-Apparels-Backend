@@ -548,7 +548,7 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
 
     Looks up the manufacturer name from the PO, builds line items from the
     receiving's items, then calls quickbooks_service.create_vendor_bill.
-    Writes qb_bill_id back to the POReceiving row.
+    Writes qb_bill_id back to both POReceiving and PurchaseOrder rows.
     """
     logger.info("sync_po_receipt_to_qb started — po=%s receiving=%s", po_id, receiving_id)
 
@@ -622,6 +622,8 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
 
                 receiving.qb_bill_id = qb_bill_id
                 receiving.qb_synced = True
+                po.qb_bill_id = qb_bill_id
+                po.qb_synced = True
                 await session.commit()
 
             return {"status": "success", "qb_bill_id": qb_bill_id}
