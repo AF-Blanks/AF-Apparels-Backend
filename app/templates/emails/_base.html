@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>{% block title %}AF Apparels{% endblock %}</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f4f6;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f3f4f6;padding:40px 0;">
+    <tr><td align="center" style="padding:0 16px;">
+      <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.07);">
+        <!-- Header -->
+        <tr>
+          <td style="background:#1B3A5C;padding:28px 40px;text-align:center;border-bottom:4px solid #E8242A;">
+            {% if logo_url %}
+            <img src="{{ logo_url }}" alt="AF Apparels" width="160" style="height:auto;max-height:52px;display:block;margin:0 auto;">
+            {% else %}
+            <div>
+              <span style="font-size:28px;font-weight:900;color:#ffffff;letter-spacing:-.5px;">AF</span>
+              <span style="font-size:12px;color:rgba(255,255,255,.6);letter-spacing:.2em;text-transform:uppercase;font-weight:600;margin-left:8px;">APPARELS</span>
+            </div>
+            {% endif %}
+          </td>
+        </tr>
+        <!-- Body -->
+        <tr>
+          <td style="padding:40px 40px 32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#374151;font-size:15px;line-height:1.6;">
+            {% block content %}{% endblock %}
+          </td>
+        </tr>
+        <!-- Footer -->
+        <tr>
+          <td style="background:#f9fafb;padding:20px 40px;border-top:1px solid #e5e7eb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+            {% block footer %}
+            <p style="margin:0 0 4px;font-size:12px;color:#6b7280;">Questions? Call <a href="tel:4693679753" style="color:#1B3A5C;font-weight:600;text-decoration:none;">+1 (469) 367-9753</a> or <a href="mailto:info@afblanks.com" style="color:#1B3A5C;text-decoration:none;">info@afblanks.com</a></p>
+            <p style="margin:0;font-size:11px;color:#9ca3af;">AF Apparels Wholesale &middot; 2041 Luna Rd, Carrollton, TX 75006 &middot; <a href="{{ frontend_url | default('https://afblanks.com') }}" style="color:#9ca3af;">afblanks.com</a></p>
+            {% endblock %}
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

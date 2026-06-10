@@ -1,12 +1,13 @@
 #backend/app/services/email_service.py
-"""EmailService — DB-stored Jinja2 templates + Resend delivery."""
+"""EmailService — file-based Jinja2 templates + DB fallback + Resend delivery."""
 import base64
 import json
 import logging
+import os
 from uuid import UUID
 
 import resend
-from jinja2 import BaseLoader, Environment, TemplateError
+from jinja2 import BaseLoader, Environment, FileSystemLoader, TemplateError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +18,9 @@ from app.models.communication import EmailTemplate
 logger = logging.getLogger(__name__)
 
 _jinja_env = Environment(loader=BaseLoader(), autoescape=True)
+
+_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "templates", "emails")
+_file_jinja_env = Environment(loader=FileSystemLoader(_TEMPLATES_DIR), autoescape=True)
 
 
 class EmailService:
@@ -55,6 +59,39 @@ class EmailService:
         except TemplateError as exc:
             logger.error("Template render error: %s", exc)
             return template_str  # fallback — return unrendered
+
+    def render_file_template(self, template_name: str, variables: dict) -> str:
+        """Render a Jinja2 HTML file from backend/app/templates/emails/."""
+        try:
+            tpl = _file_jinja_env.get_template(template_name)
+            return tpl.render(**variables)
+        except Exception as exc:
+            logger.error("File template render error (%s): %s", template_name, exc)
+            return ""
+
+    def _file_template_vars(self, extra: dict) -> dict:
+        """Merge logo_url + frontend_url into a variables dict."""
+        logo_url = getattr(settings, "LOGO_URL", None) or f"{settings.FRONTEND_URL}/Af-apparel%20logo.png"
+        return {"logo_url": logo_url, "frontend_url": settings.FRONTEND_URL, **extra}
+
+    def send_from_file(
+        self,
+        template_name: str,
+        to_email: str,
+        subject: str,
+        variables: dict,
+        attachments: list[dict] | None = None,
+    ) -> bool:
+        """Render a file template and send via Resend."""
+        body_html = self.render_file_template(template_name, self._file_template_vars(variables))
+        if not body_html:
+            return False
+        return self._send_via_resend(
+            to_email=to_email,
+            subject=subject,
+            body_html=body_html,
+            attachments=attachments,
+        )
 
     async def render(self, trigger_event: str, variables: dict) -> dict:
         """Returns rendered {subject, body_html, body_text}."""

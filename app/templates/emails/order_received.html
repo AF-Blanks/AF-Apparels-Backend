@@ -1,0 +1,52 @@
+{% extends "_base.html" %}
+{% block title %}Order Received — {{ order_number }}{% endblock %}
+{% block content %}
+<div style="text-align:center;margin-bottom:28px;">
+  <div style="display:inline-block;background:#EBF4FF;color:#1B3A5C;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:5px 16px;border-radius:20px;border:1px solid #bfdbfe;">Order Received</div>
+</div>
+<h1 style="color:#1B3A5C;font-size:24px;font-weight:800;margin:0 0 8px;text-align:center;">Thank You for Your Order!</h1>
+<p style="color:#374151;font-size:15px;margin:0 0 28px;text-align:center;">Hi {{ contact_name }}, your order has been received and is now being reviewed.</p>
+
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#F9F8F4;border-radius:8px;border:1px solid #e5e7eb;margin-bottom:24px;">
+  <tr>
+    <td style="padding:20px 24px;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td style="vertical-align:top;">
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#6b7280;margin-bottom:3px;">Order Number</div>
+            <div style="font-size:22px;font-weight:800;color:#1B3A5C;">{{ order_number }}</div>
+          </td>
+          <td style="text-align:right;vertical-align:top;">
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#6b7280;margin-bottom:3px;">Order Total</div>
+            <div style="font-size:22px;font-weight:800;color:#059669;">{{ order_total }}</div>
+          </td>
+        </tr>
+        {% if company_name %}
+        <tr>
+          <td colspan="2" style="padding-top:12px;border-top:1px solid #e5e7eb;margin-top:12px;">
+            <span style="font-size:12px;color:#6b7280;">Company: </span>
+            <span style="font-size:13px;font-weight:600;color:#374151;">{{ company_name }}</span>
+          </td>
+        </tr>
+        {% endif %}
+        {% if order_date %}
+        <tr>
+          <td colspan="2" style="padding-top:6px;">
+            <span style="font-size:12px;color:#6b7280;">Placed: </span>
+            <span style="font-size:13px;color:#374151;">{{ order_date }}</span>
+          </td>
+        </tr>
+        {% endif %}
+      </table>
+    </td>
+  </tr>
+</table>
+
+<p style="color:#374151;font-size:14px;margin:0 0 24px;text-align:center;">Our team will review and confirm your order shortly. You will receive an email when your order is confirmed.</p>
+
+{% if order_url %}
+<p style="text-align:center;margin:0;">
+  <a href="{{ order_url }}" style="display:inline-block;background:#E8242A;color:#ffffff;padding:13px 36px;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:.3px;">View Your Order &rarr;</a>
+</p>
+{% endif %}
+{% endblock %}

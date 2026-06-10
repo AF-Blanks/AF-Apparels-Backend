@@ -50,22 +50,18 @@ def send_order_confirmation_email(self, order_id: str) -> dict:
                 order_url = f"{settings.FRONTEND_URL}/account/orders/{order_id}"
                 sent = 0
                 for contact in contacts:
-                    ok = svc.send_raw(
+                    ok = svc.send_from_file(
+                        template_name="order_received.html",
                         to_email=contact.email,
-                        subject=f"Order Confirmation – {order.order_number}",
-                        body_html=f"""
-                        <h2>Thank you for your order!</h2>
-                        <p>Hi {contact.first_name},</p>
-                        <p>Your order <strong>{order.order_number}</strong> has been received.</p>
-                        <table style="border-collapse:collapse;margin:16px 0">
-                          <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Company</td><td><strong>{company_name}</strong></td></tr>
-                          <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Order #</td><td><strong>{order.order_number}</strong></td></tr>
-                          <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Date</td><td>{order.created_at.strftime('%B %d, %Y')}</td></tr>
-                          <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Total</td><td><strong>${float(order.total):.2f}</strong></td></tr>
-                        </table>
-                        <p><a href="{order_url}" style="background:#1d4ed8;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block">View Order</a></p>
-                        <p style="color:#6b7280;font-size:13px">AF Apparels Wholesale</p>
-                        """,
+                        subject=f"Order Received — {order.order_number} | AF Apparels",
+                        variables={
+                            "contact_name": contact.first_name or "Valued Customer",
+                            "order_number": order.order_number,
+                            "company_name": company_name,
+                            "order_date": order.created_at.strftime("%B %d, %Y"),
+                            "order_total": f"${float(order.total):.2f}",
+                            "order_url": order_url,
+                        },
                     )
                     if ok:
                         sent += 1
@@ -106,31 +102,22 @@ def send_order_shipped_email(self, order_id: str, tracking_number: str = "") -> 
                 tracking = tracking_number or order.tracking_number or ""
                 carrier = order.carrier or ""
                 order_url = f"{settings.FRONTEND_URL}/account/orders/{order_id}"
-                tracking_html = ""
-                if tracking:
-                    tracking_html = f"""
-                    <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Tracking #</td><td><strong>{tracking}</strong></td></tr>
-                    {"<tr><td style='padding:4px 12px 4px 0;color:#6b7280'>Carrier</td><td>" + carrier + "</td></tr>" if carrier else ""}
-                    """
 
                 svc = EmailService(db)
                 sent = 0
                 for contact in contacts:
-                    ok = svc.send_raw(
+                    ok = svc.send_from_file(
+                        template_name="order_shipped.html",
                         to_email=contact.email,
-                        subject=f"Your Order {order.order_number} Has Shipped!",
-                        body_html=f"""
-                        <h2>Your Order Has Shipped!</h2>
-                        <p>Hi {contact.first_name},</p>
-                        <p>Order <strong>{order.order_number}</strong> is on its way.</p>
-                        <table style="border-collapse:collapse;margin:16px 0">
-                          <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Order #</td><td><strong>{order.order_number}</strong></td></tr>
-                          {tracking_html}
-                          <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Total</td><td>${float(order.total):.2f}</td></tr>
-                        </table>
-                        <p><a href="{order_url}" style="background:#1d4ed8;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block">View Order</a></p>
-                        <p style="color:#6b7280;font-size:13px">AF Apparels Wholesale</p>
-                        """,
+                        subject=f"Your Order {order.order_number} Has Shipped! | AF Apparels",
+                        variables={
+                            "contact_name": contact.first_name or "Valued Customer",
+                            "order_number": order.order_number,
+                            "order_total": f"${float(order.total):.2f}",
+                            "tracking_number": tracking,
+                            "carrier": carrier,
+                            "order_url": order_url,
+                        },
                     )
                     if ok:
                         sent += 1
@@ -390,23 +377,21 @@ def send_order_cancelled_email(self, order_id: str, reason: str = "") -> dict:
                 if not contacts:
                     return {"status": "skipped", "reason": "no_notify_contacts"}
 
-                reason_html = f"<p><strong>Reason:</strong> {reason}</p>" if reason else ""
                 order_url = f"{settings.FRONTEND_URL}/account/orders/{order_id}"
                 svc = EmailService(db)
                 sent = 0
                 for contact in contacts:
-                    ok = svc.send_raw(
+                    ok = svc.send_from_file(
+                        template_name="order_cancelled.html",
                         to_email=contact.email,
-                        subject=f"Order {order.order_number} Cancelled",
-                        body_html=f"""
-                        <h2>Order Cancelled</h2>
-                        <p>Hi {contact.first_name},</p>
-                        <p>Order <strong>{order.order_number}</strong> has been cancelled.</p>
-                        {reason_html}
-                        <p>If you have any questions, please reply to this email or contact your account manager.</p>
-                        <p><a href="{order_url}" style="background:#1d4ed8;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block">View Order</a></p>
-                        <p style="color:#6b7280;font-size:13px">AF Apparels Wholesale</p>
-                        """,
+                        subject=f"Order {order.order_number} Cancelled | AF Apparels",
+                        variables={
+                            "contact_name": contact.first_name or "Valued Customer",
+                            "order_number": order.order_number,
+                            "order_total": f"${float(order.total):.2f}",
+                            "reason": reason,
+                            "order_url": order_url,
+                        },
                     )
                     if ok:
                         sent += 1

@@ -1,0 +1,50 @@
+{% extends "_base.html" %}
+{% block title %}Order Ready — {{ order_number }}{% endblock %}
+{% block content %}
+<div style="text-align:center;margin-bottom:28px;">
+  <div style="display:inline-block;background:#d1fae5;color:#065f46;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:5px 16px;border-radius:20px;border:1px solid #6ee7b7;">Ready</div>
+</div>
+<h1 style="color:#1B3A5C;font-size:24px;font-weight:800;margin:0 0 8px;text-align:center;">Your Order is Ready!</h1>
+<p style="color:#374151;font-size:15px;margin:0 0 28px;text-align:center;">Hi {{ contact_name }}, order <strong style="color:#1B3A5C;">{{ order_number }}</strong> has been prepared and is ready for the next step.</p>
+
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#ecfdf5;border-radius:8px;border:1px solid #6ee7b7;margin-bottom:24px;">
+  <tr>
+    <td style="padding:20px 24px;text-align:center;">
+      <div style="font-size:40px;margin-bottom:8px;">&#10003;</div>
+      <div style="font-size:16px;font-weight:700;color:#065f46;">Order Packed &amp; Ready</div>
+      <div style="font-size:13px;color:#047857;margin-top:4px;">All items have been checked and packed</div>
+    </td>
+  </tr>
+</table>
+
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#F9F8F4;border-radius:8px;border:1px solid #e5e7eb;margin-bottom:24px;">
+  <tr>
+    <td style="padding:16px 24px;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td><span style="font-size:12px;color:#6b7280;">Order Number</span></td>
+          <td style="text-align:right;"><span style="font-size:14px;font-weight:700;color:#1B3A5C;">{{ order_number }}</span></td>
+        </tr>
+        {% if order_total %}
+        <tr>
+          <td style="padding-top:6px;"><span style="font-size:12px;color:#6b7280;">Order Total</span></td>
+          <td style="text-align:right;padding-top:6px;"><span style="font-size:14px;font-weight:700;color:#374151;">{{ order_total }}</span></td>
+        </tr>
+        {% endif %}
+        {% if company_name %}
+        <tr>
+          <td style="padding-top:6px;"><span style="font-size:12px;color:#6b7280;">Company</span></td>
+          <td style="text-align:right;padding-top:6px;"><span style="font-size:13px;color:#374151;">{{ company_name }}</span></td>
+        </tr>
+        {% endif %}
+      </table>
+    </td>
+  </tr>
+</table>
+
+{% if order_url %}
+<p style="text-align:center;margin:0;">
+  <a href="{{ order_url }}" style="display:inline-block;background:#059669;color:#ffffff;padding:13px 36px;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:.3px;">View Order &rarr;</a>
+</p>
+{% endif %}
+{% endblock %}
