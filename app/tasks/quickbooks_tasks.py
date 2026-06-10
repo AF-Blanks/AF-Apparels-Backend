@@ -554,7 +554,8 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
 
     async def _run_all():
         from app.core.database import AsyncSessionLocal
-        from app.models.purchase_order import PurchaseOrder, POReceiving, POLineItem  # noqa: F401
+        from app.models.purchase_order import PurchaseOrder, POReceiving, POLineItem
+        from app.models.product import ProductVariant, Product  # noqa: F401
         from app.services.quickbooks_service import QuickBooksService
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
@@ -565,7 +566,9 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
                     select(PurchaseOrder)
                     .options(
                         selectinload(PurchaseOrder.manufacturer),
-                        selectinload(PurchaseOrder.line_items),
+                        selectinload(PurchaseOrder.line_items)
+                            .selectinload(POLineItem.variant)
+                            .selectinload(ProductVariant.product),
                     )
                     .where(PurchaseOrder.id == uuid.UUID(po_id))
                 )).scalar_one_or_none()
@@ -595,15 +598,28 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
                 bill_lines = []
                 for ri in receiving.items:
                     li = li_map.get(str(ri.po_line_item_id)) if ri.po_line_item_id else None
-                    desc = (
-                        (li.new_product_name if li else None)
-                        or (f"SKU {li.new_product_sku}" if li and li.new_product_sku else None)
-                        or "Item"
-                    )
+                    variant = li.variant if li else None
+
+                    if variant:
+                        product_name = (
+                            variant.product.name if variant.product else (li.new_product_name or "Item")
+                        )
+                        detail = "/".join(filter(None, [variant.color, variant.size]))
+                        desc = f"{product_name} — {detail}" if detail else product_name
+                        qb_item_id = variant.qb_item_id
+                    elif li and li.new_product_name:
+                        detail = "/".join(filter(None, [li.new_product_color, li.new_product_size]))
+                        desc = f"{li.new_product_name} — {detail}" if detail else li.new_product_name
+                        qb_item_id = None
+                    else:
+                        desc = f"SKU {li.new_product_sku}" if li and li.new_product_sku else "Item"
+                        qb_item_id = None
+
                     bill_lines.append({
                         "description": desc,
                         "qty": ri.qty_received,
                         "unit_price": float(ri.unit_cost_actual),
+                        "qb_item_id": qb_item_id,
                     })
 
                 if not bill_lines:

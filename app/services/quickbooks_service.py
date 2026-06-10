@@ -704,17 +704,35 @@ class QuickBooksService:
         vendor_id = await self.find_or_create_vendor(vendor_name)
         qb_lines = []
         for i, item in enumerate(line_items):
-            amount = round(item["qty"] * item["unit_price"], 2)
-            qb_lines.append({
-                "Id": str(i + 1),
-                "LineNum": i + 1,
-                "Amount": amount,
-                "DetailType": "AccountBasedExpenseLineDetail",
-                "Description": item.get("description", ""),
-                "AccountBasedExpenseLineDetail": {
-                    "AccountRef": {"value": "1", "name": "Cost of Goods Sold"},
-                },
-            })
+            amount = round(float(item["qty"]) * float(item["unit_price"]), 2)
+            qb_item_id = item.get("qb_item_id")
+            if qb_item_id:
+                # Item details tab in QB — shows product name, qty, unit cost
+                qb_lines.append({
+                    "Id": str(i + 1),
+                    "LineNum": i + 1,
+                    "Amount": amount,
+                    "Description": item.get("description", ""),
+                    "DetailType": "ItemBasedExpenseLineDetail",
+                    "ItemBasedExpenseLineDetail": {
+                        "ItemRef": {"value": str(qb_item_id)},
+                        "Qty": float(item["qty"]),
+                        "UnitPrice": float(item["unit_price"]),
+                    },
+                })
+            else:
+                # Category details tab fallback — used for new/unsynced products
+                qb_lines.append({
+                    "Id": str(i + 1),
+                    "LineNum": i + 1,
+                    "Amount": amount,
+                    "Description": item.get("description", "Item"),
+                    "DetailType": "AccountBasedExpenseLineDetail",
+                    "AccountBasedExpenseLineDetail": {
+                        "AccountRef": {"value": "1", "name": "Cost of Goods Sold"},
+                        "BillableStatus": "NotBillable",
+                    },
+                })
         bill_data = {
             "VendorRef": {"value": vendor_id},
             "Line": qb_lines,
