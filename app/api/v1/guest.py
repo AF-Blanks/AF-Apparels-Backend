@@ -213,7 +213,11 @@ async def guest_checkout(
 
         qb_charge_id = charge_resp.get("id")
         qb_payment_status = charge_resp.get("status", "UNKNOWN")
-        _payment_status = "paid" if qb_payment_status == "CAPTURED" else "pending"
+        # Card charge succeeded (RuntimeError raised on any failure above),
+        # so the order is paid regardless of the specific status string QB returns.
+        # This mirrors order_service.create_order which uses payment_method, not
+        # qb_payment_status, to determine payment_status.
+        _payment_status = "paid"
 
     # 4. Generate order number — delegate to the single shared generator so
     #    retail/guest and wholesale order numbers form one sequential series.
@@ -376,9 +380,10 @@ async def guest_checkout(
     # ── QB invoice sync ───────────────────────────────────────────────────────
     try:
         from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
-        sync_order_invoice_to_qb.delay(str(order.id))
+        sync_order_invoice_to_qb.apply_async(args=[str(order.id)], countdown=5)
+        logger.info("QB invoice sync queued for guest order %s", order.order_number)
     except Exception as _exc:
-        logger.warning("QB invoice sync dispatch failed: %s", _exc)
+        logger.warning("QB invoice sync dispatch failed for %s: %s", order.order_number, _exc)
 
     return GuestOrderOut(
         order_id=str(order.id),

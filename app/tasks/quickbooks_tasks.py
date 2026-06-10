@@ -101,13 +101,23 @@ def sync_customer_to_qb(self, company_id: str):
                     return None
 
                 # ── 2. Already synced? Return immediately ─────────────────────
-                if company.qb_customer_id:
+                # Guard: valid QB Accounting IDs are small integers (no hyphens).
+                # A UUID-shaped value means QB Payments wrote the company UUID
+                # here by mistake — treat it as not-yet-synced and proceed.
+                _existing_qb_id = company.qb_customer_id or ""
+                if _existing_qb_id and "-" not in _existing_qb_id:
                     logger.info(
                         "sync_customer_to_qb — already synced, skipping:"
                         " company=%s qb_customer_id=%s",
-                        company_id, company.qb_customer_id,
+                        company_id, _existing_qb_id,
                     )
-                    return {"status": "success", "qb_customer_id": company.qb_customer_id}
+                    return {"status": "success", "qb_customer_id": _existing_qb_id}
+                if _existing_qb_id:
+                    logger.warning(
+                        "sync_customer_to_qb — qb_customer_id looks like a UUID (%s),"
+                        " re-syncing company=%s",
+                        _existing_qb_id, company_id,
+                    )
 
                 # ── 3. Snapshot data (lock still held) ───────────────────────
                 cu = (await session.execute(
@@ -330,26 +340,48 @@ def sync_order_invoice_to_qb(self, order_id: str):
                     raise  # re-raise so task retries; create_invoice is now idempotent
 
             # ── 5b. If order is paid (card/ACH), record QB payment on the invoice ──
-            if order_data.get("payment_status") == "paid" and order_data.get("payment_method") != "net_30":
+            # Applies to all non-net_30 paid orders (card, qb_payments, ach, bank_transfer).
+            # payment_method="" (None column) also passes != "net_30" so older orders are covered.
+            _pmt_method = order_data.get("payment_method") or ""
+            _is_paid = order_data.get("payment_status") == "paid"
+            _is_net30 = _pmt_method.lower() in ("net_30", "net30")
+            if _is_paid and not _is_net30:
+                logger.info(
+                    "sync_order_invoice_to_qb: recording QB payment — order=%s invoice=%s"
+                    " method=%s total=%.2f",
+                    order_data["order_number"], qb_invoice_id,
+                    _pmt_method or "card", order_data["total"],
+                )
                 try:
                     payment = await asyncio.to_thread(
                         svc.create_payment_for_invoice,
                         qb_invoice_id,
                         order_data["total"],
-                        order_data.get("payment_method", "card"),
+                        _pmt_method or "card",
                         order_data.get("created_at_date"),
                     )
                     logger.info(
-                        "QB payment created for invoice %s (order %s) — payment_id=%s",
+                        "QB payment created — invoice=%s order=%s payment_id=%s",
                         qb_invoice_id,
                         order_data["order_number"],
                         payment.get("Id"),
                     )
                 except Exception as _pay_exc:
                     logger.error(
-                        "QB create_payment_for_invoice failed for order %s invoice %s: %s",
-                        order_data["order_number"], qb_invoice_id, _pay_exc, exc_info=True,
+                        "QB create_payment_for_invoice FAILED — order=%s invoice=%s"
+                        " method=%s total=%.2f error=%s",
+                        order_data["order_number"], qb_invoice_id,
+                        _pmt_method, order_data["total"], _pay_exc,
+                        exc_info=True,
                     )
+            else:
+                logger.info(
+                    "sync_order_invoice_to_qb: skipping QB payment — order=%s"
+                    " payment_status=%s method=%s",
+                    order_data["order_number"],
+                    order_data.get("payment_status"),
+                    _pmt_method,
+                )
 
             # ── 6. Log success ────────────────────────────────────────────────
             await _log_attempt("order", order_id, "success", None, qb_entity_id=qb_invoice_id)
