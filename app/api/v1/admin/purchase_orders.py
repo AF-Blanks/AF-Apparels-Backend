@@ -354,6 +354,7 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
     await db.flush()
 
     total_received_this_batch = 0.0
+    variants_received: list[UUID] = []  # collect for QB inventory sync after commit
     for item_data in data.items:
         receiving_item = POReceivingItem(
             receiving_id=receiving.id,
@@ -399,6 +400,24 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
                         ))
                     else:
                         logger.warning("No active warehouse found; skipping inventory update for variant %s", line_item.product_variant_id)
+
+                # Update cost_per_item when actual cost differs from stored cost
+                if item_data.unit_cost_actual > 0:
+                    variant_obj = (await db.execute(
+                        select(ProductVariant).where(ProductVariant.id == line_item.product_variant_id)
+                    )).scalar_one_or_none()
+                    if variant_obj:
+                        old_cost = float(variant_obj.cost_per_item or 0)
+                        if abs(item_data.unit_cost_actual - old_cost) > 0.001:
+                            variant_obj.cost_per_item = item_data.unit_cost_actual
+                            logger.info(
+                                "cost_per_item updated: %s $%.2f → $%.2f",
+                                variant_obj.sku, old_cost, item_data.unit_cost_actual,
+                            )
+
+                if line_item.product_variant_id not in variants_received:
+                    variants_received.append(line_item.product_variant_id)
+
             except Exception as e:
                 logger.error("Stock update error for variant %s: %s", line_item.product_variant_id, e, exc_info=True)
                 raise
@@ -428,6 +447,16 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
         logger.info("Dispatched sync_po_receipt_to_qb po=%s receiving=%s", po_id, receiving.id)
     except Exception as _e:
         logger.warning("Could not dispatch QB sync task: %s", _e)
+
+    # Dispatch QB inventory+cost sync for each received variant (countdown=5s so cost_per_item commit lands first)
+    if variants_received:
+        try:
+            from app.tasks.quickbooks_tasks import sync_inventory_to_qb
+            for vid in variants_received:
+                sync_inventory_to_qb.apply_async(args=[str(vid)], countdown=5)
+            logger.info("Dispatched sync_inventory_to_qb for %d variants", len(variants_received))
+        except Exception as _e:
+            logger.warning("Could not dispatch QB inventory sync tasks: %s", _e)
 
     return {"success": True, "receiving_id": str(receiving.id)}
 
