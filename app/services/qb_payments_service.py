@@ -32,18 +32,23 @@ class QBPaymentsService:
     """Stateless service — reuses OAuth tokens from QuickBooksService."""
 
     def __init__(self):
-        self._qb = QuickBooksService()
+        # initialize_sync loads the latest tokens from DB via psycopg2 so we
+        # don't use stale env-var tokens (QB refreshes write to DB, not env vars).
+        self._qb = QuickBooksService().initialize_sync()
         self._base_url: str = QB_PAYMENTS_BASE[settings.QB_ENVIRONMENT]
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _headers(self) -> dict[str, str]:
+        import uuid as _uuid
         token = self._qb.get_access_token()
         return {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "Request-Id": __import__("uuid").uuid4().hex,
+            # QB Payments requires a unique Request-Id on every call.
+            # Repeating or omitting it causes 401 AuthenticationFailed.
+            "Request-Id": str(_uuid.uuid4()),
         }
 
     def _url(self, path: str) -> str:
@@ -62,11 +67,25 @@ class QBPaymentsService:
             raise RuntimeError("QB Payments service unavailable — check network connectivity") from exc
 
         if resp.status_code == 401:
-            self._qb.refresh_token_if_expired()
+            logger.warning(
+                "QB Payments 401 on %s %s — token prefix: %s... | body: %s",
+                method, label,
+                (self._qb._access_token or "")[:20],
+                resp.text[:300],
+            )
+            # Force-refresh regardless of stored expiry — 401 means QB rejected
+            # the token outright (expired, revoked, or missing payments scope).
+            refreshed = self._qb.refresh_token_if_expired()
+            logger.info("QB Payments token force-refresh result: %s", "OK" if refreshed else "FAILED")
             try:
                 resp = httpx.request(method, url, headers=self._headers(), timeout=15, **kwargs)
             except (httpx.ConnectError, httpx.TimeoutException, OSError) as exc:
                 raise RuntimeError("QB Payments service unavailable — check network connectivity") from exc
+            if resp.status_code == 401:
+                logger.error(
+                    "QB Payments 401 persists after token refresh — %s %s | body: %s",
+                    method, label, resp.text[:300],
+                )
 
         try:
             resp.raise_for_status()

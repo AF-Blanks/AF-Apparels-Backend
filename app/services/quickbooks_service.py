@@ -153,6 +153,49 @@ class QuickBooksService:
                 pass
         return self
 
+    def initialize_sync(self) -> "QuickBooksService":
+        """Load live tokens from app_settings DB using psycopg2 (sync).
+
+        Use when initialize() cannot be awaited — e.g., inside a sync __init__.
+        Falls back to env vars on any DB error.
+        """
+        import psycopg2
+        try:
+            conn = psycopg2.connect(settings.sync_db_url)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT key, value FROM app_settings "
+                "WHERE key IN ('qb_access_token','qb_refresh_token',"
+                "              'qb_realm_id','qb_token_expires_at')"
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            db = {row[0]: row[1] for row in rows if row[1]}
+        except Exception as exc:
+            logger.warning("QB initialize_sync DB load failed (%s) — using env vars", exc)
+            return self
+        if db.get("qb_access_token"):
+            self._access_token = db["qb_access_token"]
+        if db.get("qb_refresh_token"):
+            self._refresh_token = db["qb_refresh_token"]
+        if db.get("qb_realm_id"):
+            self._company_id = db["qb_realm_id"]
+        expires_str = db.get("qb_token_expires_at")
+        if expires_str:
+            try:
+                dt = datetime.fromisoformat(expires_str)
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                self._token_expiry = dt
+            except ValueError:
+                pass
+        logger.info(
+            "QB initialize_sync: token loaded from DB — expiry=%s",
+            self._token_expiry,
+        )
+        return self
+
     # ── Token management ──────────────────────────────────────────────────────
 
     def refresh_token_if_expired(self) -> bool:
