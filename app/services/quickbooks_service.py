@@ -21,7 +21,7 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
-# ── DB token helpers (async, called via _run_sync_safe) ──────────────────────
+# ── DB token helpers ─────────────────────────────────────────────────────────
 
 async def _load_tokens_from_db() -> dict[str, str]:
     """Read QB token fields from app_settings. Returns {} if table is empty."""
@@ -38,46 +38,44 @@ async def _load_tokens_from_db() -> dict[str, str]:
         return {}
 
 
-async def _save_tokens_to_db(
+def _save_tokens_to_db_sync(
     access_token: str,
     refresh_token: str,
     expires_at_iso: str,
     realm_id: str | None = None,
 ) -> None:
-    """Upsert QB tokens into app_settings."""
-    from app.core.database import AsyncSessionLocal
-    from sqlalchemy import text
+    """Upsert QB tokens into app_settings using a synchronous psycopg2 connection.
+
+    Safe to call from any context (FastAPI thread, Celery worker, asyncio.to_thread).
+    Avoids asyncpg event-loop binding — psycopg2 has no loop affinity.
+    """
+    import psycopg2
     pairs = [
-        ("qb_access_token",    access_token),
-        ("qb_refresh_token",   refresh_token),
+        ("qb_access_token",     access_token),
+        ("qb_refresh_token",    refresh_token),
         ("qb_token_expires_at", expires_at_iso),
     ]
     if realm_id:
         pairs.append(("qb_realm_id", realm_id))
     try:
-        async with AsyncSessionLocal() as session:
-            for key, value in pairs:
-                await session.execute(text("""
-                    INSERT INTO app_settings (key, value, updated_at)
-                    VALUES (:k, :v, now())
-                    ON CONFLICT (key) DO UPDATE
-                        SET value = EXCLUDED.value, updated_at = now()
-                """), {"k": key, "v": value})
-            await session.commit()
+        conn = psycopg2.connect(settings.sync_db_url)
+        cur = conn.cursor()
+        for key, value in pairs:
+            cur.execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES (%s, %s, now())
+                ON CONFLICT (key) DO UPDATE
+                    SET value = EXCLUDED.value, updated_at = now()
+                """,
+                (key, value),
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("QB tokens saved to DB (sync)")
     except Exception as exc:
-        import logging
-        logging.getLogger(__name__).warning("QB token save to DB failed: %s", exc)
-
-
-def _run_sync_safe(coro) -> Any:
-    """Run an async coroutine from synchronous code safely."""
-    try:
-        loop = asyncio.get_event_loop()
-        if not loop.is_running():
-            return loop.run_until_complete(coro)
-    except RuntimeError:
-        pass
-    return asyncio.run(coro)
+        logger.warning("QB token save to DB failed: %s", exc)
 
 
 class _TokenBucket:
@@ -198,8 +196,8 @@ class QuickBooksService:
             self._refresh_token = new_refresh
             self._token_expiry  = expiry_dt
 
-            # Persist to DB so other workers and restarts pick up the new tokens
-            _run_sync_safe(_save_tokens_to_db(new_access, new_refresh, expires_iso))
+            # Persist to DB — sync write avoids asyncpg event-loop binding issues
+            _save_tokens_to_db_sync(new_access, new_refresh, expires_iso)
             _log.info("QB access token refreshed; expires ~%s", expiry_dt.strftime("%Y-%m-%dT%H:%M"))
             return True
 
