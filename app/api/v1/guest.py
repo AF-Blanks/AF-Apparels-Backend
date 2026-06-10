@@ -189,7 +189,7 @@ async def guest_checkout(
         shipping_cost = payload.shipping_cost
 
     tax_amount_val = payload.tax_amount or Decimal("0")
-    convenience_fee = (subtotal * Decimal("0.03")).quantize(Decimal("0.01")) if payload.payment_method == "card" else Decimal("0.00")
+    convenience_fee = Decimal("0.00")  # Guest/retail orders never incur a convenience fee
     total = subtotal + shipping_cost + tax_amount_val + convenience_fee
 
     # 3. Charge card via QB Payments (skip for ACH — collected manually)

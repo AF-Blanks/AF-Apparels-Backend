@@ -160,6 +160,7 @@ async def _confirm_checkout_inner(
 ):
     company_id = getattr(request.state, "company_id", None)
     user_id = getattr(request.state, "user_id", None)
+    _account_type = getattr(request.state, "account_type", "wholesale")
     if not company_id:
         raise ForbiddenError("Company account required")
 
@@ -238,7 +239,7 @@ async def _confirm_checkout_inner(
             ))
 
         tax_amount_dc = Decimal(str(payload.tax_amount or 0))
-        _convenience_fee_dc = (cart.subtotal * Decimal("0.03")).quantize(Decimal("0.01"))
+        _convenience_fee_dc = (cart.subtotal * Decimal("0.03")).quantize(Decimal("0.01")) if _account_type == "wholesale" else Decimal("0.00")
         total_float = float(cart.subtotal + base_shipping + expedited_surcharge + tax_amount_dc - coupon_discount_amount + _convenience_fee_dc)
 
         qb_pay = QBPaymentsService()
@@ -286,6 +287,7 @@ async def _confirm_checkout_inner(
         qb_payment_status=qb_payment_status,
         coupon_discount_amount=coupon_discount_amount,
         group_id=group_id,
+        is_wholesale=_account_type == "wholesale",
     )
 
     # Record coupon usage after order is created

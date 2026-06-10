@@ -84,6 +84,7 @@ class OrderService:
         qb_payment_status: str | None = None,
         coupon_discount_amount: Decimal = Decimal("0"),
         group_id: str | None = None,
+        is_wholesale: bool = True,
     ) -> Order:
         settings = get_settings()
 
@@ -220,9 +221,9 @@ class OrderService:
 
         tax_amount_val = Decimal(str(confirm.tax_amount or 0))
 
-        # 3% convenience fee for card payments (subtotal only, not shipping/tax)
+        # 3% convenience fee for wholesale card payments only
         _payment_method_for_fee = getattr(confirm, "payment_method", None) or ""
-        if _payment_method_for_fee in ("card", "credit_card", "qb_payments"):
+        if is_wholesale and _payment_method_for_fee in ("card", "credit_card", "qb_payments"):
             convenience_fee = (subtotal * Decimal("0.03")).quantize(Decimal("0.01"))
         else:
             convenience_fee = Decimal("0.00")
