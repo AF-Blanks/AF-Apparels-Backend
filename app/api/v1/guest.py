@@ -263,26 +263,16 @@ async def guest_checkout(
         total=total,
         shipping_method=method,
         shipping_address_snapshot=address_snapshot,
+        shipping_rate_id=payload.shipping_rate_id,
+        carrier=payload.shipping_carrier,
+        courier_service=payload.shipping_service,
     )
     db.add(order)
     await db.flush()
-
-    # Save shipping_rate_id + carrier from customer's selected live Shippo rate
     logger.info(
         "Guest order create - shipping_rate_id: %s, carrier: %s",
-        payload.shipping_rate_id, payload.shipping_carrier,
+        order.shipping_rate_id, order.carrier,
     )
-    if payload.shipping_rate_id:
-        try:
-            await db.execute(
-                _text(
-                    "UPDATE orders SET shipping_rate_id=:rid, carrier=:car, courier_service=:cs WHERE id=:oid"
-                ),
-                {"rid": payload.shipping_rate_id, "car": payload.shipping_carrier,
-                 "cs": payload.shipping_service, "oid": str(order.id)},
-            )
-        except Exception as _exc:
-            logger.warning("Could not save shipping_rate_id on guest order %s: %s", order.id, _exc)
 
     if convenience_fee > 0:
         try:
