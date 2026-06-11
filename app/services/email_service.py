@@ -70,9 +70,12 @@ class EmailService:
             return ""
 
     def _file_template_vars(self, extra: dict) -> dict:
-        """Merge logo_url + frontend_url into a variables dict."""
-        logo_url = getattr(settings, "LOGO_URL", None) or f"{settings.FRONTEND_URL}/Af-apparel%20logo.png"
-        return {"logo_url": logo_url, "frontend_url": settings.FRONTEND_URL, **extra}
+        base = {
+            "logo_url": "https://af-apparel.vercel.app/af-logo.png",
+            "frontend_url": "https://af-apparel.vercel.app",
+        }
+        base.update(extra)
+        return base
 
     def send_from_file(
         self,

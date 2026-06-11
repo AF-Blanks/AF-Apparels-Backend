@@ -766,7 +766,26 @@ async def update_admin_order(
     await db.commit()
 
     if payload.status and payload.status != old_status:
-        await _send_order_status_email(order, payload.status, db)
+        try:
+            from app.tasks.email_tasks import (
+                send_order_confirmed_email,
+                send_order_processing_email,
+                send_ready_for_pickup_email,
+                send_order_delivered_email,
+                send_order_cancelled_email,
+            )
+            _status_task_map = {
+                "confirmed":        send_order_confirmed_email,
+                "processing":       send_order_processing_email,
+                "ready_for_pickup": send_ready_for_pickup_email,
+                "delivered":        send_order_delivered_email,
+                "cancelled":        send_order_cancelled_email,
+            }
+            _task = _status_task_map.get(payload.status)
+            if _task:
+                _task.delay(str(order.id))
+        except Exception as _e:
+            logger.warning("Status email dispatch failed: %s", _e)
 
         # Auto-send invoice when a draft/pending order is confirmed
         if payload.status == "confirmed" and old_status == "pending":
@@ -841,7 +860,26 @@ async def update_order_status(
     await db.commit()
 
     if payload.status != old_status:
-        await _send_order_status_email(order, payload.status, db)
+        try:
+            from app.tasks.email_tasks import (
+                send_order_confirmed_email,
+                send_order_processing_email,
+                send_ready_for_pickup_email,
+                send_order_delivered_email,
+                send_order_cancelled_email,
+            )
+            _status_task_map = {
+                "confirmed":        send_order_confirmed_email,
+                "processing":       send_order_processing_email,
+                "ready_for_pickup": send_ready_for_pickup_email,
+                "delivered":        send_order_delivered_email,
+                "cancelled":        send_order_cancelled_email,
+            }
+            _task = _status_task_map.get(payload.status)
+            if _task:
+                _task.delay(str(order.id))
+        except Exception as _e:
+            logger.warning("Status email dispatch failed: %s", _e)
 
     return {"success": True, "status": order.status}
 
@@ -931,7 +969,11 @@ async def generate_shipping_label(
         )
 
         await db.commit()
-        await _send_order_status_email(order, "shipped", db)
+        try:
+            from app.tasks.email_tasks import send_order_shipped_email as _se
+            _se.delay(str(order.id), order.tracking_number or "")
+        except Exception as _e:
+            logger.warning("Shipped email dispatch failed: %s", _e)
 
     return result
 
@@ -1130,7 +1172,11 @@ async def generate_label_manual(
         )
 
         await db.commit()
-        await _send_order_status_email(order, "shipped", db)
+        try:
+            from app.tasks.email_tasks import send_order_shipped_email as _se
+            _se.delay(str(order.id), order.tracking_number or "")
+        except Exception as _e:
+            logger.warning("Shipped email dispatch failed: %s", _e)
 
     return result
 
@@ -1149,7 +1195,11 @@ async def cancel_admin_order(
         order.notes = f"Cancelled: {payload.reason}"
     await db.commit()
 
-    await _send_order_status_email(order, "cancelled", db)
+    try:
+        from app.tasks.email_tasks import send_order_cancelled_email as _ce
+        _ce.delay(str(order.id), payload.reason or "")
+    except Exception as _e:
+        logger.warning("Cancelled email dispatch failed: %s", _e)
 
     return {"message": "Order cancelled"}
 
