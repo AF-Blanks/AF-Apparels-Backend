@@ -1,59 +1,19 @@
 {% extends "_base.html" %}
-{% block title %}Order Processing — {{ order_number }}{% endblock %}
+{% block title %}Order Processing - {{ order_number }}{% endblock %}
 {% block content %}
-<div style="text-align:center;margin-bottom:28px;">
-  <div style="display:inline-block;background:#fffbeb;color:#92400e;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:5px 16px;border-radius:20px;border:1px solid #fde68a;">Processing</div>
-</div>
-<h1 style="color:#1B3A5C;font-size:24px;font-weight:800;margin:0 0 8px;text-align:center;">We&#39;re Processing Your Order</h1>
-<p style="color:#374151;font-size:15px;margin:0 0 28px;text-align:center;">Hi {{ contact_name }}, your order <strong style="color:#1B3A5C;">{{ order_number }}</strong> is currently being prepared by our team.</p>
-
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#fffbeb;border-radius:8px;border:1px solid #fde68a;margin-bottom:24px;">
-  <tr>
-    <td style="padding:20px 24px;">
-      <table width="100%" cellpadding="0" cellspacing="0">
-        <tr>
-          <td>
-            <div style="font-size:13px;color:#92400e;font-weight:600;">&#9201; What happens next?</div>
-            <ul style="margin:8px 0 0;padding-left:20px;color:#78350f;font-size:13px;line-height:1.7;">
-              <li>Our warehouse team is picking and packing your items</li>
-              <li>Quality checks are performed on all garments</li>
-              <li>You will be notified when your order ships</li>
-            </ul>
-          </td>
-        </tr>
-      </table>
-    </td>
-  </tr>
+<h2 style="color:#1c3557;font-size:20px;font-weight:700;margin:0 0 6px;">Order Processing</h2>
+<p style="color:#1c3557;font-size:14px;margin:0 0 20px;">Hi {{ contact_name }}, your order is currently being processed.</p>
+<p style="color:#374151;font-size:14px;line-height:1.6;margin:0 0 24px;">Your order is currently being processed by our team. We are carefully picking, packing, and quality-checking your items to ensure everything meets our standards.</p>
+<p style="font-size:12px;font-weight:700;color:#374151;margin:0 0 8px;text-transform:uppercase;letter-spacing:.08em;">Order Details</p>
+<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-bottom:28px;border:1px solid #d1d5db;">
+  <tr><td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;width:38%;border-bottom:1px solid #2d4a6b;">Order Number</td><td style="padding:10px 16px;font-size:13px;color:#1c3557;font-weight:700;background:#ffffff;border-bottom:1px solid #e5e7eb;">#{{ order_number }}</td></tr>
+  <tr><td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;border-bottom:1px solid #2d4a6b;">Processing Started</td><td style="padding:10px 16px;font-size:13px;color:#374151;background:#ffffff;border-bottom:1px solid #e5e7eb;">{{ order_date }}</td></tr>
+  {% if items_summary %}<tr><td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;border-bottom:1px solid #2d4a6b;">Items</td><td style="padding:10px 16px;font-size:13px;color:#374151;background:#ffffff;border-bottom:1px solid #e5e7eb;">{{ items_summary }}</td></tr>{% endif %}
+  <tr><td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;{% if company_name %}border-bottom:1px solid #2d4a6b;{% endif %}">Total Amount</td><td style="padding:10px 16px;font-size:13px;color:#374151;font-weight:700;background:#ffffff;{% if company_name %}border-bottom:1px solid #e5e7eb;{% endif %}">{{ order_total }}</td></tr>
+  {% if company_name %}<tr><td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;">Company</td><td style="padding:10px 16px;font-size:13px;color:#374151;background:#ffffff;">{{ company_name }}</td></tr>{% endif %}
 </table>
-
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#F9F8F4;border-radius:8px;border:1px solid #e5e7eb;margin-bottom:24px;">
-  <tr>
-    <td style="padding:16px 24px;">
-      <table width="100%" cellpadding="0" cellspacing="0">
-        <tr>
-          <td><span style="font-size:12px;color:#6b7280;">Order Number</span></td>
-          <td style="text-align:right;"><span style="font-size:14px;font-weight:700;color:#1B3A5C;">{{ order_number }}</span></td>
-        </tr>
-        {% if order_total %}
-        <tr>
-          <td style="padding-top:6px;"><span style="font-size:12px;color:#6b7280;">Order Total</span></td>
-          <td style="text-align:right;padding-top:6px;"><span style="font-size:14px;font-weight:700;color:#374151;">{{ order_total }}</span></td>
-        </tr>
-        {% endif %}
-        {% if company_name %}
-        <tr>
-          <td style="padding-top:6px;"><span style="font-size:12px;color:#6b7280;">Company</span></td>
-          <td style="text-align:right;padding-top:6px;"><span style="font-size:13px;color:#374151;">{{ company_name }}</span></td>
-        </tr>
-        {% endif %}
-      </table>
-    </td>
-  </tr>
-</table>
-
-{% if order_url %}
-<p style="text-align:center;margin:0;">
-  <a href="{{ order_url }}" style="display:inline-block;background:#D97706;color:#ffffff;padding:13px 36px;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:.3px;">Track Your Order &rarr;</a>
-</p>
-{% endif %}
+<p style="color:#374151;font-size:14px;line-height:1.6;margin:0 0 24px;">Please note that processing times may vary slightly depending on the size of your order. We will send you an update as soon as your order is ready.</p>
+<p style="color:#374151;font-size:14px;margin:0 0 2px;">Warm regards,</p>
+<p style="color:#1c3557;font-size:14px;font-weight:700;margin:0 0 28px;">The AF Apparels Wholesale Team</p>
+{% if order_url %}<p style="text-align:center;margin:0;"><a href="{{ order_url }}" style="display:inline-block;background:#E8242A;color:#ffffff;padding:13px 36px;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:.3px;">View Order &rarr;</a></p>{% endif %}
 {% endblock %}
