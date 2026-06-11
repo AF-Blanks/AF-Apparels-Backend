@@ -301,6 +301,7 @@ class QuickBooksService:
         email: str,
         phone: str | None = None,
         ref_id: str | None = None,
+        bill_addr: dict | None = None,
     ) -> str:
         """Create or find a QB Customer. Returns QB customer Id."""
         # Check for existing by display name to avoid duplicates
@@ -322,6 +323,9 @@ class QuickBooksService:
             payload["PrimaryPhone"] = {"FreeFormNumber": phone}
         if ref_id:
             payload["Notes"] = f"AF Apparels Company ID: {ref_id}"
+        if bill_addr:
+            payload["BillAddr"] = bill_addr
+            payload["ShipAddr"] = bill_addr
 
         resp = self._request("POST", "customer", json={"DisplayName": company_name, **payload})
         return str(resp["Customer"]["Id"])
@@ -424,6 +428,8 @@ class QuickBooksService:
         unit_price: float,
         cost: float | None,
         qty_on_hand: int = 0,
+        description: str = "",
+        purchase_desc: str = "",
     ) -> str:
         """Find a QB Inventory Item by SKU or create one. Returns QB item Id."""
         from datetime import date
@@ -456,6 +462,11 @@ class QuickBooksService:
         }
         if cost is not None:
             payload["PurchaseCost"] = cost
+        if description:
+            payload["Description"] = description[:4000]
+            payload["SalesDesc"]   = description[:4000]
+        if purchase_desc:
+            payload["PurchaseDesc"] = purchase_desc[:4000]
 
         import json as _json
         logger.info(

@@ -136,12 +136,30 @@ def sync_customer_to_qb(self, company_id: str):
                     else f"noreply+{company_id[:8]}@afapparels.com"
                 )
                 name, ref = company.name, str(company.id)
+                phone = company.phone or None
+
+                # Build QB billing/shipping address from company registration fields
+                bill_addr: dict | None = None
+                if company.address_line1:
+                    _addr: dict[str, str] = {"Line1": company.address_line1}
+                    if company.address_line2:
+                        _addr["Line2"] = company.address_line2
+                    if company.city:
+                        _addr["City"] = company.city
+                    if company.state_province:
+                        _addr["CountrySubDivisionCode"] = company.state_province
+                    if company.postal_code:
+                        _addr["PostalCode"] = company.postal_code
+                    _addr["Country"] = company.country or "US"
+                    bill_addr = _addr
 
                 # ── 4. QB API call (session + lock still held) ────────────────
                 # create_customer already does find-or-create by DisplayName,
                 # so this is idempotent even without the DB lock.
                 svc = await QuickBooksService().initialize()
-                qb_id = await asyncio.to_thread(svc.create_customer, name, email, ref_id=ref)
+                qb_id = await asyncio.to_thread(
+                    svc.create_customer, name, email, phone, ref_id=ref, bill_addr=bill_addr,
+                )
                 logger.info("sync_customer_to_qb QB customer ready — qb_id=%s", qb_id)
 
                 # ── 5. Save in the SAME session and commit atomically ─────────
@@ -409,7 +427,7 @@ def sync_variant_to_qb(self, variant_id: str):
 
     async def _run_all():
         from app.core.database import AsyncSessionLocal
-        from app.models.product import ProductVariant
+        from app.models.product import ProductVariant, Product, ProductCategory
         from app.models.inventory import InventoryRecord
         from app.services.quickbooks_service import QuickBooksService
         from sqlalchemy import select, func
@@ -424,7 +442,13 @@ def sync_variant_to_qb(self, variant_id: str):
                 # ── 1. Lock the row ───────────────────────────────────────────
                 variant = (await session.execute(
                     select(ProductVariant)
-                    .options(selectinload(ProductVariant.product))
+                    .options(
+                        selectinload(ProductVariant.product)
+                            .selectinload(Product.images),
+                        selectinload(ProductVariant.product)
+                            .selectinload(Product.category_links)
+                            .selectinload(ProductCategory.category),
+                    )
                     .where(ProductVariant.id == uuid.UUID(variant_id))
                     .with_for_update()
                 )).scalar_one_or_none()
@@ -448,16 +472,30 @@ def sync_variant_to_qb(self, variant_id: str):
                     .where(InventoryRecord.variant_id == uuid.UUID(variant_id))
                 )).scalar() or 0)
 
-                product_name = variant.product.name if variant.product else "Product"
+                product = variant.product
+                product_name = product.name if product else "Product"
                 sku = variant.sku
                 item_name = f"{product_name} - {sku}"
                 unit_price = float(variant.retail_price)
                 cost = float(variant.cost_per_item) if variant.cost_per_item else None
 
+                # Build QB item description: category name + primary image URL
+                categories = product.categories if product else []
+                category_name = categories[0].name if categories else ""
+                primary_img = product.primary_image if product else None
+                image_url = primary_img.url_medium if primary_img else ""
+                desc_parts = []
+                if category_name:
+                    desc_parts.append(f"Category: {category_name}")
+                if image_url:
+                    desc_parts.append(f"Image: {image_url}")
+                description = " | ".join(desc_parts)
+
                 # ── 4. QB API call (session stays open, lock held throughout) ─
                 svc = await QuickBooksService().initialize()
                 qb_item_id = await asyncio.to_thread(
                     svc.find_or_create_item, sku, item_name, unit_price, cost, total_stock,
+                    description, description,
                 )
                 logger.info(
                     "sync_variant_to_qb QB item ready — variant=%s qb_item_id=%s",
