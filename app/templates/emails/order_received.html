@@ -1,52 +1,56 @@
 {% extends "_base.html" %}
 {% block title %}Order Received — {{ order_number }}{% endblock %}
 {% block content %}
-<div style="text-align:center;margin-bottom:28px;">
-  <div style="display:inline-block;background:#EBF4FF;color:#1B3A5C;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:5px 16px;border-radius:20px;border:1px solid #bfdbfe;">Order Received</div>
-</div>
-<h1 style="color:#1B3A5C;font-size:24px;font-weight:800;margin:0 0 8px;text-align:center;">Thank You for Your Order!</h1>
-<p style="color:#374151;font-size:15px;margin:0 0 28px;text-align:center;">Hi {{ contact_name }}, your order has been received and is now being reviewed.</p>
+<h2 style="color:#1c3557;font-size:20px;font-weight:700;margin:0 0 6px;">Order Received!</h2>
+<p style="color:#1c3557;font-size:14px;margin:0 0 20px;">Hi {{ contact_name }}, your order has been received and is now being processed.</p>
 
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#F9F8F4;border-radius:8px;border:1px solid #e5e7eb;margin-bottom:24px;">
+<p style="color:#374151;font-size:14px;line-height:1.6;margin:0 0 24px;">Thank you for your order! We've successfully received it and it's now in our system. You'll receive another update once your order is confirmed and being prepared.</p>
+
+<!-- Order Summary Table -->
+<p style="font-size:12px;font-weight:700;color:#374151;margin:0 0 8px;text-transform:uppercase;letter-spacing:.08em;">Order Summary</p>
+<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-bottom:28px;border:1px solid #d1d5db;">
   <tr>
-    <td style="padding:20px 24px;">
-      <table width="100%" cellpadding="0" cellspacing="0">
-        <tr>
-          <td style="vertical-align:top;">
-            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#6b7280;margin-bottom:3px;">Order Number</div>
-            <div style="font-size:22px;font-weight:800;color:#1B3A5C;">{{ order_number }}</div>
-          </td>
-          <td style="text-align:right;vertical-align:top;">
-            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#6b7280;margin-bottom:3px;">Order Total</div>
-            <div style="font-size:22px;font-weight:800;color:#059669;">{{ order_total }}</div>
-          </td>
-        </tr>
-        {% if company_name %}
-        <tr>
-          <td colspan="2" style="padding-top:12px;border-top:1px solid #e5e7eb;margin-top:12px;">
-            <span style="font-size:12px;color:#6b7280;">Company: </span>
-            <span style="font-size:13px;font-weight:600;color:#374151;">{{ company_name }}</span>
-          </td>
-        </tr>
-        {% endif %}
-        {% if order_date %}
-        <tr>
-          <td colspan="2" style="padding-top:6px;">
-            <span style="font-size:12px;color:#6b7280;">Placed: </span>
-            <span style="font-size:13px;color:#374151;">{{ order_date }}</span>
-          </td>
-        </tr>
-        {% endif %}
-      </table>
-    </td>
+    <td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;width:38%;border-bottom:1px solid #2d4a6b;">Order Number</td>
+    <td style="padding:10px 16px;font-size:13px;color:#1c3557;font-weight:700;background:#ffffff;border-bottom:1px solid #e5e7eb;">#{{ order_number }}</td>
   </tr>
+  <tr>
+    <td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;border-bottom:1px solid #2d4a6b;">Order Date</td>
+    <td style="padding:10px 16px;font-size:13px;color:#374151;background:#ffffff;border-bottom:1px solid #e5e7eb;">{{ order_date }}</td>
+  </tr>
+  {% if items_ordered %}
+  <tr>
+    <td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;border-bottom:1px solid #2d4a6b;">Items Ordered</td>
+    <td style="padding:10px 16px;font-size:13px;color:#374151;background:#ffffff;border-bottom:1px solid #e5e7eb;">{{ items_ordered }}</td>
+  </tr>
+  {% endif %}
+  <tr>
+    <td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;border-bottom:1px solid #2d4a6b;">Total Amount</td>
+    <td style="padding:10px 16px;font-size:13px;color:#374151;font-weight:700;background:#ffffff;border-bottom:1px solid #e5e7eb;">{{ order_total }}</td>
+  </tr>
+  {% if payment_method %}
+  <tr>
+    <td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;border-bottom:1px solid #2d4a6b;">Payment Method</td>
+    <td style="padding:10px 16px;font-size:13px;color:#374151;background:#ffffff;border-bottom:1px solid #e5e7eb;">{{ payment_method }}</td>
+  </tr>
+  {% endif %}
+  {% if shipping_address %}
+  <tr>
+    <td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;">Shipping Address</td>
+    <td style="padding:10px 16px;font-size:13px;color:#374151;background:#ffffff;">{{ shipping_address }}</td>
+  </tr>
+  {% endif %}
 </table>
 
-<p style="color:#374151;font-size:14px;margin:0 0 24px;text-align:center;">Our team will review and confirm your order shortly. You will receive an email when your order is confirmed.</p>
+<!-- What happens next -->
+<p style="font-size:13px;font-weight:700;color:#374151;margin:0 0 6px;">What happens next?</p>
+<p style="color:#374151;font-size:13px;line-height:1.6;margin:0 0 24px;">Our team will review your order shortly and send you a confirmation email. If you have any questions in the meantime, feel free to reach out.</p>
+
+<p style="color:#374151;font-size:14px;margin:0 0 2px;">Warm regards,</p>
+<p style="color:#1c3557;font-size:14px;font-weight:700;margin:0 0 28px;">The AF Apparels Wholesale Team</p>
 
 {% if order_url %}
 <p style="text-align:center;margin:0;">
-  <a href="{{ order_url }}" style="display:inline-block;background:#E8242A;color:#ffffff;padding:13px 36px;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:.3px;">View Your Order &rarr;</a>
+  <a href="{{ order_url }}" style="display:inline-block;background:#E8242A;color:#ffffff;padding:13px 36px;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:.3px;">View Order &rarr;</a>
 </p>
 {% endif %}
 {% endblock %}

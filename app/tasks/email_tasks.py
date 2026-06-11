@@ -35,13 +35,17 @@ def send_order_confirmation_email(self, order_id: str) -> dict:
     """Send order received to all contacts with notify_order_confirmation=True."""
     try:
         async def _send():
+            import json as _json
             from sqlalchemy import select
+            from sqlalchemy.orm import selectinload
             from app.models.order import Order
             from app.models.company import Company, Contact
             from app.services.email_service import EmailService
             from app.core.config import settings
             async with AsyncSessionLocal() as db:
-                order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+                order = (await db.execute(
+                    select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+                )).scalar_one_or_none()
                 if not order:
                     return {"status": "skipped", "reason": "order_not_found"}
                 company = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
@@ -53,6 +57,36 @@ def send_order_confirmation_email(self, order_id: str) -> dict:
                 svc = EmailService(db)
                 company_name = company.name if company else ""
                 order_url = f"{settings.FRONTEND_URL}/account/orders/{order_id}"
+
+                # Build items summary text
+                items_parts = []
+                for item in (getattr(order, "items", []) or []):
+                    name = getattr(item, "product_name", "") or "Item"
+                    color = getattr(item, "color", "") or ""
+                    size = getattr(item, "size", "") or ""
+                    qty = getattr(item, "quantity", 1)
+                    detail = " / ".join(filter(None, [color, size]))
+                    desc = f"{name} ({detail})" if detail else name
+                    items_parts.append(f"{desc} — Qty: {qty}")
+                items_ordered = "\n".join(items_parts)
+
+                # Payment method display
+                pm_map = {"card": "Credit Card", "ach": "ACH / Bank Transfer",
+                          "net30": "Net 30", "net60": "Net 60", "wire": "Wire Transfer"}
+                payment_method = pm_map.get(order.payment_method or "", order.payment_method or "")
+
+                # Shipping address from snapshot
+                shipping_address = ""
+                snap = getattr(order, "shipping_address_snapshot", None)
+                if snap:
+                    try:
+                        d = _json.loads(snap) if isinstance(snap, str) else snap
+                        parts = [d.get("address_line1") or "", d.get("city") or "",
+                                 d.get("state_province") or "", d.get("postal_code") or ""]
+                        shipping_address = ", ".join(p for p in parts if p)
+                    except Exception:
+                        pass
+
                 sent = 0
                 for contact in contacts:
                     ok = svc.send_from_file(
@@ -66,6 +100,9 @@ def send_order_confirmation_email(self, order_id: str) -> dict:
                             "order_date": order.created_at.strftime("%B %d, %Y"),
                             "order_total": f"${float(order.total):.2f}",
                             "order_url": order_url,
+                            "items_ordered": items_ordered,
+                            "payment_method": payment_method,
+                            "shipping_address": shipping_address,
                         },
                     )
                     if ok:
