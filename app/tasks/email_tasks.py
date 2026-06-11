@@ -597,20 +597,28 @@ def send_invoice_email(self, order_id: str) -> dict:
 # ─── Wholesale application received ─────────────────────────────────────────
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
-def send_wholesale_application_received_email(self, to_email: str, contact_name: str, company_name: str) -> dict:
+def send_wholesale_application_received_email(
+    self, to_email: str, contact_name: str, company_name: str,
+    application_id: str = "", phone: str = ""
+) -> dict:
     """Notify applicant that their wholesale application was received."""
     try:
         async def _send():
             from app.services.email_service import EmailService
             async with AsyncSessionLocal() as db:
                 svc = EmailService(db)
+                from datetime import datetime, timezone
                 ok = svc.send_from_file(
                     template_name="wholesale_application_received.html",
                     to_email=to_email,
-                    subject="AF Apparels Wholesale Application Received",
+                    subject="We've Received Your Wholesale Application | AF Apparels",
                     variables={
                         "contact_name": contact_name or "Valued Customer",
                         "company_name": company_name or "",
+                        "applicant_email": to_email,
+                        "submitted_date": datetime.now(timezone.utc).strftime("%B %d, %Y"),
+                        "application_id": application_id or "",
+                        "phone": phone or "",
                     },
                 )
                 return {"status": "sent" if ok else "failed"}
@@ -637,15 +645,20 @@ def send_wholesale_approved_email(self, application_id: str, company_id: str) ->
                 )).scalar_one_or_none()
                 if not app:
                     return {"status": "skipped", "reason": "application_not_found"}
+                from datetime import datetime, timezone
                 svc = EmailService(db)
                 ok = svc.send_from_file(
                     template_name="wholesale_approved.html",
                     to_email=app.email,
-                    subject="Your AF Apparels Wholesale Account is Approved!",
+                    subject="Congratulations! Your Wholesale Account is Approved | AF Apparels",
                     variables={
                         "contact_name": app.first_name or "Valued Customer",
                         "company_name": app.company_name or "",
+                        "applicant_email": app.email or "",
+                        "submitted_date": app.created_at.strftime("%B %d, %Y") if getattr(app, "created_at", None) else "",
+                        "approved_date": datetime.now(timezone.utc).strftime("%B %d, %Y"),
                         "login_url": f"{settings.FRONTEND_URL}/login",
+                        "application_id": str(application_id),
                     },
                 )
                 return {"status": "sent" if ok else "failed", "application_id": application_id}
@@ -671,15 +684,20 @@ def send_wholesale_rejected_email(self, application_id: str, reason: str) -> dic
                 )).scalar_one_or_none()
                 if not app:
                     return {"status": "skipped", "reason": "application_not_found"}
+                from datetime import datetime, timezone
                 svc = EmailService(db)
                 ok = svc.send_from_file(
                     template_name="wholesale_rejected.html",
                     to_email=app.email,
-                    subject="AF Apparels Wholesale Application Update",
+                    subject="Update on Your Wholesale Application | AF Apparels",
                     variables={
                         "contact_name": app.first_name or "Valued Customer",
                         "company_name": app.company_name or "",
+                        "applicant_email": app.email or "",
+                        "submitted_date": app.created_at.strftime("%B %d, %Y") if getattr(app, "created_at", None) else "",
+                        "decision_date": datetime.now(timezone.utc).strftime("%B %d, %Y"),
                         "reason": reason or "",
+                        "application_id": str(application_id),
                     },
                 )
                 return {"status": "sent" if ok else "failed", "application_id": application_id}

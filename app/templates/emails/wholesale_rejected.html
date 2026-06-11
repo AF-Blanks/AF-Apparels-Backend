@@ -1,37 +1,72 @@
 {% extends "_base.html" %}
 {% block title %}Application Update — AF Apparels{% endblock %}
+
+{% block header_cell %}
+<td style="background:#1B3A5C;padding:24px 40px;text-align:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+  {% if logo_url %}
+  <img src="{{ logo_url }}" alt="AF Apparels" width="70" height="70" style="display:block;margin:0 auto 14px;object-fit:contain;">
+  {% else %}
+  <div style="margin-bottom:14px;">
+    <span style="font-size:28px;font-weight:900;color:#ffffff;letter-spacing:-.5px;">AF</span>
+    <span style="font-size:12px;color:#c3d9f0;letter-spacing:.2em;text-transform:uppercase;font-weight:600;margin-left:8px;">APPARELS</span>
+  </div>
+  {% endif %}
+  <div style="font-size:18px;font-weight:700;color:#ffffff;margin-bottom:6px;">Application Update</div>
+  <div style="font-size:12px;color:#c3d9f0;">Regarding your wholesale account application.</div>
+</td>
+{% endblock %}
+
 {% block content %}
-<div style="text-align:center;margin-bottom:28px;">
-  <div style="display:inline-block;background:#f3f4f6;color:#374151;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:5px 16px;border-radius:20px;border:1px solid #d1d5db;">Application Update</div>
-</div>
-<h1 style="color:#1B3A5C;font-size:24px;font-weight:800;margin:0 0 8px;text-align:center;">Application Update</h1>
-<p style="color:#374151;font-size:15px;margin:0 0 28px;text-align:center;">Hi {{ contact_name }}, thank you for your interest in the AF Apparels wholesale program.</p>
-
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#F9F8F4;border-radius:8px;border:1px solid #e5e7eb;margin-bottom:24px;">
-  <tr>
-    <td style="padding:20px 24px;">
-      <p style="margin:0 0 12px;font-size:14px;color:#374151;">After carefully reviewing your application{% if company_name %} for <strong>{{ company_name }}</strong>{% endif %}, we are unable to approve it at this time.</p>
-      {% if reason %}
-      <div style="background:#fef2f2;border-radius:6px;border:1px solid #fecaca;padding:12px 16px;">
-        <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#991b1b;font-weight:700;margin-bottom:4px;">Reason</div>
-        <div style="font-size:13px;color:#7f1d1d;">{{ reason }}</div>
-      </div>
-      {% endif %}
-    </td>
-  </tr>
-</table>
-
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#EBF4FF;border-radius:8px;border:1px solid #bfdbfe;margin-bottom:24px;">
-  <tr>
-    <td style="padding:16px 24px;">
-      <div style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#1d4ed8;font-weight:700;margin-bottom:8px;">What You Can Do</div>
-      <p style="margin:0 0 8px;font-size:13px;color:#374151;">If you believe this decision is incorrect or would like further clarification, please reach out to our team directly.</p>
-      <p style="margin:0;font-size:13px;color:#374151;">You may reapply in 30 days with updated business information.</p>
-    </td>
-  </tr>
-</table>
-
-<p style="text-align:center;margin:0;">
-  <a href="mailto:info@afblanks.com" style="display:inline-block;background:#1B3A5C;color:#ffffff;padding:13px 36px;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:.3px;">Contact Our Team &rarr;</a>
+<p style="margin:0 0 16px;font-size:15px;color:#374151;">Hi {{ contact_name }},</p>
+<p style="margin:0 0 16px;font-size:14px;color:#374151;line-height:1.6;">
+  Thank you for taking the time to apply for a wholesale account with AF Apparels. We sincerely appreciate your interest in partnering with us.
 </p>
+<p style="margin:0 0 20px;font-size:14px;color:#374151;line-height:1.6;">
+  After carefully reviewing your application, we regret to inform you that we're unable to approve your wholesale account at this time.
+</p>
+
+<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border:1px solid #d1d5db;margin-bottom:24px;">
+  <tr>
+    <td colspan="2" style="background:#1B3A5C;padding:10px 16px;">
+      <strong style="font-size:13px;color:#ffffff;">Application Details</strong>
+    </td>
+  </tr>
+  {% if application_id %}
+  <tr style="border-top:1px solid #e5e7eb;">
+    <td style="padding:9px 16px;font-size:13px;font-weight:600;color:#1B3A5C;background:#f8fafc;width:42%;border-right:1px solid #e5e7eb;">Application ID</td>
+    <td style="padding:9px 16px;font-size:13px;color:#374151;background:#ffffff;">#{{ application_id[:8] | upper }}</td>
+  </tr>
+  {% endif %}
+  {% if company_name %}
+  <tr style="border-top:1px solid #e5e7eb;">
+    <td style="padding:9px 16px;font-size:13px;font-weight:600;color:#1B3A5C;background:#f8fafc;border-right:1px solid #e5e7eb;">Business Name</td>
+    <td style="padding:9px 16px;font-size:13px;color:#374151;background:#ffffff;">{{ company_name }}</td>
+  </tr>
+  {% endif %}
+  <tr style="border-top:1px solid #e5e7eb;">
+    <td style="padding:9px 16px;font-size:13px;font-weight:600;color:#1B3A5C;background:#f8fafc;border-right:1px solid #e5e7eb;">Submitted On</td>
+    <td style="padding:9px 16px;font-size:13px;color:#374151;background:#ffffff;">{{ submitted_date }}</td>
+  </tr>
+  <tr style="border-top:1px solid #e5e7eb;">
+    <td style="padding:9px 16px;font-size:13px;font-weight:600;color:#1B3A5C;background:#f8fafc;border-right:1px solid #e5e7eb;">Decision Date</td>
+    <td style="padding:9px 16px;font-size:13px;color:#374151;background:#ffffff;">{{ decision_date }}</td>
+  </tr>
+  <tr style="border-top:1px solid #e5e7eb;">
+    <td style="padding:9px 16px;font-size:13px;font-weight:600;color:#1B3A5C;background:#f8fafc;border-right:1px solid #e5e7eb;">Reason (Optional)</td>
+    <td style="padding:9px 16px;font-size:13px;color:#374151;background:#ffffff;">{{ reason if reason else '—' }}</td>
+  </tr>
+</table>
+
+<p style="margin:0 0 16px;font-size:14px;color:#374151;line-height:1.6;">
+  This decision does not prevent you from re-applying in the future. If your circumstances change or if you'd like clarification on our requirements, we'd be happy to assist.
+</p>
+<p style="margin:0 0 16px;font-size:14px;color:#374151;line-height:1.6;">
+  Please feel free to reach out to our team if you have any questions or would like to discuss your application further.
+</p>
+<p style="margin:0 0 28px;font-size:14px;color:#374151;line-height:1.6;">
+  We wish you all the best and hope to work together in the future.
+</p>
+
+<p style="margin:0 0 4px;font-size:14px;color:#374151;">Warm regards,</p>
+<p style="margin:0;font-size:14px;font-weight:700;color:#374151;">The AF Apparels Wholesale Team</p>
 {% endblock %}

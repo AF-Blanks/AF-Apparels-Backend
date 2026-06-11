@@ -1,53 +1,73 @@
 {% extends "_base.html" %}
 {% block title %}Application Received — AF Apparels{% endblock %}
+
+{% block header_cell %}
+<td style="background:#1B3A5C;padding:24px 40px;text-align:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+  {% if logo_url %}
+  <img src="{{ logo_url }}" alt="AF Apparels" width="70" height="70" style="display:block;margin:0 auto 14px;object-fit:contain;">
+  {% else %}
+  <div style="margin-bottom:14px;">
+    <span style="font-size:28px;font-weight:900;color:#ffffff;letter-spacing:-.5px;">AF</span>
+    <span style="font-size:12px;color:#c3d9f0;letter-spacing:.2em;text-transform:uppercase;font-weight:600;margin-left:8px;">APPARELS</span>
+  </div>
+  {% endif %}
+  <div style="font-size:18px;font-weight:700;color:#ffffff;margin-bottom:6px;">Application Received</div>
+  <div style="font-size:12px;color:#c3d9f0;">Thank you for applying for a wholesale account.</div>
+</td>
+{% endblock %}
+
 {% block content %}
-<div style="text-align:center;margin-bottom:28px;">
-  <div style="display:inline-block;background:#EBF4FF;color:#1B3A5C;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:5px 16px;border-radius:20px;border:1px solid #bfdbfe;">Application Received</div>
-</div>
-<h1 style="color:#1B3A5C;font-size:24px;font-weight:800;margin:0 0 8px;text-align:center;">Application Received!</h1>
-<p style="color:#374151;font-size:15px;margin:0 0 28px;text-align:center;">Hi {{ contact_name }}, thank you for applying to the AF Apparels wholesale program.</p>
-
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#F9F8F4;border-radius:8px;border:1px solid #e5e7eb;margin-bottom:24px;">
-  <tr>
-    <td style="padding:20px 24px;">
-      <div style="font-size:13px;font-weight:700;color:#1B3A5C;margin-bottom:8px;">Application Details</div>
-      <table width="100%" cellpadding="0" cellspacing="0">
-        <tr>
-          <td><span style="font-size:12px;color:#6b7280;">Applicant Name</span></td>
-          <td style="text-align:right;"><span style="font-size:13px;font-weight:600;color:#374151;">{{ contact_name }}</span></td>
-        </tr>
-        {% if company_name %}
-        <tr>
-          <td style="padding-top:6px;"><span style="font-size:12px;color:#6b7280;">Company</span></td>
-          <td style="text-align:right;padding-top:6px;"><span style="font-size:13px;color:#374151;">{{ company_name }}</span></td>
-        </tr>
-        {% endif %}
-        <tr>
-          <td style="padding-top:6px;"><span style="font-size:12px;color:#6b7280;">Status</span></td>
-          <td style="text-align:right;padding-top:6px;"><span style="font-size:12px;font-weight:700;color:#D97706;background:#fffbeb;padding:2px 10px;border-radius:12px;border:1px solid #fde68a;">Under Review</span></td>
-        </tr>
-      </table>
-    </td>
-  </tr>
-</table>
-
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#EBF4FF;border-radius:8px;border:1px solid #bfdbfe;margin-bottom:24px;">
-  <tr>
-    <td style="padding:16px 24px;">
-      <div style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#1d4ed8;font-weight:700;margin-bottom:8px;">What Happens Next</div>
-      <ul style="margin:0;padding-left:18px;color:#374151;font-size:13px;line-height:1.8;">
-        <li>Our team will review your application within 1–2 business days</li>
-        <li>You will receive an email with the status update</li>
-        <li>Once approved, you will have full access to our wholesale catalog</li>
-      </ul>
-    </td>
-  </tr>
-</table>
-
-<p style="color:#6b7280;font-size:13px;text-align:center;margin:0 0 8px;">Questions? Reach out to us directly and we&#39;ll be happy to assist.</p>
-<p style="text-align:center;margin:0;">
-  <a href="mailto:info@afblanks.com" style="color:#1B3A5C;font-weight:600;text-decoration:none;font-size:13px;">info@afblanks.com</a>
-  &nbsp;&middot;&nbsp;
-  <a href="tel:4693679753" style="color:#1B3A5C;font-weight:600;text-decoration:none;font-size:13px;">+1 (469) 367-9753</a>
+<p style="margin:0 0 16px;font-size:15px;color:#374151;">Hi {{ contact_name }},</p>
+<p style="margin:0 0 20px;font-size:14px;color:#374151;line-height:1.6;">
+  Thank you for your interest in becoming a wholesale partner with AF Apparels! We've successfully received your application and our team will review it shortly.
 </p>
+
+<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border:1px solid #d1d5db;margin-bottom:24px;">
+  <tr>
+    <td colspan="2" style="background:#1B3A5C;padding:10px 16px;">
+      <strong style="font-size:13px;color:#ffffff;">Application Summary</strong>
+    </td>
+  </tr>
+  {% if application_id %}
+  <tr style="border-top:1px solid #e5e7eb;">
+    <td style="padding:9px 16px;font-size:13px;font-weight:600;color:#1B3A5C;background:#f8fafc;width:42%;border-right:1px solid #e5e7eb;">Application ID</td>
+    <td style="padding:9px 16px;font-size:13px;color:#374151;background:#ffffff;">#{{ application_id[:8] | upper }}</td>
+  </tr>
+  {% endif %}
+  <tr style="border-top:1px solid #e5e7eb;">
+    <td style="padding:9px 16px;font-size:13px;font-weight:600;color:#1B3A5C;background:#f8fafc;border-right:1px solid #e5e7eb;">Submitted On</td>
+    <td style="padding:9px 16px;font-size:13px;color:#374151;background:#ffffff;">{{ submitted_date }}</td>
+  </tr>
+  {% if company_name %}
+  <tr style="border-top:1px solid #e5e7eb;">
+    <td style="padding:9px 16px;font-size:13px;font-weight:600;color:#1B3A5C;background:#f8fafc;border-right:1px solid #e5e7eb;">Business Name</td>
+    <td style="padding:9px 16px;font-size:13px;color:#374151;background:#ffffff;">{{ company_name }}</td>
+  </tr>
+  {% endif %}
+  <tr style="border-top:1px solid #e5e7eb;">
+    <td style="padding:9px 16px;font-size:13px;font-weight:600;color:#1B3A5C;background:#f8fafc;border-right:1px solid #e5e7eb;">Contact Name</td>
+    <td style="padding:9px 16px;font-size:13px;color:#374151;background:#ffffff;">{{ contact_name }}</td>
+  </tr>
+  <tr style="border-top:1px solid #e5e7eb;">
+    <td style="padding:9px 16px;font-size:13px;font-weight:600;color:#1B3A5C;background:#f8fafc;border-right:1px solid #e5e7eb;">Email</td>
+    <td style="padding:9px 16px;font-size:13px;color:#374151;background:#ffffff;">{{ applicant_email }}</td>
+  </tr>
+  {% if phone %}
+  <tr style="border-top:1px solid #e5e7eb;">
+    <td style="padding:9px 16px;font-size:13px;font-weight:600;color:#1B3A5C;background:#f8fafc;border-right:1px solid #e5e7eb;">Phone</td>
+    <td style="padding:9px 16px;font-size:13px;color:#374151;background:#ffffff;">{{ phone }}</td>
+  </tr>
+  {% endif %}
+</table>
+
+<p style="margin:0 0 8px;font-size:14px;font-weight:700;color:#1B3A5C;">What happens next?</p>
+<p style="margin:0 0 16px;font-size:14px;color:#374151;line-height:1.6;">
+  Our wholesale team typically reviews applications within 2–5 business days. You'll receive an email notification once a decision has been made.
+</p>
+<p style="margin:0 0 28px;font-size:14px;color:#374151;line-height:1.6;">
+  In the meantime, if you have any questions, feel free to reach out. We're happy to help!
+</p>
+
+<p style="margin:0 0 4px;font-size:14px;color:#374151;">Warm regards,</p>
+<p style="margin:0;font-size:14px;font-weight:700;color:#374151;">The AF Apparels Wholesale Team</p>
 {% endblock %}
