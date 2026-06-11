@@ -314,6 +314,20 @@ async def reactivate_company(company_id: UUID, db: AsyncSession = Depends(get_db
     return {"message": "Company reactivated"}
 
 
+@router.delete("/companies/{company_id}", status_code=status.HTTP_200_OK)
+async def delete_company(company_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """Permanently delete a company and all its memberships."""
+    from sqlalchemy import delete as _delete
+    company = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if not company:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Company not found")
+    await db.execute(_delete(CompanyUser).where(CompanyUser.company_id == company_id))
+    await db.delete(company)
+    await db.commit()
+    return {"message": "Company deleted"}
+
+
 @router.get("/companies/{company_id}/stats")
 async def get_customer_stats(company_id: UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
