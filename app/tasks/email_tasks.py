@@ -28,6 +28,55 @@ def _fmt_items(items) -> list[dict]:
     ]
 
 
+def _items_summary(items) -> str:
+    """Short text summary of order items: 'Product (Color/Size) ×Qty'."""
+    parts = []
+    for item in (items or []):
+        name = getattr(item, "product_name", "") or "Item"
+        color = getattr(item, "color", "") or ""
+        size = getattr(item, "size", "") or ""
+        qty = getattr(item, "quantity", 1)
+        detail = "/".join(filter(None, [color, size]))
+        desc = f"{name} ({detail})" if detail else name
+        parts.append(f"{desc} ×{qty}")
+    return ", ".join(parts) if parts else ""
+
+
+async def _get_status_recipients(order, db) -> list[tuple[str, str]]:
+    """Return (email, first_name) pairs for a status update email.
+
+    Priority: guest_email → notify contacts → placed_by user fallback.
+    """
+    from sqlalchemy import select
+    from app.models.company import Contact
+    from app.models.user import User
+
+    if order.is_guest_order or not order.company_id:
+        if order.guest_email:
+            name = (order.guest_name or "Valued Customer").split()[0]
+            return [(order.guest_email, name)]
+        return []
+
+    contacts = (await db.execute(
+        select(Contact).where(
+            Contact.company_id == order.company_id,
+            Contact.notify_order_confirmation.is_(True),
+        )
+    )).scalars().all()
+
+    if contacts:
+        return [(c.email, c.first_name or "Valued Customer") for c in contacts]
+
+    if order.placed_by_id:
+        user = (await db.execute(
+            select(User).where(User.id == order.placed_by_id)
+        )).scalar_one_or_none()
+        if user and user.email:
+            return [(user.email, user.first_name or "Valued Customer")]
+
+    return []
+
+
 # ─── Order received ──────────────────────────────────────────────────────────
 
 def _build_order_vars(order, company_name: str, contact_name: str, order_url: str) -> dict:
