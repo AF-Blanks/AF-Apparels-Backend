@@ -1,0 +1,130 @@
+{% extends "_base.html" %}
+{% block title %}New Order {{ order_number }}{% endblock %}
+{% block content %}
+<div style="text-align:center;margin-bottom:20px;">
+  <div style="display:inline-block;background:#fef9c3;color:#854d0e;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:5px 16px;border-radius:20px;border:1px solid #fde047;">New Order</div>
+</div>
+<h1 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 6px;text-align:center;">New Order Received</h1>
+<p style="color:#6b7280;font-size:13px;margin:0 0 24px;text-align:center;">{{ order_date }}</p>
+
+<!-- Order summary -->
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#F9F8F4;border-radius:8px;border:1px solid #e5e7eb;margin-bottom:20px;">
+  <tr>
+    <td style="padding:16px 20px;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td style="vertical-align:top;">
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#6b7280;margin-bottom:3px;">Order</div>
+            <div style="font-size:20px;font-weight:800;color:#1B3A5C;">{{ order_number }}</div>
+          </td>
+          <td style="text-align:right;vertical-align:top;">
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#6b7280;margin-bottom:3px;">Total</div>
+            <div style="font-size:20px;font-weight:800;color:#059669;">{{ order_total }}</div>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="2" style="padding-top:10px;border-top:1px solid #e5e7eb;margin-top:10px;">
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="font-size:12px;color:#6b7280;padding-bottom:3px;">Customer</td>
+                <td style="text-align:right;font-size:12px;font-weight:600;color:#374151;padding-bottom:3px;">{{ customer_display }}</td>
+              </tr>
+              {% if customer_email %}
+              <tr>
+                <td style="font-size:12px;color:#6b7280;padding-bottom:3px;">Email</td>
+                <td style="text-align:right;font-size:12px;color:#374151;padding-bottom:3px;">{{ customer_email }}</td>
+              </tr>
+              {% endif %}
+              {% if payment_method %}
+              <tr>
+                <td style="font-size:12px;color:#6b7280;padding-bottom:3px;">Payment</td>
+                <td style="text-align:right;font-size:12px;color:#374151;padding-bottom:3px;">{{ payment_method }}</td>
+              </tr>
+              {% endif %}
+              {% if shipping_method %}
+              <tr>
+                <td style="font-size:12px;color:#6b7280;">Shipping</td>
+                <td style="text-align:right;font-size:12px;color:#374151;">{{ shipping_method }}</td>
+              </tr>
+              {% endif %}
+              {% if is_guest %}
+              <tr>
+                <td colspan="2" style="padding-top:6px;">
+                  <span style="display:inline-block;background:#fef3c7;color:#92400e;font-size:10px;font-weight:700;padding:2px 10px;border-radius:20px;text-transform:uppercase;letter-spacing:.06em;">Guest Order</span>
+                </td>
+              </tr>
+              {% endif %}
+            </table>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+
+{% if items_list %}
+<!-- Items table -->
+<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:8px;margin-bottom:20px;border-collapse:collapse;">
+  <thead>
+    <tr style="background:#F3F4F6;">
+      <th style="padding:9px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:#6b7280;font-weight:700;border-bottom:1px solid #e5e7eb;">Product</th>
+      <th style="padding:9px 12px;text-align:center;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:#6b7280;font-weight:700;border-bottom:1px solid #e5e7eb;">Qty</th>
+      <th style="padding:9px 12px;text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:#6b7280;font-weight:700;border-bottom:1px solid #e5e7eb;">Total</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in items_list %}
+    <tr style="border-bottom:1px solid #f3f4f6;">
+      <td style="padding:9px 12px;font-size:13px;">
+        <div style="font-weight:600;color:#1B3A5C;">{{ item.product_name }}</div>
+        {% if item.color or item.size %}
+        <div style="font-size:11px;color:#6b7280;margin-top:1px;">{{ item.color }}{% if item.color and item.size %} / {% endif %}{{ item.size }}</div>
+        {% endif %}
+      </td>
+      <td style="padding:9px 12px;text-align:center;font-size:13px;color:#374151;">{{ item.quantity }}</td>
+      <td style="padding:9px 12px;text-align:right;font-size:13px;font-weight:600;color:#1B3A5C;">{{ item.line_total }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<!-- Financial summary -->
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;">
+  <tr>
+    <td width="55%"></td>
+    <td width="45%">
+      <table width="100%" cellpadding="0" cellspacing="0" style="background:#F9F8F4;border-radius:8px;border:1px solid #e5e7eb;">
+        <tr>
+          <td style="padding:10px 14px 8px;">
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="font-size:12px;color:#6b7280;padding-bottom:3px;">Subtotal</td>
+                <td style="text-align:right;font-size:12px;color:#374151;padding-bottom:3px;">{{ subtotal }}</td>
+              </tr>
+              <tr>
+                <td style="font-size:12px;color:#6b7280;padding-bottom:3px;">Shipping</td>
+                <td style="text-align:right;font-size:12px;color:#374151;padding-bottom:3px;">{{ shipping_cost }}</td>
+              </tr>
+              <tr>
+                <td style="font-size:12px;color:#6b7280;padding-bottom:3px;">Tax</td>
+                <td style="text-align:right;font-size:12px;color:#374151;padding-bottom:3px;">{{ tax_amount }}</td>
+              </tr>
+              <tr style="border-top:1px solid #e5e7eb;">
+                <td style="font-size:13px;font-weight:700;color:#1B3A5C;padding-top:7px;">Total</td>
+                <td style="text-align:right;font-size:13px;font-weight:700;color:#059669;padding-top:7px;">{{ order_total }}</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+{% endif %}
+
+{% if admin_order_url %}
+<p style="text-align:center;margin:0;">
+  <a href="{{ admin_order_url }}" style="display:inline-block;background:#1B3A5C;color:#ffffff;padding:12px 32px;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:.3px;">View Order in Admin &rarr;</a>
+</p>
+{% endif %}
+{% endblock %}

@@ -359,13 +359,15 @@ async def guest_checkout(
 
     # 9. Send guest confirmation email + admin alert + activation email
     try:
-        from app.services.email_service import EmailService
+        from app.tasks.email_tasks import send_order_confirmation_email as _send_conf
+        from app.tasks.email_tasks import send_admin_new_order_email as _send_admin
         from app.core.config import get_settings as _get_settings
-        _email_svc = EmailService(db)
-        _email_svc.send_order_confirmation(order, order.guest_email)
-        _email_svc.send_admin_new_order_alert(order)
+        _send_conf.delay(str(order.id))
+        _send_admin.delay(str(order.id))
         if _activation_token:
+            from app.services.email_service import EmailService
             _cfg = _get_settings()
+            _email_svc = EmailService(db)
             _email_svc.send_retail_account_activation(
                 customer_email=order.guest_email,
                 first_name=order.guest_name.split()[0] if order.guest_name else "Guest",

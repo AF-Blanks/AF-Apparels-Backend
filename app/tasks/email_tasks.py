@@ -30,47 +30,203 @@ def _fmt_items(items) -> list[dict]:
 
 # ─── Order received ──────────────────────────────────────────────────────────
 
+def _build_order_vars(order, company_name: str, contact_name: str, order_url: str) -> dict:
+    """Build full template variables dict for order_received.html."""
+    import json
+    items_list = _fmt_items(getattr(order, "items", []))
+
+    shipping_addr = ""
+    snap = order.shipping_address_snapshot
+    if snap:
+        try:
+            d = json.loads(snap) if isinstance(snap, str) else snap
+            parts = [
+                d.get("address_line1") or "",
+                d.get("address_line2") or "",
+                d.get("city") or "",
+                d.get("state_province") or "",
+                d.get("postal_code") or "",
+            ]
+            shipping_addr = ", ".join(p for p in parts if p)
+        except Exception:
+            pass
+
+    pm_map = {
+        "card": "Credit Card",
+        "ach": "ACH / Bank Transfer",
+        "net30": "Net 30",
+        "net60": "Net 60",
+        "wire": "Wire Transfer",
+        "cash": "Cash",
+    }
+    payment_display = pm_map.get(order.payment_method or "", order.payment_method or "")
+
+    subtotal = float(order.subtotal or 0)
+    shipping = float(order.shipping_cost or 0)
+    tax = float(order.tax_amount or 0)
+    fee = float(order.convenience_fee or 0)
+    total = float(order.total or 0)
+
+    return {
+        "contact_name": contact_name,
+        "order_number": order.order_number,
+        "company_name": company_name,
+        "order_date": order.created_at.strftime("%B %d, %Y"),
+        "order_total": f"${total:.2f}",
+        "order_url": order_url,
+        "items_list": items_list,
+        "subtotal": f"${subtotal:.2f}",
+        "shipping_cost": f"${shipping:.2f}",
+        "tax_amount": f"${tax:.2f}",
+        "convenience_fee": f"${fee:.2f}" if fee else "",
+        "payment_method": payment_display,
+        "shipping_address": shipping_addr,
+        "has_items": bool(items_list),
+    }
+
+
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_order_confirmation_email(self, order_id: str) -> dict:
-    """Send order received to all contacts with notify_order_confirmation=True."""
+    """Send order received email — handles both wholesale contacts and guest orders."""
     try:
         async def _send():
+            import uuid as _uuid
             from sqlalchemy import select
-            from app.models.order import Order
+            from sqlalchemy.orm import selectinload
+            from app.models.order import Order, OrderItem
             from app.models.company import Company, Contact
             from app.services.email_service import EmailService
             from app.core.config import settings
             async with AsyncSessionLocal() as db:
-                order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+                order = (await db.execute(
+                    select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+                )).scalar_one_or_none()
                 if not order:
                     return {"status": "skipped", "reason": "order_not_found"}
-                company = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
-                contacts = (await db.execute(
-                    select(Contact).where(Contact.company_id == order.company_id, Contact.notify_order_confirmation.is_(True))
-                )).scalars().all()
-                if not contacts:
-                    return {"status": "skipped", "reason": "no_notify_contacts"}
+
                 svc = EmailService(db)
-                company_name = company.name if company else ""
                 order_url = f"{settings.FRONTEND_URL}/account/orders/{order_id}"
                 sent = 0
-                for contact in contacts:
+
+                if order.is_guest_order or not order.company_id:
+                    # Guest order — send directly to guest email
+                    to_email = order.guest_email or ""
+                    if not to_email:
+                        return {"status": "skipped", "reason": "no_guest_email"}
+                    contact_name = (order.guest_name or "Valued Customer").split()[0]
+                    vars_ = _build_order_vars(order, "", contact_name, order_url)
                     ok = svc.send_from_file(
                         template_name="order_received.html",
-                        to_email=contact.email,
+                        to_email=to_email,
                         subject=f"Order Received — {order.order_number} | AF Apparels",
-                        variables={
-                            "contact_name": contact.first_name or "Valued Customer",
-                            "order_number": order.order_number,
-                            "company_name": company_name,
-                            "order_date": order.created_at.strftime("%B %d, %Y"),
-                            "order_total": f"${float(order.total):.2f}",
-                            "order_url": order_url,
-                        },
+                        variables=vars_,
                     )
-                    if ok:
-                        sent += 1
+                    sent = 1 if ok else 0
+                else:
+                    # Wholesale order — send to all notify contacts
+                    company = (await db.execute(
+                        select(Company).where(Company.id == order.company_id)
+                    )).scalar_one_or_none()
+                    contacts = (await db.execute(
+                        select(Contact).where(
+                            Contact.company_id == order.company_id,
+                            Contact.notify_order_confirmation.is_(True),
+                        )
+                    )).scalars().all()
+                    if not contacts:
+                        return {"status": "skipped", "reason": "no_notify_contacts"}
+                    company_name = company.name if company else ""
+                    for contact in contacts:
+                        vars_ = _build_order_vars(
+                            order, company_name,
+                            contact.first_name or "Valued Customer",
+                            order_url,
+                        )
+                        ok = svc.send_from_file(
+                            template_name="order_received.html",
+                            to_email=contact.email,
+                            subject=f"Order Received — {order.order_number} | AF Apparels",
+                            variables=vars_,
+                        )
+                        if ok:
+                            sent += 1
+
                 return {"status": "sent", "sent": sent, "order_id": order_id}
+        return _run(_send())
+    except Exception as exc:
+        delay = 60 * (2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)
+
+
+# ─── Admin new order alert ────────────────────────────────────────────────────
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_admin_new_order_email(self, order_id: str) -> dict:
+    """Notify admin of a new order via admin_new_order.html template."""
+    try:
+        async def _send():
+            from sqlalchemy import select
+            from sqlalchemy.orm import selectinload
+            from app.models.order import Order
+            from app.models.company import Company
+            from app.services.email_service import EmailService
+            from app.core.config import settings
+            async with AsyncSessionLocal() as db:
+                order = (await db.execute(
+                    select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+                )).scalar_one_or_none()
+                if not order:
+                    return {"status": "skipped", "reason": "order_not_found"}
+
+                admin_email = getattr(settings, "ADMIN_NOTIFICATION_EMAIL", "") or getattr(settings, "ADMIN_EMAIL", "")
+                if not admin_email:
+                    return {"status": "skipped", "reason": "no_admin_email_configured"}
+
+                company_name = ""
+                if order.company_id:
+                    company = (await db.execute(
+                        select(Company).where(Company.id == order.company_id)
+                    )).scalar_one_or_none()
+                    company_name = company.name if company else ""
+
+                customer_display = (
+                    order.guest_name or order.guest_email or "Guest"
+                    if order.is_guest_order or not order.company_id
+                    else company_name
+                )
+
+                pm_map = {
+                    "card": "Credit Card", "ach": "ACH / Bank Transfer",
+                    "net30": "Net 30", "net60": "Net 60",
+                    "wire": "Wire Transfer", "cash": "Cash",
+                }
+                payment_display = pm_map.get(order.payment_method or "", order.payment_method or "")
+                items_list = _fmt_items(getattr(order, "items", []))
+                admin_order_url = f"{settings.FRONTEND_URL}/admin/orders/{order_id}"
+
+                svc = EmailService(db)
+                ok = svc.send_from_file(
+                    template_name="admin_new_order.html",
+                    to_email=admin_email,
+                    subject=f"New Order {order.order_number} — ${float(order.total):.2f} | AF Apparels",
+                    variables={
+                        "order_number": order.order_number,
+                        "order_date": order.created_at.strftime("%B %d, %Y %I:%M %p"),
+                        "customer_display": customer_display,
+                        "customer_email": order.guest_email or "",
+                        "company_name": company_name,
+                        "order_total": f"${float(order.total):.2f}",
+                        "subtotal": f"${float(order.subtotal or 0):.2f}",
+                        "shipping_cost": f"${float(order.shipping_cost or 0):.2f}",
+                        "tax_amount": f"${float(order.tax_amount or 0):.2f}",
+                        "payment_method": payment_display,
+                        "shipping_method": order.shipping_method or "",
+                        "items_list": items_list,
+                        "admin_order_url": admin_order_url,
+                        "is_guest": bool(order.is_guest_order or not order.company_id),
+                    },
+                )
+                return {"status": "sent" if ok else "failed", "order_id": order_id}
         return _run(_send())
     except Exception as exc:
         delay = 60 * (2 ** self.request.retries)

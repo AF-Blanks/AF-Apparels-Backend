@@ -334,26 +334,12 @@ async def _confirm_checkout_inner(
 
     # ── Send order confirmation email ─────────────────────────────────────────
     try:
-        from sqlalchemy import select as _sel
-        from sqlalchemy.orm import selectinload as _sil
-        from app.models.order import Order as _Order
-        from app.models.user import User as _User
-        from app.services.email_service import EmailService as _EmailSvc
-
-        _order_full = (await db.execute(
-            _sel(_Order).options(_sil(_Order.items)).where(_Order.id == order.id)
-        )).scalar_one_or_none()
-
-        if _order_full and user_id:
-            _user = (await db.execute(
-                _sel(_User).where(_User.id == user_id)
-            )).scalar_one_or_none()
-            if _user:
-                _email_svc = _EmailSvc(db)
-                _email_svc.send_order_confirmation(_order_full, _user.email)
-                _email_svc.send_admin_new_order_alert(_order_full)
+        from app.tasks.email_tasks import send_order_confirmation_email as _send_conf
+        from app.tasks.email_tasks import send_admin_new_order_email as _send_admin
+        _send_conf.delay(str(order.id))
+        _send_admin.delay(str(order.id))
     except Exception as _exc:
-        _log.warning("Order confirmation email failed: %s", _exc)
+        _log.warning("Order confirmation email dispatch failed: %s", _exc)
 
     # ── QB invoice sync ───────────────────────────────────────────────────────
     try:
