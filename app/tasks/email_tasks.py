@@ -114,7 +114,39 @@ def send_order_confirmation_email(self, order_id: str) -> dict:
         raise self.retry(exc=exc, countdown=delay)
 
 
-# ─── Shared helper ───────────────────────────────────────────────────────────
+# ─── Shared helpers ──────────────────────────────────────────────────────────
+
+async def _get_order_recipients(order, db) -> list[tuple[str, str]]:
+    """Return (email, first_name) list — notify contacts first, then placed_by fallback."""
+    from sqlalchemy import select
+    from app.models.company import Contact
+    from app.models.user import User
+
+    if order.is_guest_order or not order.company_id:
+        if order.guest_email:
+            name = (order.guest_name or "Valued Customer").split()[0]
+            return [(order.guest_email, name)]
+        return []
+
+    contacts = (await db.execute(
+        select(Contact).where(
+            Contact.company_id == order.company_id,
+            Contact.notify_order_confirmation.is_(True),
+        )
+    )).scalars().all()
+
+    if contacts:
+        return [(c.email, c.first_name or "Valued Customer") for c in contacts]
+
+    if order.placed_by_id:
+        user = (await db.execute(
+            select(User).where(User.id == order.placed_by_id)
+        )).scalar_one_or_none()
+        if user and user.email:
+            return [(user.email, user.first_name or "Valued Customer")]
+
+    return []
+
 
 def _build_items_summary(items) -> str:
     parts = []
@@ -147,13 +179,12 @@ def _build_delivery_address(order) -> str:
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_order_confirmed_email(self, order_id: str) -> dict:
-    """Notify contacts when the order is confirmed by admin."""
     try:
         async def _send():
             from sqlalchemy import select
             from sqlalchemy.orm import selectinload
             from app.models.order import Order
-            from app.models.company import Company, Contact
+            from app.models.company import Company
             from app.services.email_service import EmailService
             from app.core.config import settings
             async with AsyncSessionLocal() as db:
@@ -162,24 +193,24 @@ def send_order_confirmed_email(self, order_id: str) -> dict:
                 )).scalar_one_or_none()
                 if not order:
                     return {"status": "skipped", "reason": "order_not_found"}
-                company = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
-                contacts = (await db.execute(
-                    select(Contact).where(Contact.company_id == order.company_id, Contact.notify_order_confirmation.is_(True))
-                )).scalars().all()
-                if not contacts:
-                    return {"status": "skipped", "reason": "no_notify_contacts"}
+                recipients = await _get_order_recipients(order, db)
+                if not recipients:
+                    return {"status": "skipped", "reason": "no_recipients"}
+                company_name = ""
+                if order.company_id:
+                    co = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
+                    company_name = co.name if co else ""
                 svc = EmailService(db)
-                company_name = company.name if company else ""
                 order_url = f"{settings.FRONTEND_URL}/account/orders/{order_id}"
                 items_summary = _build_items_summary(getattr(order, "items", []))
                 sent = 0
-                for contact in contacts:
+                for to_email, name in recipients:
                     ok = svc.send_from_file(
                         template_name="order_confirmed.html",
-                        to_email=contact.email,
+                        to_email=to_email,
                         subject=f"Order Confirmed - {order.order_number} | AF Apparels",
                         variables={
-                            "contact_name": contact.first_name or "Valued Customer",
+                            "contact_name": name,
                             "order_number": order.order_number,
                             "company_name": company_name,
                             "order_date": order.created_at.strftime("%B %d, %Y"),
@@ -201,13 +232,12 @@ def send_order_confirmed_email(self, order_id: str) -> dict:
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_order_processing_email(self, order_id: str) -> dict:
-    """Notify contacts that the order is being processed."""
     try:
         async def _send():
             from sqlalchemy import select
             from sqlalchemy.orm import selectinload
             from app.models.order import Order
-            from app.models.company import Company, Contact
+            from app.models.company import Company
             from app.services.email_service import EmailService
             from app.core.config import settings
             async with AsyncSessionLocal() as db:
@@ -216,24 +246,24 @@ def send_order_processing_email(self, order_id: str) -> dict:
                 )).scalar_one_or_none()
                 if not order:
                     return {"status": "skipped", "reason": "order_not_found"}
-                company = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
-                contacts = (await db.execute(
-                    select(Contact).where(Contact.company_id == order.company_id, Contact.notify_order_confirmation.is_(True))
-                )).scalars().all()
-                if not contacts:
-                    return {"status": "skipped", "reason": "no_notify_contacts"}
+                recipients = await _get_order_recipients(order, db)
+                if not recipients:
+                    return {"status": "skipped", "reason": "no_recipients"}
+                company_name = ""
+                if order.company_id:
+                    co = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
+                    company_name = co.name if co else ""
                 svc = EmailService(db)
-                company_name = company.name if company else ""
                 order_url = f"{settings.FRONTEND_URL}/account/orders/{order_id}"
                 items_summary = _build_items_summary(getattr(order, "items", []))
                 sent = 0
-                for contact in contacts:
+                for to_email, name in recipients:
                     ok = svc.send_from_file(
                         template_name="order_processing.html",
-                        to_email=contact.email,
+                        to_email=to_email,
                         subject=f"Order {order.order_number} Is Being Processed | AF Apparels",
                         variables={
-                            "contact_name": contact.first_name or "Valued Customer",
+                            "contact_name": name,
                             "order_number": order.order_number,
                             "company_name": company_name,
                             "order_date": order.created_at.strftime("%B %d, %Y"),
@@ -255,13 +285,12 @@ def send_order_processing_email(self, order_id: str) -> dict:
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_order_ready_email(self, order_id: str) -> dict:
-    """Notify contacts that the order is packed and ready."""
     try:
         async def _send():
             from sqlalchemy import select
             from sqlalchemy.orm import selectinload
             from app.models.order import Order
-            from app.models.company import Company, Contact
+            from app.models.company import Company
             from app.services.email_service import EmailService
             from app.core.config import settings
             async with AsyncSessionLocal() as db:
@@ -270,25 +299,25 @@ def send_order_ready_email(self, order_id: str) -> dict:
                 )).scalar_one_or_none()
                 if not order:
                     return {"status": "skipped", "reason": "order_not_found"}
-                company = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
-                contacts = (await db.execute(
-                    select(Contact).where(Contact.company_id == order.company_id, Contact.notify_order_confirmation.is_(True))
-                )).scalars().all()
-                if not contacts:
-                    return {"status": "skipped", "reason": "no_notify_contacts"}
+                recipients = await _get_order_recipients(order, db)
+                if not recipients:
+                    return {"status": "skipped", "reason": "no_recipients"}
+                company_name = ""
+                if order.company_id:
+                    co = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
+                    company_name = co.name if co else ""
                 svc = EmailService(db)
-                company_name = company.name if company else ""
                 order_url = f"{settings.FRONTEND_URL}/account/orders/{order_id}"
                 items_summary = _build_items_summary(getattr(order, "items", []))
                 fulfillment = (order.shipping_method or "").replace("_", " ").title() or "Standard Delivery"
                 sent = 0
-                for contact in contacts:
+                for to_email, name in recipients:
                     ok = svc.send_from_file(
                         template_name="order_ready.html",
-                        to_email=contact.email,
+                        to_email=to_email,
                         subject=f"Order {order.order_number} Is Ready | AF Apparels",
                         variables={
-                            "contact_name": contact.first_name or "Valued Customer",
+                            "contact_name": name,
                             "order_number": order.order_number,
                             "company_name": company_name,
                             "order_date": order.created_at.strftime("%B %d, %Y"),
@@ -311,39 +340,33 @@ def send_order_ready_email(self, order_id: str) -> dict:
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_order_shipped_email(self, order_id: str, tracking_number: str = "") -> dict:
-    """Send shipping notification to all contacts with notify_order_shipped=True."""
     try:
         async def _send():
             from sqlalchemy import select
             from app.models.order import Order
-            from app.models.company import Contact
             from app.services.email_service import EmailService
             from app.core.config import settings
             async with AsyncSessionLocal() as db:
                 order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
                 if not order:
                     return {"status": "skipped", "reason": "order_not_found"}
-                contacts = (await db.execute(
-                    select(Contact).where(Contact.company_id == order.company_id, Contact.notify_order_shipped.is_(True))
-                )).scalars().all()
-                if not contacts:
-                    return {"status": "skipped", "reason": "no_notify_contacts"}
+                recipients = await _get_order_recipients(order, db)
+                if not recipients:
+                    return {"status": "skipped", "reason": "no_recipients"}
                 tracking = tracking_number or order.tracking_number or ""
                 carrier = order.carrier or order.courier or ""
                 order_url = f"{settings.FRONTEND_URL}/account/orders/{order_id}"
-                shipped_date = ""
-                if getattr(order, "shipped_at", None):
-                    shipped_date = order.shipped_at.strftime("%B %d, %Y")
+                shipped_date = order.shipped_at.strftime("%B %d, %Y") if getattr(order, "shipped_at", None) else ""
                 delivery_address = _build_delivery_address(order)
                 svc = EmailService(db)
                 sent = 0
-                for contact in contacts:
+                for to_email, name in recipients:
                     ok = svc.send_from_file(
                         template_name="order_shipped.html",
-                        to_email=contact.email,
+                        to_email=to_email,
                         subject=f"Your Order {order.order_number} Has Shipped! | AF Apparels",
                         variables={
-                            "contact_name": contact.first_name or "Valued Customer",
+                            "contact_name": name,
                             "order_number": order.order_number,
                             "order_total": f"${float(order.total):.2f}",
                             "tracking_number": tracking,
@@ -366,35 +389,34 @@ def send_order_shipped_email(self, order_id: str, tracking_number: str = "") -> 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_ready_for_pickup_email(self, order_id: str) -> dict:
-    """Notify contacts that a will-call order is ready for pickup."""
     try:
         async def _send():
             from sqlalchemy import select
             from app.models.order import Order
-            from app.models.company import Company, Contact
+            from app.models.company import Company
             from app.services.email_service import EmailService
             from app.core.config import settings
             async with AsyncSessionLocal() as db:
                 order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
                 if not order:
                     return {"status": "skipped", "reason": "order_not_found"}
-                company = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
-                contacts = (await db.execute(
-                    select(Contact).where(Contact.company_id == order.company_id, Contact.notify_order_confirmation.is_(True))
-                )).scalars().all()
-                if not contacts:
-                    return {"status": "skipped", "reason": "no_notify_contacts"}
+                recipients = await _get_order_recipients(order, db)
+                if not recipients:
+                    return {"status": "skipped", "reason": "no_recipients"}
+                company_name = ""
+                if order.company_id:
+                    co = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
+                    company_name = co.name if co else ""
                 svc = EmailService(db)
-                company_name = company.name if company else ""
                 order_url = f"{settings.FRONTEND_URL}/account/orders/{order_id}"
                 sent = 0
-                for contact in contacts:
+                for to_email, name in recipients:
                     ok = svc.send_from_file(
                         template_name="ready_for_pickup.html",
-                        to_email=contact.email,
+                        to_email=to_email,
                         subject=f"Order {order.order_number} Ready for Pickup | AF Apparels",
                         variables={
-                            "contact_name": contact.first_name or "Valued Customer",
+                            "contact_name": name,
                             "order_number": order.order_number,
                             "company_name": company_name,
                             "order_date": order.created_at.strftime("%B %d, %Y"),
@@ -415,13 +437,12 @@ def send_ready_for_pickup_email(self, order_id: str) -> dict:
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_order_delivered_email(self, order_id: str) -> dict:
-    """Notify contacts when the order is marked as delivered."""
     try:
         async def _send():
             from sqlalchemy import select
             from sqlalchemy.orm import selectinload
             from app.models.order import Order
-            from app.models.company import Company, Contact
+            from app.models.company import Company
             from app.services.email_service import EmailService
             from app.core.config import settings
             async with AsyncSessionLocal() as db:
@@ -430,25 +451,25 @@ def send_order_delivered_email(self, order_id: str) -> dict:
                 )).scalar_one_or_none()
                 if not order:
                     return {"status": "skipped", "reason": "order_not_found"}
-                company = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
-                contacts = (await db.execute(
-                    select(Contact).where(Contact.company_id == order.company_id, Contact.notify_order_confirmation.is_(True))
-                )).scalars().all()
-                if not contacts:
-                    return {"status": "skipped", "reason": "no_notify_contacts"}
+                recipients = await _get_order_recipients(order, db)
+                if not recipients:
+                    return {"status": "skipped", "reason": "no_recipients"}
+                company_name = ""
+                if order.company_id:
+                    co = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
+                    company_name = co.name if co else ""
                 svc = EmailService(db)
-                company_name = company.name if company else ""
                 order_url = f"{settings.FRONTEND_URL}/account/orders/{order_id}"
                 items_summary = _build_items_summary(getattr(order, "items", []))
                 delivery_address = _build_delivery_address(order)
                 sent = 0
-                for contact in contacts:
+                for to_email, name in recipients:
                     ok = svc.send_from_file(
                         template_name="order_delivered.html",
-                        to_email=contact.email,
+                        to_email=to_email,
                         subject=f"Order {order.order_number} Delivered | AF Apparels",
                         variables={
-                            "contact_name": contact.first_name or "Valued Customer",
+                            "contact_name": name,
                             "order_number": order.order_number,
                             "company_name": company_name,
                             "order_date": order.created_at.strftime("%B %d, %Y"),
@@ -471,13 +492,11 @@ def send_order_delivered_email(self, order_id: str) -> dict:
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_order_cancelled_email(self, order_id: str, reason: str = "") -> dict:
-    """Notify all contacts with notify_order_confirmation=True when an order is cancelled."""
     try:
         async def _send():
             from sqlalchemy import select
             from sqlalchemy.orm import selectinload
             from app.models.order import Order
-            from app.models.company import Contact
             from app.services.email_service import EmailService
             from app.core.config import settings
             async with AsyncSessionLocal() as db:
@@ -486,24 +505,22 @@ def send_order_cancelled_email(self, order_id: str, reason: str = "") -> dict:
                 )).scalar_one_or_none()
                 if not order:
                     return {"status": "skipped", "reason": "order_not_found"}
-                contacts = (await db.execute(
-                    select(Contact).where(Contact.company_id == order.company_id, Contact.notify_order_confirmation.is_(True))
-                )).scalars().all()
-                if not contacts:
-                    return {"status": "skipped", "reason": "no_notify_contacts"}
+                recipients = await _get_order_recipients(order, db)
+                if not recipients:
+                    return {"status": "skipped", "reason": "no_recipients"}
                 order_url = f"{settings.FRONTEND_URL}/account/orders/{order_id}"
                 items_summary = _build_items_summary(getattr(order, "items", []))
                 pm = getattr(order, "payment_method", "") or ""
                 refund_status = "Processing" if pm in ("card", "ach", "wire") else "N/A"
                 svc = EmailService(db)
                 sent = 0
-                for contact in contacts:
+                for to_email, name in recipients:
                     ok = svc.send_from_file(
                         template_name="order_cancelled.html",
-                        to_email=contact.email,
+                        to_email=to_email,
                         subject=f"Order {order.order_number} Cancelled | AF Apparels",
                         variables={
-                            "contact_name": contact.first_name or "Valued Customer",
+                            "contact_name": name,
                             "order_number": order.order_number,
                             "order_date": order.created_at.strftime("%B %d, %Y"),
                             "order_total": f"${float(order.total):.2f}",
