@@ -264,6 +264,9 @@ class OrderService:
             shipping_method=shipping_method,
             shipping_address_id=confirm.address_id if confirm.address_id else None,
             shipping_address_snapshot=_json.dumps(shipping_address) if shipping_address else None,
+            shipping_rate_id=getattr(confirm, "shipping_rate_id", None),
+            carrier=getattr(confirm, "shipping_carrier", None),
+            courier_service=getattr(confirm, "shipping_service", None),
         )
         self.db.add(order)
         await self.db.flush()
@@ -317,27 +320,10 @@ class OrderService:
             except Exception as _cf_exc:
                 logger.warning("Could not save convenience_fee on order %s: %s", order.id, _cf_exc)
 
-        # Save shipping_rate_id + carrier from customer's selected live Shippo rate
         logger.info(
             "Order create - shipping_rate_id: %s, carrier: %s, service: %s",
-            getattr(confirm, "shipping_rate_id", "NOT IN DATA"),
-            getattr(confirm, "shipping_carrier", "NOT IN DATA"),
-            getattr(confirm, "shipping_service", "NOT IN DATA"),
+            order.shipping_rate_id, order.carrier, order.courier_service,
         )
-        _rate_id = getattr(confirm, "shipping_rate_id", None)
-        _s_carrier = getattr(confirm, "shipping_carrier", None)
-        _s_service = getattr(confirm, "shipping_service", None)
-        if _rate_id:
-            try:
-                from sqlalchemy import text as _stext
-                await self.db.execute(
-                    _stext(
-                        "UPDATE orders SET shipping_rate_id=:rid, carrier=:car, courier_service=:cs WHERE id=:oid"
-                    ),
-                    {"rid": _rate_id, "car": _s_carrier, "cs": _s_service, "oid": str(order.id)},
-                )
-            except Exception as _rate_exc:
-                logger.warning("Could not save shipping_rate_id on order %s: %s", order.id, _rate_exc)
 
         # 9. Create OrderItem records
         for item_data in order_items_data:
