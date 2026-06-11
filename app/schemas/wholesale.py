@@ -54,5 +54,5 @@ class ApproveApplicationRequest(BaseModel):
 
 
 class RejectApplicationRequest(BaseModel):
-    rejection_reason: str = Field(..., min_length=10, max_length=1000)
+    rejection_reason: str | None = Field(default=None, max_length=1000)
     admin_notes: str | None = None

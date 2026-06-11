@@ -682,6 +682,21 @@ app.add_middleware(AuthMiddleware)
 
 
 # ── Global exception handlers ─────────────────────────────────────────────────
+from fastapi.exceptions import RequestValidationError
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = exc.errors()
+    first = errors[0] if errors else {}
+    field = " → ".join(str(l) for l in first.get("loc", []) if l not in ("body",))
+    msg = first.get("msg", "Validation error")
+    detail = f"{field}: {msg}" if field else msg
+    return JSONResponse(
+        status_code=422,
+        content={"error": {"code": "VALIDATION_ERROR", "message": detail, "details": errors}},
+    )
+
+
 @app.exception_handler(AppException)
 async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
     return JSONResponse(

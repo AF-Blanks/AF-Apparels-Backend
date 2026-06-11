@@ -176,7 +176,7 @@ class WholesaleService:
 
         try:
             from app.tasks.email_tasks import send_wholesale_rejected_email
-            send_wholesale_rejected_email.delay(str(application.id), data.rejection_reason)
+            send_wholesale_rejected_email.delay(str(application.id), data.rejection_reason or "")
         except Exception:
             pass
 
