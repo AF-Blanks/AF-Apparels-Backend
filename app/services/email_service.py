@@ -241,89 +241,46 @@ class EmailService:
     # ── High-level transactional senders ──────────────────────────────────────
 
     def send_order_confirmation(self, order: "Order", to_email: str) -> bool:  # type: ignore[name-defined]
-        """Branded order confirmation with order-confirmation PDF attached."""
+        """Order confirmation using order_received.html file template with PDF attached."""
+        import json as _json
         from app.core.config import settings as _s
         from app.services.pdf_service import PDFService
 
-        name = getattr(order, "guest_name", None) or "Valued Customer"
         order_url = f"{_s.FRONTEND_URL}/account/orders/{order.id}"
 
-        rows_html = "".join(
-            f'<div style="margin-bottom:10px;padding:12px 14px;background:#f9fafb;border-radius:6px;'
-            f'border-left:3px solid #1B3A5C;">'
-            f'<div style="font-weight:700;font-size:13px;color:#111827;margin-bottom:4px;">'
-            f'{item.product_name}</div>'
-            f'<div style="font-size:12px;color:#6b7280;">'
-            f'{item.color or "—"} / {item.size or "—"}'
-            f'&nbsp;&nbsp;·&nbsp;&nbsp;Qty: <strong>{item.quantity}</strong>'
-            f'&nbsp;&nbsp;·&nbsp;&nbsp;Unit: ${float(item.unit_price):.2f}'
-            f'&nbsp;&nbsp;·&nbsp;&nbsp;<strong>${float(item.line_total):.2f}</strong>'
-            f'</div>'
-            f'</div>'
-            for item in order.items
-        )
+        # Items summary
+        items_parts = []
+        for item in (getattr(order, "items", []) or []):
+            name = getattr(item, "product_name", "") or "Item"
+            color = getattr(item, "color", "") or ""
+            size = getattr(item, "size", "") or ""
+            qty = getattr(item, "quantity", 1)
+            detail = " / ".join(filter(None, [color, size]))
+            desc = f"{name} ({detail})" if detail else name
+            items_parts.append(f"{desc} — Qty: {qty}")
+        items_ordered = " | ".join(items_parts)
 
-        discount_val = float(getattr(order, "discount_amount", 0) or 0)
-        discount_row = (
-            f'<tr><td style="padding:4px 0;font-size:13px;color:#059669;font-weight:600">Discount</td>'
-            f'<td style="padding:4px 0;font-size:13px;color:#059669;font-weight:600;text-align:right">'
-            f'&#8722;${discount_val:.2f}</td></tr>'
-            if discount_val > 0 else ""
-        )
-        tax_row = (
-            f'<tr><td style="padding:4px 0;font-size:13px;color:#6b7280">Tax</td>'
-            f'<td style="padding:4px 0;font-size:13px;color:#6b7280;text-align:right">'
-            f'${float(order.tax_amount):.2f}</td></tr>'
-            if getattr(order, "tax_amount", None) and float(order.tax_amount) > 0 else ""
-        )
+        # Payment method display
+        pm_map = {"card": "Credit Card", "ach": "ACH / Bank Transfer",
+                  "net30": "Net 30", "net60": "Net 60", "wire": "Wire Transfer"}
+        payment_method = pm_map.get(getattr(order, "payment_method", "") or "", getattr(order, "payment_method", "") or "")
 
-        cta = (
-            f'<p style="margin:20px 0 0">'
-            f'<a href="{order_url}" style="background:#E8242A;color:#fff;padding:12px 28px;'
-            f'border-radius:6px;font-weight:700;text-decoration:none;font-size:14px;'
-            f'display:inline-block">View Order →</a></p>'
-            if not getattr(order, "is_guest_order", False) else ""
-        )
+        # Shipping address from snapshot
+        shipping_address = ""
+        snap = getattr(order, "shipping_address_snapshot", None)
+        if snap:
+            try:
+                d = _json.loads(snap) if isinstance(snap, str) else snap
+                parts = [d.get("address_line1") or "", d.get("city") or "",
+                         d.get("state_province") or "", d.get("postal_code") or ""]
+                shipping_address = ", ".join(p for p in parts if p)
+            except Exception:
+                pass
 
-        content_html = (
-            f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
-            f'Order Received!</h2>'
-            f'<p style="color:#374151;margin:0 0 24px">Hi {name}, your order has been received '
-            f'and is now being processed.</p>'
-            f'<div style="background:#F9F8F4;border-radius:8px;padding:16px 20px;margin-bottom:20px">'
-            f'<table style="width:100%"><tr>'
-            f'<td><div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;'
-            f'color:#6b7280">Order Number</div>'
-            f'<div style="font-size:20px;font-weight:800;color:#1B3A5C;margin-top:2px">'
-            f'{order.order_number}</div></td>'
-            f'<td style="text-align:right">'
-            f'<div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;'
-            f'color:#6b7280">Order Total</div>'
-            f'<div style="font-size:20px;font-weight:800;color:#059669;margin-top:2px">'
-            f'${float(order.total):.2f}</div></td>'
-            f'</tr></table></div>'
-            f'<div style="margin-bottom:20px;">'
-            f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;'
-            f'color:#6b7280;margin-bottom:8px;">ORDER ITEMS</div>'
-            f'{rows_html}'
-            f'</div>'
-            f'<table style="width:100%;margin-bottom:20px">'
-            f'<tr><td style="padding:4px 0;font-size:13px;color:#6b7280">Subtotal</td>'
-            f'<td style="padding:4px 0;font-size:13px;color:#6b7280;text-align:right">'
-            f'${float(order.subtotal):.2f}</td></tr>'
-            f'{discount_row}'
-            f'<tr><td style="padding:4px 0;font-size:13px;color:#6b7280">Shipping</td>'
-            f'<td style="padding:4px 0;font-size:13px;color:#6b7280;text-align:right">'
-            f'${float(order.shipping_cost or 0):.2f}</td></tr>'
-            f'{tax_row}'
-            f'<tr><td style="padding:8px 0 0;font-size:17px;font-weight:800;color:#1B3A5C;'
-            f'border-top:2px solid #e5e7eb">Total</td>'
-            f'<td style="padding:8px 0 0;font-size:17px;font-weight:800;color:#1B3A5C;'
-            f'text-align:right;border-top:2px solid #e5e7eb">${float(order.total):.2f}</td>'
-            f'</tr></table>'
-            f'{cta}'
-        )
+        # Contact name
+        contact_name = getattr(order, "guest_name", None) or "Valued Customer"
 
+        # PDF attachment
         attachments = None
         try:
             pdf_bytes = PDFService().generate_order_confirmation(order)
@@ -331,10 +288,20 @@ class EmailService:
         except Exception as _exc:
             logger.warning("PDF generation failed (order confirmation): %s", _exc)
 
-        return self._send_via_resend(
+        return self.send_from_file(
+            template_name="order_received.html",
             to_email=to_email,
             subject=f"Order Received — {order.order_number} | AF Apparels",
-            body_html=self._base_template(content_html),
+            variables={
+                "contact_name": contact_name,
+                "order_number": order.order_number,
+                "order_date": order.created_at.strftime("%B %d, %Y"),
+                "order_total": f"${float(order.total):.2f}",
+                "order_url": order_url if not getattr(order, "is_guest_order", False) else "",
+                "items_ordered": items_ordered,
+                "payment_method": payment_method,
+                "shipping_address": shipping_address,
+            },
             attachments=attachments,
         )
 
