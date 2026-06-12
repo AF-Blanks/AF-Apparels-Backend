@@ -892,21 +892,49 @@ async def generate_shipping_label(
     boxes = calculate_boxes(items, variant_weight_g)
     num_boxes = len(boxes)
 
-    # Parse shipping address from order snapshot
-    addr = _json.loads(order.shipping_address_snapshot or "{}")
-    to_address = {
-        "name": addr.get("full_name") or addr.get("name") or "",
-        "street1": addr.get("address_line1") or addr.get("street1") or "",
-        "city": addr.get("city", ""),
-        "state": addr.get("state") or addr.get("state_province", ""),
-        "zip": addr.get("zip_code") or addr.get("postal_code") or addr.get("zip", ""),
-        "country": addr.get("country", "US"),
-    }
-    if not all([to_address["street1"], to_address["city"], to_address["state"], to_address["zip"]]):
-        return {"success": False, "error": "Incomplete shipping address on order"}
-
     carrier_name = order.carrier or payload.carrier or ""
     service_name = order.courier_service or ""
+    logger.info(
+        "Box calc order %s: %d item(s) → %d box(es), carrier=%r, service=%r",
+        getattr(order, "order_number", str(order_id)), len(items), num_boxes, carrier_name, service_name,
+    )
+
+    # Parse shipping address — snapshot key names differ by order source:
+    #   seed/admin:   "address_line1"
+    #   wholesale:    "line1"  (from _resolve_address)
+    #   guest:        "line1"
+    addr = _json.loads(order.shipping_address_snapshot or "{}")
+    to_address = {
+        "name": addr.get("full_name") or addr.get("label") or addr.get("name") or "",
+        "street1": (
+            addr.get("address_line1") or addr.get("line1") or addr.get("street1") or ""
+        ),
+        "city": addr.get("city") or "",
+        "state": addr.get("state") or addr.get("state_province") or "",
+        "zip": addr.get("postal_code") or addr.get("zip_code") or addr.get("zip") or "",
+        "country": addr.get("country") or "US",
+    }
+
+    # Fallback to UserAddress record when snapshot is null or incomplete
+    if not all([to_address["street1"], to_address["city"], to_address["state"], to_address["zip"]]):
+        addr_id = getattr(order, "shipping_address_id", None)
+        if addr_id:
+            from app.models.company import UserAddress as _UA
+            ua = (await db.execute(select(_UA).where(_UA.id == addr_id))).scalar_one_or_none()
+            if ua:
+                to_address = {
+                    "name": ua.full_name or ua.label or "",
+                    "street1": ua.address_line1 or "",
+                    "city": ua.city or "",
+                    "state": ua.state or "",
+                    "zip": ua.postal_code or "",
+                    "country": ua.country or "US",
+                }
+
+    if not all([to_address["street1"], to_address["city"], to_address["state"], to_address["zip"]]):
+        logger.warning("Incomplete address for order %s: %s", getattr(order, "order_number", "?"), to_address)
+        return {"success": False, "error": "Incomplete shipping address on order"}
+
     all_labels: list[dict] = []
 
     # Single box: try the saved checkout rate_id first (fastest path)
@@ -938,7 +966,7 @@ async def generate_shipping_label(
 
     # Multi-box or saved rate expired: create one Shippo label per box
     if not all_labels:
-        if carrier_name and service_name:
+        if carrier_name:
             for box in boxes:
                 box_result = await create_label_for_box(
                     to_address=to_address,
