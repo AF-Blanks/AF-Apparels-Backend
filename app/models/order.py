@@ -113,6 +113,8 @@ class Order(BaseModel):
     # Admin edits + fees (columns added post-deploy — use raw SQL fallback in service)
     items_edited: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=False)
     convenience_fee: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True, default=0.0)
+    # Multi-box labels: JSON array of {box_number, tracking_number, tracking_url, label_url, carrier, service}
+    all_labels: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # ── Schema compatibility aliases ────────────────────────────────────────────
     @property

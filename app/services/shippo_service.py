@@ -184,6 +184,122 @@ async def create_shippo_label(order, carrier: str) -> dict:
     return await create_label(str(order.id), to_address, carrier_token, weight_oz=weight_oz)
 
 
+async def create_label_for_box(
+    to_address: dict,
+    carrier_name: str,
+    service_name: str,
+    weight_lbs: float,
+) -> dict:
+    """Create a single Shippo label for one box, matching by carrier + service name.
+
+    Used for multi-box label generation (Standard Ground orders).
+    Box dimensions are 20x16x12 inches (standard apparel box).
+    """
+    from app.utils.box_calculator import BOX_LENGTH, BOX_WIDTH, BOX_HEIGHT
+    try:
+        client = get_client()
+
+        # UPS requires address validation before label creation
+        if "ups" in carrier_name.lower():
+            try:
+                validated = client.addresses.create(
+                    components.AddressCreateRequest(
+                        name=to_address.get("name", "Customer"),
+                        street1=to_address.get("street1", ""),
+                        city=to_address.get("city", ""),
+                        state=to_address.get("state", ""),
+                        zip=to_address.get("zip", ""),
+                        country=to_address.get("country", "US"),
+                        validate=True,
+                    )
+                )
+                vr = getattr(validated, "validation_results", None)
+                if vr and not getattr(vr, "is_valid", True):
+                    return {
+                        "success": False,
+                        "error": "Please verify the shipping address — city, state and ZIP code must match",
+                    }
+            except Exception as _ve:
+                logger.warning("UPS address validation error: %s", _ve)
+
+        wh = WAREHOUSE_ADDRESS
+        shipment = client.shipments.create(
+            components.ShipmentCreateRequest(
+                address_from=components.AddressCreateRequest(
+                    name=wh["name"], street1=wh["street1"], city=wh["city"],
+                    state=wh["state"], zip=wh["zip"], country=wh["country"],
+                    phone=wh["phone"], email=wh["email"],
+                ),
+                address_to=components.AddressCreateRequest(
+                    name=to_address.get("name", ""),
+                    street1=to_address.get("street1", ""),
+                    city=to_address.get("city", ""),
+                    state=to_address.get("state", ""),
+                    zip=to_address.get("zip", ""),
+                    country=to_address.get("country", "US"),
+                ),
+                parcels=[components.ParcelCreateRequest(
+                    length=BOX_LENGTH,
+                    width=BOX_WIDTH,
+                    height=BOX_HEIGHT,
+                    distance_unit=components.DistanceUnitEnum.IN,
+                    weight=str(round(weight_lbs, 2)),
+                    mass_unit=components.WeightUnitEnum.LB,
+                )],
+                async_=False,
+            )
+        )
+
+        # Find rate matching carrier + service name
+        carrier_upper = carrier_name.upper()
+        service_lower = service_name.lower()
+        selected_rate = None
+
+        for rate in (shipment.rates or []):
+            rate_carrier = (rate.provider or "").upper()
+            rate_service = (rate.servicelevel.name if rate.servicelevel else "").lower()
+            if rate_carrier == carrier_upper and service_lower in rate_service:
+                selected_rate = rate
+                break
+
+        if not selected_rate:
+            for rate in (shipment.rates or []):
+                if (rate.provider or "").upper() == carrier_upper:
+                    selected_rate = rate
+                    break
+
+        if not selected_rate and shipment.rates:
+            selected_rate = shipment.rates[0]
+
+        if not selected_rate:
+            return {"success": False, "error": "No rates available for this box"}
+
+        transaction = client.transactions.create(
+            components.TransactionCreateRequest(
+                rate=selected_rate.object_id,
+                label_file_type=components.LabelFileTypeEnum.PDF,
+                async_=False,
+            )
+        )
+
+        if transaction.status == components.TransactionStatusEnum.SUCCESS:
+            return {
+                "success": True,
+                "tracking_number": transaction.tracking_number,
+                "tracking_url": transaction.tracking_url_provider,
+                "label_url": transaction.label_url,
+                "carrier": selected_rate.provider,
+                "service": selected_rate.servicelevel.name if selected_rate.servicelevel else service_name,
+            }
+        else:
+            msgs = " | ".join([m.text for m in (transaction.messages or []) if hasattr(m, "text")])
+            return {"success": False, "error": msgs or "Label creation failed"}
+
+    except Exception as e:
+        logger.error("create_label_for_box error: %s", e)
+        return {"success": False, "error": str(e)}
+
+
 async def track_package(tracking_number: str, carrier: str) -> dict:
     try:
         client = get_client()

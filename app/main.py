@@ -312,6 +312,9 @@ async def _ensure_content_tables() -> None:
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='tracking_url') THEN
                         ALTER TABLE orders ADD COLUMN tracking_url TEXT;
                     END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='all_labels') THEN
+                        ALTER TABLE orders ADD COLUMN all_labels TEXT;
+                    END IF;
                 END$$;
             """))
             await conn.execute(text("""

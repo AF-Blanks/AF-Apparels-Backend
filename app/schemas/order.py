@@ -207,6 +207,8 @@ class AdminOrderDetail(OrderOut):
     # Admin edits flag + convenience fee
     items_edited: bool = False
     convenience_fee: Decimal | None = None
+    # Multi-box labels JSON string (parsed by frontend)
+    all_labels: str | None = None
 
     model_config = {"from_attributes": True}
 
