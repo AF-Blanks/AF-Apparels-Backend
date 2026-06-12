@@ -864,21 +864,54 @@ async def generate_shipping_label(
     payload: _LabelRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Generate a Shippo label for an order, mark it shipped, and email the customer."""
-    from app.services.shippo_service import create_shippo_label, get_client
-    from app.services import shippo_service
+    """Generate Shippo labels for a live-rate order — one label per box based on product types/sizes."""
+    from app.services.shippo_service import create_label_for_box, create_shippo_label, get_client
+    from app.utils.box_calculator import calculate_boxes
+    from app.models.product import ProductVariant as _PV
     from sqlalchemy import text as _text
-    import logging as _logging
-    _lbl_log = _logging.getLogger(__name__)
 
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    # Try saved rate_id from customer's checkout selection first (may be expired)
+    # Load items + variant weights for box calculation
+    items_result = await db.execute(select(OrderItem).where(OrderItem.order_id == order.id))
+    items = items_result.scalars().all()
+
+    variant_weight_g: dict[str, float] = {}
+    variant_ids = [str(i.variant_id) for i in items if i.variant_id]
+    if variant_ids:
+        try:
+            vr = await db.execute(select(_PV.id, _PV.weight_grams).where(_PV.id.in_(variant_ids)))
+            for _vid, _wg in vr.all():
+                if _wg:
+                    variant_weight_g[str(_vid)] = float(_wg)
+        except Exception:
+            pass
+
+    boxes = calculate_boxes(items, variant_weight_g)
+    num_boxes = len(boxes)
+
+    # Parse shipping address from order snapshot
+    addr = _json.loads(order.shipping_address_snapshot or "{}")
+    to_address = {
+        "name": addr.get("full_name") or addr.get("name") or "",
+        "street1": addr.get("address_line1") or addr.get("street1") or "",
+        "city": addr.get("city", ""),
+        "state": addr.get("state") or addr.get("state_province", ""),
+        "zip": addr.get("zip_code") or addr.get("postal_code") or addr.get("zip", ""),
+        "country": addr.get("country", "US"),
+    }
+    if not all([to_address["street1"], to_address["city"], to_address["state"], to_address["zip"]]):
+        return {"success": False, "error": "Incomplete shipping address on order"}
+
+    carrier_name = order.carrier or payload.carrier or ""
+    service_name = order.courier_service or ""
+    all_labels: list[dict] = []
+
+    # Single box: try the saved checkout rate_id first (fastest path)
     saved_rate_id = getattr(order, "shipping_rate_id", None)
-    result = None
-    if saved_rate_id:
+    if num_boxes == 1 and saved_rate_id:
         try:
             from shippo.models import components as _comp
             client = get_client()
@@ -890,62 +923,113 @@ async def generate_shipping_label(
                 )
             )
             if txn.status == _comp.TransactionStatusEnum.SUCCESS:
-                result = {
-                    "success": True,
+                all_labels = [{
+                    "box_number": 1,
                     "tracking_number": txn.tracking_number,
-                    "tracking_url": txn.tracking_url_provider,
+                    "tracking_url": txn.tracking_url_provider or "",
                     "label_url": txn.label_url,
-                    "carrier": order.carrier or payload.carrier.upper(),
-                    "service": order.courier_service or "",
-                }
+                    "carrier": carrier_name or payload.carrier or "Carrier",
+                    "service": service_name or "",
+                }]
             else:
-                _lbl_log.warning("Saved rate_id transaction not SUCCESS (%s), falling back", txn.status)
+                logger.warning("Saved rate_id transaction not SUCCESS (%s), falling back", txn.status)
         except Exception as _e:
-            _lbl_log.warning("Saved rate_id failed (likely expired): %s — falling back to fresh rate", _e)
+            logger.warning("Saved rate_id failed (likely expired): %s — falling back", _e)
 
-    if result is None:
-        result = await create_shippo_label(order, carrier=payload.carrier.lower())
+    # Multi-box or saved rate expired: create one Shippo label per box
+    if not all_labels:
+        if carrier_name and service_name:
+            for box in boxes:
+                box_result = await create_label_for_box(
+                    to_address=to_address,
+                    carrier_name=carrier_name,
+                    service_name=service_name,
+                    weight_lbs=box.weight_lbs,
+                )
+                if not box_result.get("success"):
+                    return {
+                        "success": False,
+                        "error": f"Box {box.box_number}: {box_result.get('error', 'Label failed')}",
+                    }
+                all_labels.append({
+                    "box_number": box.box_number,
+                    "tracking_number": box_result["tracking_number"],
+                    "tracking_url": box_result.get("tracking_url", ""),
+                    "label_url": box_result["label_url"],
+                    "carrier": box_result.get("carrier", carrier_name),
+                    "service": box_result.get("service", service_name),
+                })
+        else:
+            # Absolute fallback: no carrier/service on order — fresh single label
+            fallback = await create_shippo_label(order, carrier=(payload.carrier or "usps").lower())
+            if not fallback.get("success"):
+                return fallback
+            all_labels = [{
+                "box_number": 1,
+                "tracking_number": fallback["tracking_number"],
+                "tracking_url": fallback.get("tracking_url", ""),
+                "label_url": fallback["label_url"],
+                "carrier": fallback.get("carrier", ""),
+                "service": fallback.get("service", ""),
+            }]
 
-    if result.get("success"):
-        order.tracking_number = result["tracking_number"]
-        order.carrier = result["carrier"]
-        order.courier = result["carrier"]   # keeps email helper working
-        order.courier_service = result["service"]
-        order.status = "shipped"
-        if not order.shipped_at:
-            order.shipped_at = datetime.now(timezone.utc)
+    if not all_labels:
+        return {"success": False, "error": "No labels generated"}
 
-        # label_url / tracking_url added via startup migration — use raw SQL for safety
-        await db.execute(
-            _text("UPDATE orders SET label_url=:lu, tracking_url=:tu WHERE id=:oid"),
-            {"lu": result.get("label_url"), "tu": result.get("tracking_url"), "oid": str(order_id)},
-        )
+    first = all_labels[0]
+    order.tracking_number = first["tracking_number"]
+    order.carrier = first["carrier"]
+    order.courier = first["carrier"]
+    order.courier_service = first["service"]
+    order.status = "shipped"
+    if not order.shipped_at:
+        order.shipped_at = datetime.now(timezone.utc)
 
-        # Timeline entry
-        entry = {
-            "status": "shipped",
-            "message": (
-                f"Shippo label generated via {result['carrier']} {result['service']}"
-                f" — Tracking: {result['tracking_number']}"
-            ),
-            "created_by": "admin",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        current = list(order.timeline or [])
-        current.append(entry)
-        await db.execute(
-            _text("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
-            {"tl": _json.dumps(current), "oid": str(order_id)},
-        )
+    all_labels_json = _json.dumps(all_labels)
+    await db.execute(
+        _text("UPDATE orders SET label_url=:lu, tracking_url=:tu, all_labels=:al WHERE id=:oid"),
+        {
+            "lu": first.get("label_url"),
+            "tu": first.get("tracking_url"),
+            "al": all_labels_json,
+            "oid": str(order_id),
+        },
+    )
 
-        await db.commit()
-        try:
-            from app.tasks.email_tasks import send_order_shipped_email as _se
-            _se.delay(str(order.id), order.tracking_number or "")
-        except Exception as _e:
-            logger.warning("Shipped email dispatch failed: %s", _e)
+    tracking_summary = ", ".join(lb["tracking_number"] for lb in all_labels)
+    entry = {
+        "status": "shipped",
+        "message": (
+            f"Shippo {len(all_labels)} label(s) generated via {first['carrier']} {first['service']}"
+            f" — Tracking: {tracking_summary}"
+        ),
+        "created_by": "admin",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    current = list(order.timeline or [])
+    current.append(entry)
+    await db.execute(
+        _text("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
+        {"tl": _json.dumps(current), "oid": str(order_id)},
+    )
 
-    return result
+    await db.commit()
+    try:
+        from app.tasks.email_tasks import send_order_shipped_email as _se
+        _se.delay(str(order.id), first["tracking_number"] or "")
+    except Exception as _e:
+        logger.warning("Shipped email dispatch failed: %s", _e)
+
+    return {
+        "success": True,
+        "num_boxes": len(all_labels),
+        "tracking_number": first["tracking_number"],
+        "tracking_url": first.get("tracking_url"),
+        "label_url": first.get("label_url"),
+        "carrier": first["carrier"],
+        "service": first["service"],
+        "labels": all_labels,
+    }
 
 
 class _FetchRatesRequest(BaseModel):

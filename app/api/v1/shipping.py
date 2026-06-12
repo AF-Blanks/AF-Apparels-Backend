@@ -1,4 +1,5 @@
 """Public shipping endpoints — live Shippo rates and shipping type lookup."""
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, Request
@@ -103,6 +104,25 @@ async def get_live_rates(payload: LiveRatesRequest, db: AsyncSession = Depends(g
                 async_=False,
             )
         )
+
+        # Retry if major carriers are missing (Shippo may return partial results on first call)
+        _expected = {"ups", "usps", "fedex"}
+        for _attempt in range(5):
+            _present = {(r.provider or "").lower() for r in (shipment.rates or [])}
+            _missing = _expected - _present
+            if not _missing or _attempt == 4:
+                if _missing:
+                    logger.warning("live-rates: %s absent after %d attempts", _missing, _attempt + 1)
+                break
+            logger.info("live-rates attempt %d: %s missing, retrying in 1.5 s", _attempt + 1, _missing)
+            await asyncio.sleep(1.5)
+            try:
+                updated = client.shipments.get(shipment_id=shipment.object_id)
+                if updated and (updated.rates or []):
+                    shipment = updated
+            except Exception as _re:
+                logger.warning("live-rates re-fetch attempt %d failed: %s", _attempt + 1, _re)
+                break
 
         rates = []
         for rate in (shipment.rates or []):
