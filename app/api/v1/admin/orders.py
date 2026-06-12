@@ -901,8 +901,8 @@ async def generate_shipping_label(
 
     # Parse shipping address — snapshot key names differ by order source:
     #   seed/admin:   "address_line1"
-    #   wholesale:    "line1"  (from _resolve_address)
-    #   guest:        "line1"
+    #   wholesale:    "line1"  (from _resolve_address in order_service)
+    #   guest:        "line1" + "phone"
     addr = _json.loads(order.shipping_address_snapshot or "{}")
     to_address = {
         "name": addr.get("full_name") or addr.get("label") or addr.get("name") or "",
@@ -913,6 +913,7 @@ async def generate_shipping_label(
         "state": addr.get("state") or addr.get("state_province") or "",
         "zip": addr.get("postal_code") or addr.get("zip_code") or addr.get("zip") or "",
         "country": addr.get("country") or "US",
+        "phone": addr.get("phone") or "",
     }
 
     # Fallback to UserAddress record when snapshot is null or incomplete
@@ -929,77 +930,47 @@ async def generate_shipping_label(
                     "state": ua.state or "",
                     "zip": ua.postal_code or "",
                     "country": ua.country or "US",
+                    "phone": ua.phone or "",
                 }
 
     if not all([to_address["street1"], to_address["city"], to_address["state"], to_address["zip"]]):
         logger.warning("Incomplete address for order %s: %s", getattr(order, "order_number", "?"), to_address)
         return {"success": False, "error": "Incomplete shipping address on order"}
 
+    # Ensure required fields have non-empty values for Shippo label purchase
+    if not to_address.get("name"):
+        to_address["name"] = "Customer"
+    if not to_address.get("phone"):
+        to_address["phone"] = "+12145550000"  # warehouse fallback
+
+    if not carrier_name:
+        return {"success": False, "error": "No carrier associated with this order. Re-fetch rates and select one."}
+
     all_labels: list[dict] = []
 
-    # Single box: try the saved checkout rate_id first (fastest path)
-    saved_rate_id = getattr(order, "shipping_rate_id", None)
-    if num_boxes == 1 and saved_rate_id:
-        try:
-            from shippo.models import components as _comp
-            client = get_client()
-            txn = client.transactions.create(
-                _comp.TransactionCreateRequest(
-                    rate=saved_rate_id,
-                    label_file_type=_comp.LabelFileTypeEnum.PDF,
-                    async_=False,
-                )
-            )
-            if txn.status == _comp.TransactionStatusEnum.SUCCESS:
-                all_labels = [{
-                    "box_number": 1,
-                    "tracking_number": txn.tracking_number,
-                    "tracking_url": txn.tracking_url_provider or "",
-                    "label_url": txn.label_url,
-                    "carrier": carrier_name or payload.carrier or "Carrier",
-                    "service": service_name or "",
-                }]
-            else:
-                logger.warning("Saved rate_id transaction not SUCCESS (%s), falling back", txn.status)
-        except Exception as _e:
-            logger.warning("Saved rate_id failed (likely expired): %s — falling back", _e)
-
-    # Multi-box or saved rate expired: create one Shippo label per box
-    if not all_labels:
-        if carrier_name:
-            for box in boxes:
-                box_result = await create_label_for_box(
-                    to_address=to_address,
-                    carrier_name=carrier_name,
-                    service_name=service_name,
-                    weight_lbs=box.weight_lbs,
-                )
-                if not box_result.get("success"):
-                    return {
-                        "success": False,
-                        "error": f"Box {box.box_number}: {box_result.get('error', 'Label failed')}",
-                    }
-                all_labels.append({
-                    "box_number": box.box_number,
-                    "tracking_number": box_result["tracking_number"],
-                    "tracking_url": box_result.get("tracking_url", ""),
-                    "label_url": box_result["label_url"],
-                    "carrier": box_result.get("carrier", carrier_name),
-                    "service": box_result.get("service", service_name),
-                })
-        else:
-            # Absolute fallback: no carrier/service on order — fresh single label
-            fallback = await create_shippo_label(order, carrier=(payload.carrier or "usps").lower())
-            if not fallback.get("success"):
-                return fallback
-            all_labels = [{
-                "box_number": 1,
-                "tracking_number": fallback["tracking_number"],
-                "tracking_url": fallback.get("tracking_url", ""),
-                "label_url": fallback["label_url"],
-                "carrier": fallback.get("carrier", ""),
-                "service": fallback.get("service", ""),
-            }]
+    # Always create a fresh Shippo shipment with complete address — never reuse the
+    # saved checkout rate_id, which was generated without phone and will be rejected
+    # by Shippo with "rate may only be purchased if generated with complete address".
+    for box in boxes:
+        box_result = await create_label_for_box(
+            to_address=to_address,
+            carrier_name=carrier_name,
+            service_name=service_name,
+            weight_lbs=box.weight_lbs,
+        )
+        if not box_result.get("success"):
+            return {
+                "success": False,
+                "error": f"Box {box.box_number}: {box_result.get('error', 'Label failed')}",
+            }
+        all_labels.append({
+            "box_number": box.box_number,
+            "tracking_number": box_result["tracking_number"],
+            "tracking_url": box_result.get("tracking_url", ""),
+            "label_url": box_result["label_url"],
+            "carrier": box_result.get("carrier", carrier_name),
+            "service": box_result.get("service", service_name),
+        })
 
     if not all_labels:
         return {"success": False, "error": "No labels generated"}

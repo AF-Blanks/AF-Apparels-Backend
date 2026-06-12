@@ -231,12 +231,13 @@ async def create_label_for_box(
                     phone=wh["phone"], email=wh["email"],
                 ),
                 address_to=components.AddressCreateRequest(
-                    name=to_address.get("name", ""),
+                    name=to_address.get("name") or "Customer",
                     street1=to_address.get("street1", ""),
                     city=to_address.get("city", ""),
                     state=to_address.get("state", ""),
                     zip=to_address.get("zip", ""),
                     country=to_address.get("country", "US"),
+                    phone=to_address.get("phone") or "+12145550000",
                 ),
                 parcels=[components.ParcelCreateRequest(
                     length=BOX_LENGTH,
