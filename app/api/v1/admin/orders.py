@@ -951,26 +951,35 @@ async def generate_shipping_label(
     # Always create a fresh Shippo shipment with complete address — never reuse the
     # saved checkout rate_id, which was generated without phone and will be rejected
     # by Shippo with "rate may only be purchased if generated with complete address".
-    for box in boxes:
-        box_result = await create_label_for_box(
+    # Run all boxes in parallel to reduce N×API-round-trip latency.
+    async def _make_box_label(box):
+        result = await create_label_for_box(
             to_address=to_address,
             carrier_name=carrier_name,
             service_name=service_name,
             weight_lbs=box.weight_lbs,
         )
+        return box.box_number, result
+
+    box_outcomes = await asyncio.gather(
+        *[_make_box_label(box) for box in boxes],
+        return_exceptions=True,
+    )
+    for outcome in box_outcomes:
+        if isinstance(outcome, BaseException):
+            return {"success": False, "error": f"Label task failed: {outcome}"}
+        box_num, box_result = outcome
         if not box_result.get("success"):
-            return {
-                "success": False,
-                "error": f"Box {box.box_number}: {box_result.get('error', 'Label failed')}",
-            }
+            return {"success": False, "error": f"Box {box_num}: {box_result.get('error', 'Label failed')}"}
         all_labels.append({
-            "box_number": box.box_number,
+            "box_number": box_num,
             "tracking_number": box_result["tracking_number"],
             "tracking_url": box_result.get("tracking_url", ""),
             "label_url": box_result["label_url"],
             "carrier": box_result.get("carrier", carrier_name),
             "service": box_result.get("service", service_name),
         })
+    all_labels.sort(key=lambda x: x["box_number"])
 
     if not all_labels:
         return {"success": False, "error": "No labels generated"}
@@ -1256,26 +1265,34 @@ async def generate_label_manual(
         service_name = payload.service or ""       # e.g. "Ground", "Priority Mail"
 
         if carrier_name and service_name:
-            for box in boxes:
-                box_result = await create_label_for_box(
+            async def _manual_box_label(box):
+                result = await create_label_for_box(
                     to_address=to_address,
                     carrier_name=carrier_name,
                     service_name=service_name,
                     weight_lbs=box.weight_lbs,
                 )
+                return box.box_number, result
+
+            manual_outcomes = await asyncio.gather(
+                *[_manual_box_label(box) for box in boxes],
+                return_exceptions=True,
+            )
+            for outcome in manual_outcomes:
+                if isinstance(outcome, BaseException):
+                    return {"success": False, "error": f"Label task failed: {outcome}"}
+                box_num, box_result = outcome
                 if not box_result.get("success"):
-                    return {
-                        "success": False,
-                        "error": f"Box {box.box_number}: {box_result.get('error', 'Label failed')}",
-                    }
+                    return {"success": False, "error": f"Box {box_num}: {box_result.get('error', 'Label failed')}"}
                 all_labels.append({
-                    "box_number": box.box_number,
+                    "box_number": box_num,
                     "tracking_number": box_result["tracking_number"],
                     "tracking_url": box_result.get("tracking_url", ""),
                     "label_url": box_result["label_url"],
                     "carrier": box_result.get("carrier", carrier_name),
                     "service": box_result.get("service", service_name),
                 })
+            all_labels.sort(key=lambda x: x["box_number"])
         else:
             # Absolute fallback: weight-based single label
             carrier_token = CARRIER_TOKENS.get(carrier_name.lower(), "usps_priority")

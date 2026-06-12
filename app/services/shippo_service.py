@@ -251,26 +251,31 @@ async def create_label_for_box(
             )
         )
 
-        # Find rate matching carrier + service name
+        # Scored rate selection so all boxes pick the same service.
+        # Score 0 = exact, 1 = partial substring, 2 = same carrier any service.
+        # Within a score tier, prefer the cheapest option.
         carrier_upper = carrier_name.upper()
-        service_lower = service_name.lower()
+        target_service = service_name.lower().strip()
         selected_rate = None
 
+        matches: list[tuple[int, object]] = []
         for rate in (shipment.rates or []):
-            rate_carrier = (rate.provider or "").upper()
-            rate_service = (rate.servicelevel.name if rate.servicelevel else "").lower()
-            if rate_carrier == carrier_upper and service_lower in rate_service:
-                selected_rate = rate
-                break
+            rc = (rate.provider or "").upper()
+            rs = (rate.servicelevel.name if rate.servicelevel else "").lower()
+            if rc != carrier_upper:
+                continue
+            if target_service and target_service == rs:
+                matches.append((0, rate))
+            elif target_service and (target_service in rs or rs in target_service):
+                matches.append((1, rate))
+            else:
+                matches.append((2, rate))
 
-        if not selected_rate:
-            for rate in (shipment.rates or []):
-                if (rate.provider or "").upper() == carrier_upper:
-                    selected_rate = rate
-                    break
-
-        if not selected_rate and shipment.rates:
-            selected_rate = shipment.rates[0]
+        if matches:
+            matches.sort(key=lambda x: (x[0], float(x[1].amount or 0)))
+            selected_rate = matches[0][1]
+        elif shipment.rates:
+            selected_rate = min(shipment.rates, key=lambda r: float(r.amount or 0))
 
         if not selected_rate:
             return {"success": False, "error": "No rates available for this box"}
