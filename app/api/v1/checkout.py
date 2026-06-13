@@ -73,10 +73,24 @@ async def tokenize_card(
     company_id = getattr(request.state, "company_id", None)
     _log.info("tokenize_card called — company: %s (card save runs here, not at confirm)", company_id)
 
+    import os as _os
+    from fastapi.responses import JSONResponse as _JSONResponse
     from app.services.qb_payments_service import QBPaymentsService
     qb_pay = QBPaymentsService()
     try:
         card = payload["card"]
+        if _os.getenv("QB_ENVIRONMENT") == "sandbox":
+            _card_name = (card.get("name") or "").lower()
+            if "emulate=10401" in _card_name:
+                return _JSONResponse(
+                    status_code=402,
+                    content={"error": {"code": "10401", "message": "Card declined: Insufficient funds (simulated)"}},
+                )
+            if "emulate=10301" in _card_name:
+                return _JSONResponse(
+                    status_code=402,
+                    content={"error": {"code": "10301", "message": "Card declined: Do not honor (simulated)"}},
+                )
         token = qb_pay.create_token(
             card_number=card["number"],
             exp_month=card["expMonth"],
