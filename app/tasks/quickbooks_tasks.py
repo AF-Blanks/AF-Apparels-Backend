@@ -546,11 +546,12 @@ def sync_variant_to_qb(self, variant_id: str):
 
 
 @celery_app.task(bind=True, max_retries=5)
-def sync_inventory_to_qb(self, variant_id: str):
+def sync_inventory_to_qb(self, variant_id: str, deferred_count: int = 0):
     """Push the current total stock for a variant to QuickBooks.
 
     If the variant has no QB item yet, falls back to sync_variant_to_qb
     (which creates the item and sets initial QtyOnHand in one call).
+    deferred_count caps re-queues at 3 to prevent infinite loops.
     """
 
     async def _run_all():
@@ -571,9 +572,19 @@ def sync_inventory_to_qb(self, variant_id: str):
                     return None
 
                 if not variant.qb_item_id:
+                    if deferred_count >= 3:
+                        logger.warning(
+                            "sync_inventory_to_qb: variant %s still not in QB after %d defers — stopping",
+                            variant_id, deferred_count,
+                        )
+                        return {"status": "deferred_limit_reached"}
                     sync_variant_to_qb.delay(variant_id)
-                    # Re-queue this inventory sync to run after variant sync completes
-                    sync_inventory_to_qb.apply_async(args=[variant_id], countdown=30)
+                    # Re-queue once variant sync completes; cap at 3 total defers
+                    sync_inventory_to_qb.apply_async(
+                        args=[variant_id],
+                        kwargs={"deferred_count": deferred_count + 1},
+                        countdown=60,
+                    )
                     return {"status": "deferred", "reason": "variant not yet synced to QB"}
 
                 total_stock = int((await session.execute(

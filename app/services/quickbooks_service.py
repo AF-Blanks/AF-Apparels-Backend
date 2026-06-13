@@ -110,6 +110,12 @@ class _TokenBucket:
 
 _rate_limiter = _TokenBucket()
 
+# Process-level cache for QB account IDs (Income/Asset/COGS).
+# These IDs are permanent in QB and never change, so no TTL needed.
+# Survives across Celery tasks in the same worker process — saves 3 Query
+# calls per variant sync after the first lookup.
+_qb_account_id_cache: dict[str, str] = {}
+
 QB_BASE_URL = {
     "sandbox": "https://sandbox-quickbooks.api.intuit.com",
     "production": "https://quickbooks.api.intuit.com",
@@ -391,14 +397,22 @@ class QuickBooksService:
     # ── Items (Products / Inventory) ─────────────────────────────────────────
 
     def _get_account_id(self, name: str, account_type: str) -> str:
-        """Return the QB account Id for the given name+type, caching per instance.
+        """Return the QB account Id for the given name+type.
 
-        Raises ValueError if QB returns no matching account.
+        Checks process-level cache first (persists across Celery tasks),
+        then instance cache, then QB API. Raises ValueError if not found.
         """
         cache_key = f"{account_type}:{name}"
+
+        # 1. Process-level cache (survives across tasks in same worker process)
+        if cache_key in _qb_account_id_cache:
+            return _qb_account_id_cache[cache_key]
+
+        # 2. Instance-level cache (same task, multiple lookups)
         if cache_key in self._account_id_cache:
             return self._account_id_cache[cache_key]
 
+        # 3. QB API call (only on first lookup per worker process)
         escaped_name = name.replace("'", "\\'")
         escaped_type = account_type.replace("'", "\\'")
         result = self._request(
@@ -411,8 +425,9 @@ class QuickBooksService:
             raise ValueError(f"QB account not found: name='{name}' type='{account_type}'")
 
         account_id = str(accounts[0]["Id"])
+        _qb_account_id_cache[cache_key] = account_id
         self._account_id_cache[cache_key] = account_id
-        logger.info("QB _get_account_id — name=%s type=%s → id=%s", name, account_type, account_id)
+        logger.info("QB _get_account_id — name=%s type=%s → id=%s (cached process-wide)", name, account_type, account_id)
         return account_id
 
     def get_item(self, qb_item_id: str) -> dict[str, Any]:
