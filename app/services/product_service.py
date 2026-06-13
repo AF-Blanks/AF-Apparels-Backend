@@ -4,7 +4,7 @@ import logging
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import case, exists, func, inspect as sa_inspect, or_, select, text
+from sqlalchemy import exists, func, inspect as sa_inspect, or_, select, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -149,18 +149,20 @@ class ProductService:
         if params.product_code:
             query = query.where(Product.product_code.ilike(f"%{params.product_code}%"))
 
-        # Order: sort_order > 0 first (ascending), sort_order == 0 last, then by newest
-        _sort_expr = case((Product.sort_order == 0, 2147483647), else_=Product.sort_order)
-        query = query.order_by(_sort_expr.asc(), Product.created_at.desc())
-
-        # Count
+        # Count before applying order/pagination
         count_query = select(func.count()).select_from(query.subquery())
         total_result = await self.db.execute(count_query)
         total = total_result.scalar_one()
 
-        # Paginate
+        # Order and paginate — sort_order ASC (0 = new/unassigned, appears first until admin reorders)
         offset = (params.page - 1) * params.page_size
-        query = query.offset(offset).limit(params.page_size).distinct()
+        query = (
+            query
+            .order_by(Product.sort_order.asc(), Product.created_at.desc())
+            .offset(offset)
+            .limit(params.page_size)
+            .distinct()
+        )
 
         result = await self.db.execute(query)
         products = result.scalars().unique().all()

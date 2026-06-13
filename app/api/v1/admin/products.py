@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import case, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -66,8 +66,7 @@ async def list_admin_products(
         )
     if status:
         query = query.where(Product.status == status)
-    _sort_expr = case((Product.sort_order == 0, 2147483647), else_=Product.sort_order)
-    query = query.order_by(_sort_expr.asc(), Product.created_at.desc())
+    query = query.order_by(Product.sort_order.asc(), Product.created_at.desc())
     query = query.offset((page - 1) * page_size).limit(page_size)
 
     result = await db.execute(query)
