@@ -4,7 +4,7 @@ import logging
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import exists, func, inspect as sa_inspect, or_, select, text
+from sqlalchemy import case, exists, func, inspect as sa_inspect, or_, select, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -148,6 +148,10 @@ class ProductService:
 
         if params.product_code:
             query = query.where(Product.product_code.ilike(f"%{params.product_code}%"))
+
+        # Order: sort_order > 0 first (ascending), sort_order == 0 last, then by newest
+        _sort_expr = case((Product.sort_order == 0, 2147483647), else_=Product.sort_order)
+        query = query.order_by(_sort_expr.asc(), Product.created_at.desc())
 
         # Count
         count_query = select(func.count()).select_from(query.subquery())

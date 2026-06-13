@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -66,6 +66,8 @@ async def list_admin_products(
         )
     if status:
         query = query.where(Product.status == status)
+    _sort_expr = case((Product.sort_order == 0, 2147483647), else_=Product.sort_order)
+    query = query.order_by(_sort_expr.asc(), Product.created_at.desc())
     query = query.offset((page - 1) * page_size).limit(page_size)
 
     result = await db.execute(query)
@@ -102,6 +104,22 @@ async def create_product(payload: ProductCreate, db: AsyncSession = Depends(get_
         )
     )
     return result.scalar_one()
+
+
+@router.patch("/{product_id}/sort-order")
+async def update_product_sort_order(
+    product_id: UUID, payload: dict, db: AsyncSession = Depends(get_db)
+):
+    sort_order = payload.get("sort_order")
+    if sort_order is None or not isinstance(sort_order, int):
+        raise HTTPException(status_code=422, detail="sort_order (integer) required")
+    product = await db.get(Product, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    product.sort_order = sort_order
+    await db.commit()
+    await redis_delete_pattern(f"products:list:*")
+    return {"id": str(product_id), "sort_order": sort_order}
 
 
 @router.patch("/{product_id}", response_model=ProductDetail)

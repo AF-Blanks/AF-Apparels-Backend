@@ -86,6 +86,7 @@ class ProductListItem(BaseModel):
     slug: str
     status: str
     moq: int
+    sort_order: int = 0
     primary_image: ProductImageOut | None = None
     variants: list[VariantOut]
     categories: list[CategoryOut] = []
@@ -142,6 +143,7 @@ class ProductDetail(BaseModel):
     highlight_text: str | None = None
     review_count: int = 0
     avg_rating: float = 0.0
+    sort_order: int = 0
 
     model_config = {"from_attributes": True}
 

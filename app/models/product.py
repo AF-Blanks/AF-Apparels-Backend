@@ -65,6 +65,9 @@ class Product(BaseModel):
     weight: Mapped[str | None] = mapped_column(String(100), nullable=True)
     gender: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
+    # Manual sort order — lower numbers appear first; 0 = unsorted (appears last)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
     # Tab content fields
     care_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     print_guide: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
