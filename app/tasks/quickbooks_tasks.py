@@ -300,22 +300,6 @@ def sync_order_invoice_to_qb(self, order_id: str):
                         for i in order.items
                     ],
                 }
-                _shipping = float(order.shipping_cost or 0)
-                _tax = float(order.tax_amount or 0)
-                if _shipping > 0:
-                    order_data["items"].append({
-                        "description": "Shipping",
-                        "quantity": 1,
-                        "unit_price": _shipping,
-                        "amount": _shipping,
-                        "qb_item_id": None,
-                    })
-                if _tax > 0:
-                    order_data["items"].append({
-                        "description": f"Tax: ${_tax:.2f}",
-                        "detail_type": "DescriptionOnly",
-                        "amount": 0,
-                    })
 
             # ── 2. Load live QB tokens ────────────────────────────────────────
             svc = await QuickBooksService().initialize()

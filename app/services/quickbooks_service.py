@@ -364,29 +364,18 @@ class QuickBooksService:
 
         lines = []
         for item in line_items:
-            if item.get("detail_type") == "DescriptionOnly":
-                lines.append({
-                    "Amount": 0,
-                    "DetailType": "DescriptionOnly",
-                    "DescriptionOnly": {
-                        "ServiceDate": None,
-                        "TaxCodeRef": {"value": "NON"},
-                    },
-                    "Description": item["description"],
-                })
-            else:
-                line_detail: dict[str, Any] = {
-                    "Qty": item["quantity"],
-                    "UnitPrice": float(item["unit_price"]),
-                }
-                if item.get("qb_item_id"):
-                    line_detail["ItemRef"] = {"value": item["qb_item_id"]}
-                lines.append({
-                    "Amount": float(item["amount"]),
-                    "DetailType": "SalesItemLineDetail",
-                    "Description": item["description"],
-                    "SalesItemLineDetail": line_detail,
-                })
+            line_detail: dict[str, Any] = {
+                "Qty": item["quantity"],
+                "UnitPrice": float(item["unit_price"]),
+            }
+            if item.get("qb_item_id"):
+                line_detail["ItemRef"] = {"value": item["qb_item_id"]}
+            lines.append({
+                "Amount": float(item["amount"]),
+                "DetailType": "SalesItemLineDetail",
+                "Description": item["description"],
+                "SalesItemLineDetail": line_detail,
+            })
 
         payload: dict[str, Any] = {
             "CustomerRef": {"value": qb_customer_id},
