@@ -1495,7 +1495,7 @@ async def sync_payments_from_qb(
         from app.services.quickbooks_service import QuickBooksService
         import httpx
 
-        qb_svc = QuickBooksService()
+        qb_svc = await QuickBooksService().initialize()
         access_token = qb_svc.get_access_token()
 
         base_url = (
@@ -2006,7 +2006,7 @@ async def list_qb_invoices(
         import httpx
         from app.services.quickbooks_service import QuickBooksService
 
-        qb_svc = QuickBooksService()
+        qb_svc = await QuickBooksService().initialize()
         access_token = qb_svc.get_access_token()
 
         base_url = (

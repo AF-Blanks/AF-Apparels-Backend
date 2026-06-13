@@ -365,11 +365,10 @@ class QuickBooksService:
         lines = []
         for item in line_items:
             line_detail: dict[str, Any] = {
+                "ItemRef": {"value": item.get("qb_item_id") or "1"},
                 "Qty": item["quantity"],
                 "UnitPrice": float(item["unit_price"]),
             }
-            if item.get("qb_item_id"):
-                line_detail["ItemRef"] = {"value": item["qb_item_id"]}
             lines.append({
                 "Amount": float(item["amount"]),
                 "DetailType": "SalesItemLineDetail",
