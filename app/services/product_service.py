@@ -96,17 +96,16 @@ class ProductService:
                 )
             )
 
-        if params.size:
-            query = query.join(ProductVariant).where(
-                ProductVariant.size == params.size,
+        if params.size or params.color:
+            variant_conds = [
+                ProductVariant.product_id == Product.id,
                 ProductVariant.status == "active",
-            )
-
-        if params.color:
-            query = query.join(ProductVariant, isouter=True).where(
-                ProductVariant.color == params.color,
-                ProductVariant.status == "active",
-            )
+            ]
+            if params.size:
+                variant_conds.append(ProductVariant.size == params.size)
+            if params.color:
+                variant_conds.append(ProductVariant.color == params.color)
+            query = query.where(exists().where(*variant_conds))
         if params.gender:
             g = params.gender.lower().replace("'", "").replace(" ", "")
             if g in ("mens", "men", "male"):
