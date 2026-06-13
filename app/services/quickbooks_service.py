@@ -366,9 +366,12 @@ class QuickBooksService:
         for item in line_items:
             if item.get("detail_type") == "DescriptionOnly":
                 lines.append({
-                    "Amount": float(item.get("amount", 0)),
-                    "DetailType": "DescriptionOnlyLine",
-                    "DescriptionOnlyLine": {},
+                    "Amount": 0,
+                    "DetailType": "DescriptionOnly",
+                    "DescriptionOnly": {
+                        "ServiceDate": None,
+                        "TaxCodeRef": {"value": "NON"},
+                    },
                     "Description": item["description"],
                 })
             else:

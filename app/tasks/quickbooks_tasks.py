@@ -314,7 +314,7 @@ def sync_order_invoice_to_qb(self, order_id: str):
                     order_data["items"].append({
                         "description": f"Tax: ${_tax:.2f}",
                         "detail_type": "DescriptionOnly",
-                        "amount": _tax,
+                        "amount": 0,
                     })
 
             # ── 2. Load live QB tokens ────────────────────────────────────────
