@@ -282,6 +282,36 @@ def sync_order_invoice_to_qb(self, order_id: str):
                         )).scalar_one_or_none()
                         sku_to_qb_item[i.sku] = pv.qb_item_id if pv else None
 
+                line_items = [
+                    {
+                        "description": f"{i.product_name} ({i.sku})",
+                        "quantity": i.quantity,
+                        "unit_price": float(i.unit_price),
+                        "amount": float(i.line_total),
+                        "qb_item_id": sku_to_qb_item.get(i.sku),
+                    }
+                    for i in order.items
+                ]
+                # Add shipping and tax as line items so QB invoice total = charged amount
+                shipping = float(order.shipping_cost or 0)
+                tax = float(order.tax_amount or 0)
+                if shipping > 0:
+                    line_items.append({
+                        "description": "Shipping & Handling",
+                        "quantity": 1,
+                        "unit_price": shipping,
+                        "amount": shipping,
+                        "qb_item_id": None,
+                    })
+                if tax > 0:
+                    line_items.append({
+                        "description": "Sales Tax",
+                        "quantity": 1,
+                        "unit_price": tax,
+                        "amount": tax,
+                        "qb_item_id": None,
+                    })
+
                 order_data = {
                     "company_id": str(order.company_id) if order.company_id else None,
                     "order_number": order.order_number,
@@ -289,16 +319,7 @@ def sync_order_invoice_to_qb(self, order_id: str):
                     "payment_status": order.payment_status,
                     "payment_method": order.payment_method or "",
                     "created_at_date": order.created_at.strftime("%Y-%m-%d") if order.created_at else None,
-                    "items": [
-                        {
-                            "description": f"{i.product_name} ({i.sku})",
-                            "quantity": i.quantity,
-                            "unit_price": float(i.unit_price),
-                            "amount": float(i.line_total),
-                            "qb_item_id": sku_to_qb_item.get(i.sku),
-                        }
-                        for i in order.items
-                    ],
+                    "items": line_items,
                 }
 
             # ── 2. Load live QB tokens ────────────────────────────────────────
