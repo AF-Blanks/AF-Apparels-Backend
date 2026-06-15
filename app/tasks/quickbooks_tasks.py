@@ -516,7 +516,7 @@ def sync_variant_to_qb(self, variant_id: str):
                 svc = await QuickBooksService().initialize()
                 qb_item_id = await asyncio.to_thread(
                     svc.find_or_create_item, sku, item_name, unit_price, cost, total_stock,
-                    description, description,
+                    description,
                 )
                 logger.info(
                     "sync_variant_to_qb QB item ready — variant=%s qb_item_id=%s",

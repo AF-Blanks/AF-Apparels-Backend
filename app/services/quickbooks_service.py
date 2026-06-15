@@ -443,7 +443,6 @@ class QuickBooksService:
         cost: float | None,
         qty_on_hand: int = 0,
         description: str = "",
-        purchase_desc: str = "",
     ) -> str:
         """Find a QB Inventory Item by Name or create one. Returns QB item Id.
 
@@ -484,9 +483,7 @@ class QuickBooksService:
             payload["PurchaseCost"] = cost
         if description:
             payload["Description"] = description[:4000]
-            payload["SalesDesc"]   = description[:4000]
-        if purchase_desc:
-            payload["PurchaseDesc"] = purchase_desc[:4000]
+        # SalesDesc and PurchaseDesc intentionally omitted — unsupported on Inventory items in QB API v3
 
         import json as _json
         logger.info(
