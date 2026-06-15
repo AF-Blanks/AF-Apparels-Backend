@@ -118,7 +118,7 @@ async def quickbooks_connect():
     params = {
         "client_id": client_id,
         "response_type": "code",
-        "scope": "com.intuit.quickbooks.accounting",
+        "scope": "com.intuit.quickbooks.accounting com.intuit.quickbooks.payment",
         "redirect_uri": redirect_uri,
         "state": "afapparels_qb_auth",
     }
