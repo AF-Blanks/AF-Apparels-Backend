@@ -116,6 +116,11 @@ _rate_limiter = _TokenBucket()
 # calls per variant sync after the first lookup.
 _qb_account_id_cache: dict[str, str] = {}
 
+# Process-level cache for QB vendor IDs.
+# Vendor names don't change so this is safe to cache indefinitely per process.
+# Prevents repeated CorePlus Query calls on every PO receipt sync.
+_qb_vendor_id_cache: dict[str, str] = {}
+
 QB_BASE_URL = {
     "sandbox": "https://sandbox-quickbooks.api.intuit.com",
     "production": "https://quickbooks.api.intuit.com",
@@ -506,7 +511,7 @@ class QuickBooksService:
         try:
             item = self.get_item(qb_item_id)
             if not item:
-                logger.warning("QB update_item — item %s not found in QB", qb_item_id)
+                logger.warning("QB update_item — item %s not found in QB (stale qb_item_id?)", qb_item_id)
                 return False
 
             payload: dict[str, Any] = {
@@ -615,6 +620,11 @@ class QuickBooksService:
         import re
         escaped = vendor_name.replace("'", "\\'")
 
+        # ── 0. Process-level cache (avoids repeated CorePlus Query calls) ─────
+        if vendor_name in _qb_vendor_id_cache:
+            logger.info("find_or_create_vendor: cache hit for '%s' → Id=%s", vendor_name, _qb_vendor_id_cache[vendor_name])
+            return _qb_vendor_id_cache[vendor_name]
+
         # ── 1. Search existing vendor ─────────────────────────────────────────
         result = await self._make_request(
             "GET",
@@ -623,7 +633,8 @@ class QuickBooksService:
         vendors = result.get("QueryResponse", {}).get("Vendor", [])
         if vendors:
             vid = str(vendors[0]["Id"])
-            logger.info("find_or_create_vendor: found existing vendor Id=%s", vid)
+            _qb_vendor_id_cache[vendor_name] = vid
+            logger.info("find_or_create_vendor: found existing vendor Id=%s (cached)", vid)
             return vid
 
         # ── 2. Try to create ──────────────────────────────────────────────────
@@ -638,7 +649,8 @@ class QuickBooksService:
                 logger.error("QB create vendor returned no Id: %s", create_result)
                 raise ValueError(f"Could not create QB vendor for '{vendor_name}'")
             vid = str(vendor_id)
-            logger.info("find_or_create_vendor: created vendor Id=%s", vid)
+            _qb_vendor_id_cache[vendor_name] = vid
+            logger.info("find_or_create_vendor: created vendor Id=%s (cached)", vid)
             return vid
 
         except httpx.HTTPStatusError as exc:
@@ -655,9 +667,10 @@ class QuickBooksService:
             match = re.search(r'\bId=(\d+)', body)
             if match:
                 vid = match.group(1)
+                _qb_vendor_id_cache[vendor_name] = vid
                 logger.warning(
                     "find_or_create_vendor: '%s' exists as Customer/other entity "
-                    "in QB; reusing Id=%s as vendor reference",
+                    "in QB; reusing Id=%s as vendor reference (cached)",
                     vendor_name, vid,
                 )
                 return vid
@@ -740,6 +753,12 @@ class QuickBooksService:
         """Create a Vendor Bill in QuickBooks. Returns the QB Bill dict."""
         from datetime import date as _date
         vendor_id = await self.find_or_create_vendor(vendor_name)
+
+        # Resolve COGS account ID dynamically (cached process-wide after first lookup)
+        cogs_account_id = await asyncio.to_thread(
+            self._get_account_id, "Cost of Goods Sold", "Cost of Goods Sold"
+        )
+
         qb_lines = []
         for i, item in enumerate(line_items):
             amount = round(float(item["qty"]) * float(item["unit_price"]), 2)
@@ -767,7 +786,7 @@ class QuickBooksService:
                     "Description": item.get("description", "Item"),
                     "DetailType": "AccountBasedExpenseLineDetail",
                     "AccountBasedExpenseLineDetail": {
-                        "AccountRef": {"value": "1", "name": "Cost of Goods Sold"},
+                        "AccountRef": {"value": cogs_account_id, "name": "Cost of Goods Sold"},
                         "BillableStatus": "NotBillable",
                     },
                 })
