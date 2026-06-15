@@ -107,6 +107,28 @@ async def retry_qb_sync(
     return {"status": "queued", "task_id": task.id, "entity_type": log.entity_type, "entity_id": entity_id}
 
 
+@router.post("/quickbooks/purge-queue")
+async def purge_celery_queue(_: None = Depends(require_admin)):
+    """Purge all pending QB sync tasks from Redis queues.
+
+    Call this BEFORE connecting a new Intuit app to prevent backed-up tasks
+    from consuming the new app's monthly CorePlus call quota.
+    """
+    import redis as _redis
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    r = _redis.from_url(redis_url, decode_responses=True)
+    deleted: dict[str, int] = {}
+    for queue in ("celery", "default", "email"):
+        length = r.llen(queue)
+        if length:
+            r.delete(queue)
+            deleted[queue] = length
+        else:
+            deleted[queue] = 0
+    total = sum(deleted.values())
+    return {"purged": True, "tasks_deleted": total, "by_queue": deleted}
+
+
 @router.get("/quickbooks/connect")
 async def quickbooks_connect():
     """Redirect to Intuit OAuth2 authorization page."""
