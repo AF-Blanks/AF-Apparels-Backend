@@ -320,6 +320,7 @@ def sync_order_invoice_to_qb(self, order_id: str):
                     "payment_method": order.payment_method or "",
                     "created_at_date": order.created_at.strftime("%Y-%m-%d") if order.created_at else None,
                     "items": line_items,
+                    "qb_invoice_id": order.qb_invoice_id,  # cached from prior successful run
                 }
 
             # ── 2. Load live QB tokens ────────────────────────────────────────
@@ -341,42 +342,53 @@ def sync_order_invoice_to_qb(self, order_id: str):
                 raise RuntimeError("QB customer not yet synced — retrying after company sync")
 
             # ── 4. Create invoice (sync, run in thread) ───────────────────────
-            logger.info(
-                "QB sync creating invoice — order=%s customer=%s total=%.2f items=%d",
-                order_data["order_number"], qb_customer_id, order_data["total"], len(order_data["items"]),
-            )
-            qb_invoice_id = await asyncio.to_thread(
-                svc.create_invoice,
-                qb_customer_id=qb_customer_id,
-                order_number=order_data["order_number"],
-                line_items=order_data["items"],
-                total=order_data["total"],
-            )
-            logger.info("sync_order_invoice_to_qb success — qb_invoice_id=%s order=%s", qb_invoice_id, order_data["order_number"])
+            # Fast path: if qb_invoice_id is already stored in our DB (from a prior task
+            # run that succeeded at create but failed at payment), skip the invoice create
+            # entirely — avoids 1 CorePlus DocNumber query on every retry.
+            _existing_invoice_id = order_data.get("qb_invoice_id")
+            if _existing_invoice_id:
+                qb_invoice_id = _existing_invoice_id
+                logger.info(
+                    "sync_order_invoice_to_qb: invoice already in QB — id=%s order=%s (skipping create)",
+                    qb_invoice_id, order_data["order_number"],
+                )
+            else:
+                logger.info(
+                    "QB sync creating invoice — order=%s customer=%s total=%.2f items=%d",
+                    order_data["order_number"], qb_customer_id, order_data["total"], len(order_data["items"]),
+                )
+                qb_invoice_id = await asyncio.to_thread(
+                    svc.create_invoice,
+                    qb_customer_id=qb_customer_id,
+                    order_number=order_data["order_number"],
+                    line_items=order_data["items"],
+                    total=order_data["total"],
+                )
+                logger.info("sync_order_invoice_to_qb success — qb_invoice_id=%s order=%s", qb_invoice_id, order_data["order_number"])
 
-            # ── 5. Persist QB invoice ID back to the order row ────────────────
-            # Use raw SQL to avoid ORM Enum commit issues with qb_sync_status
-            from sqlalchemy import text as _sql_text
-            async with AsyncSessionLocal() as session:
-                try:
-                    await session.execute(
-                        _sql_text(
-                            "UPDATE orders SET qb_invoice_id=:iid, qb_sync_status='synced' WHERE id=:oid"
-                        ),
-                        {"iid": str(qb_invoice_id), "oid": order_id},
-                    )
-                    await session.commit()
-                    logger.info(
-                        "QB invoice ID %s saved to DB for order %s",
-                        qb_invoice_id, order_data["order_number"],
-                    )
-                except Exception as _save_exc:
-                    await session.rollback()
-                    logger.error(
-                        "Failed to save qb_invoice_id to DB for order %s: %s",
-                        order_data["order_number"], _save_exc, exc_info=True,
-                    )
-                    raise  # re-raise so task retries; create_invoice is now idempotent
+                # ── 5. Persist QB invoice ID back to the order row ────────────────
+                # Use raw SQL to avoid ORM Enum commit issues with qb_sync_status
+                from sqlalchemy import text as _sql_text
+                async with AsyncSessionLocal() as session:
+                    try:
+                        await session.execute(
+                            _sql_text(
+                                "UPDATE orders SET qb_invoice_id=:iid, qb_sync_status='synced' WHERE id=:oid"
+                            ),
+                            {"iid": str(qb_invoice_id), "oid": order_id},
+                        )
+                        await session.commit()
+                        logger.info(
+                            "QB invoice ID %s saved to DB for order %s",
+                            qb_invoice_id, order_data["order_number"],
+                        )
+                    except Exception as _save_exc:
+                        await session.rollback()
+                        logger.error(
+                            "Failed to save qb_invoice_id to DB for order %s: %s",
+                            order_data["order_number"], _save_exc, exc_info=True,
+                        )
+                        raise  # re-raise so task retries; create_invoice is now idempotent
 
             # ── 5b. If order is paid (card/ACH), record QB payment on the invoice ──
             # Applies to all non-net_30 paid orders (card, qb_payments, ach, bank_transfer).
@@ -398,6 +410,7 @@ def sync_order_invoice_to_qb(self, order_id: str):
                         order_data["total"],
                         _pmt_method or "card",
                         order_data.get("created_at_date"),
+                        qb_customer_id,  # skip GET /invoice — saves 1 Core API call
                     )
                     logger.info(
                         "QB payment created — invoice=%s order=%s payment_id=%s",

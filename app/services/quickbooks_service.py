@@ -542,30 +542,50 @@ class QuickBooksService:
         amount: float,
         payment_method: str = "card",
         payment_date: str | None = None,
+        qb_customer_id: str | None = None,
     ) -> dict:
         """Create a QB Payment record linked to an invoice (marks it as paid).
 
         Used to record card/ACH payments on QB invoices created for non-Net-30 orders.
         Returns the QB Payment dict on success; raises on failure.
+
+        Pass qb_customer_id to skip the GET /invoice call — saves 1 Core API call.
+        When omitted, fetches the invoice for CustomerRef + balance (legacy path).
         """
         from datetime import date as _date
         txn_date = payment_date or str(_date.today())
 
-        # Fetch the invoice to get CustomerRef and remaining balance
-        invoice_resp = self._request("GET", f"invoice/{invoice_id}?minorversion=65")
-        invoice = invoice_resp.get("Invoice", {})
-        customer_ref = invoice.get("CustomerRef", {})
-        if not customer_ref:
-            raise ValueError(f"Cannot create QB payment — invoice {invoice_id} has no CustomerRef")
-
-        # Use the invoice's actual outstanding balance, not the passed amount.
-        # This prevents 400 errors when the invoice total differs from order total
-        # (e.g. old invoices created without shipping/tax lines).
-        balance = float(invoice.get("Balance", 0))
-        if balance <= 0:
-            logger.info("QB create_payment_for_invoice — invoice %s already fully paid, skipping", invoice_id)
-            return {}
-        pay_amount = round(balance, 2)
+        if qb_customer_id:
+            # Fast path: caller already knows the QB customer ID — skip GET /invoice.
+            # Use passed amount directly (invoice was just created in this task run
+            # so balance == total; or on retry, no partial payments will have been applied).
+            pay_amount = round(amount, 2)
+            if pay_amount <= 0:
+                logger.info("QB create_payment_for_invoice — amount %.2f <= 0, skipping", pay_amount)
+                return {}
+            customer_ref: dict[str, Any] = {"value": qb_customer_id}
+            logger.info(
+                "QB create_payment_for_invoice (no-fetch) — invoice=%s customer=%s amount=%.2f",
+                invoice_id, qb_customer_id, pay_amount,
+            )
+        else:
+            # Fallback: fetch the invoice to get CustomerRef and remaining balance.
+            # Use the invoice's actual outstanding balance to prevent 400 errors when
+            # the invoice total differs from order total (old invoices without shipping/tax).
+            invoice_resp = self._request("GET", f"invoice/{invoice_id}?minorversion=65")
+            invoice = invoice_resp.get("Invoice", {})
+            customer_ref = invoice.get("CustomerRef", {})
+            if not customer_ref:
+                raise ValueError(f"Cannot create QB payment — invoice {invoice_id} has no CustomerRef")
+            balance = float(invoice.get("Balance", 0))
+            if balance <= 0:
+                logger.info("QB create_payment_for_invoice — invoice %s already fully paid, skipping", invoice_id)
+                return {}
+            pay_amount = round(balance, 2)
+            logger.info(
+                "QB create_payment_for_invoice — invoice_id=%s balance=%.2f (order_total=%.2f)",
+                invoice_id, pay_amount, amount,
+            )
 
         payload: dict[str, Any] = {
             "TotalAmt": pay_amount,
@@ -578,7 +598,6 @@ class QuickBooksService:
                 }
             ],
         }
-        logger.info("QB create_payment_for_invoice — invoice_id=%s balance=%.2f (order_total=%.2f)", invoice_id, pay_amount, amount)
         resp = self._request("POST", "payment", json=payload)
         return resp.get("Payment", {})
 
