@@ -445,13 +445,19 @@ class QuickBooksService:
         description: str = "",
         purchase_desc: str = "",
     ) -> str:
-        """Find a QB Inventory Item by SKU or create one. Returns QB item Id."""
+        """Find a QB Inventory Item by Name or create one. Returns QB item Id.
+
+        Search uses Name (not Sku) because Sku is read-only on Inventory items
+        in QB API v3 and cannot be set on creation — sending it causes 400 error
+        code 2010 (unsupported property).
+        """
         from datetime import date
 
-        escaped = sku.replace("'", "\\'")
+        # Search by Name (Name includes SKU so it's unique per variant)
+        escaped_name = name[:100].replace("'", "\\'")
         result = self._request(
             "GET",
-            f"query?query=SELECT * FROM Item WHERE Sku = '{escaped}'&minorversion=65",
+            f"query?query=SELECT * FROM Item WHERE Name = '{escaped_name}'&minorversion=65",
         )
         items = result.get("QueryResponse", {}).get("Item", [])
         if items:
@@ -462,9 +468,9 @@ class QuickBooksService:
         asset_id   = self._get_account_id("Inventory Asset", "Other Current Asset")
         expense_id = self._get_account_id("Cost of Goods Sold", "Cost of Goods Sold")
 
+        # Note: Sku field intentionally omitted — QB API rejects it on Inventory items (read-only)
         payload: dict[str, Any] = {
             "Name": name[:100],
-            "Sku": sku,
             "Type": "Inventory",
             "TrackQtyOnHand": True,
             "QtyOnHand": qty_on_hand,
