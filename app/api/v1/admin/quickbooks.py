@@ -109,7 +109,7 @@ async def retry_qb_sync(
 
 @router.post("/quickbooks/purge-queue")
 async def purge_celery_queue(_: None = Depends(require_admin)):
-    """Purge all pending QB sync tasks from Redis queues.
+    """Purge ALL pending Celery tasks from Redis (queues + scheduled retries).
 
     Call this BEFORE connecting a new Intuit app to prevent backed-up tasks
     from consuming the new app's monthly CorePlus call quota.
@@ -117,16 +117,30 @@ async def purge_celery_queue(_: None = Depends(require_admin)):
     import redis as _redis
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     r = _redis.from_url(redis_url, decode_responses=True)
-    deleted: dict[str, int] = {}
+    deleted_keys: list[str] = []
+    total_items = 0
+
+    # Regular task queues (Redis lists)
     for queue in ("celery", "default", "email"):
         length = r.llen(queue)
         if length:
             r.delete(queue)
-            deleted[queue] = length
-        else:
-            deleted[queue] = 0
-    total = sum(deleted.values())
-    return {"purged": True, "tasks_deleted": total, "by_queue": deleted}
+            deleted_keys.append(f"{queue}(list:{length})")
+            total_items += length
+
+    # Scheduled/ETA retry tasks — stored in kombu sorted sets
+    # These are countdown tasks that haven't fired yet (e.g. "Retry in 960s")
+    for pattern in ("_kombu*", "*kombu*"):
+        for key in r.scan_iter(pattern, count=100):
+            key_type = r.type(key)
+            count = r.zcard(key) if key_type == "zset" else (
+                r.llen(key) if key_type == "list" else 1
+            )
+            r.delete(key)
+            deleted_keys.append(f"{key}({key_type}:{count})")
+            total_items += count
+
+    return {"purged": True, "total_deleted": total_items, "keys": deleted_keys}
 
 
 @router.get("/quickbooks/connect")
