@@ -110,18 +110,24 @@ class ProductService:
             g = params.gender.lower().replace("'", "").replace(" ", "")
             if g in ("mens", "men", "male"):
                 query = query.where(
-                    or_(Product.gender == "mens", Product.gender == "unisex")
+                    or_(
+                        Product.gender.op("~*")("(^|,)mens(,|$)"),
+                        Product.gender.op("~*")("(^|,)unisex(,|$)"),
+                    )
                 )
             elif g in ("womens", "women", "female"):
                 query = query.where(
-                    or_(Product.gender == "womens", Product.gender == "unisex")
+                    or_(
+                        Product.gender.op("~*")("(^|,)womens(,|$)"),
+                        Product.gender.op("~*")("(^|,)unisex(,|$)"),
+                    )
                 )
             elif g == "unisex":
-                query = query.where(Product.gender == "unisex")
+                query = query.where(Product.gender.op("~*")("(^|,)unisex(,|$)"))
             elif g in ("youth", "kids", "children"):
-                query = query.where(Product.gender == "youth")
+                query = query.where(Product.gender.op("~*")("(^|,)youth(,|$)"))
             else:
-                query = query.where(func.lower(Product.gender) == g)
+                query = query.where(Product.gender.op("~*")(f"(^|,){g}(,|$)"))
 
         if params.fabric:
             query = query.where(Product.fabric.ilike(f"%{params.fabric}%"))
