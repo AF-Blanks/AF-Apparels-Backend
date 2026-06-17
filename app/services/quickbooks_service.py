@@ -355,23 +355,8 @@ class QuickBooksService:
 
         line_items: list of {description, quantity, unit_price, amount}
         """
-        # Check for existing invoice with this DocNumber so retries are safe
-        try:
-            escaped = order_number.replace("'", "\\'")
-            query_resp = self._request(
-                "GET",
-                f"query?query=SELECT * FROM Invoice WHERE DocNumber = '{escaped}'&minorversion=65",
-            )
-            existing = query_resp.get("QueryResponse", {}).get("Invoice", [])
-            if existing:
-                existing_id = str(existing[0]["Id"])
-                logger.info(
-                    "create_invoice: existing QB invoice for DocNumber %s — id=%s (returning idempotently)",
-                    order_number, existing_id,
-                )
-                return existing_id
-        except Exception as _qe:
-            logger.warning("create_invoice: DocNumber query failed, will attempt create: %s", _qe)
+        # DocNumber idempotency is handled at the task level (order.qb_invoice_id check).
+        # Skipping the CorePlus SELECT query here to preserve monthly API call budget.
 
         lines = []
         for item in line_items:
