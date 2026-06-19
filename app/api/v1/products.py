@@ -149,6 +149,63 @@ async def download_product_images(
     )
 
 
+@router.get("/{product_id}/images/{image_id}/download")
+async def download_single_image(
+    product_id: uuid.UUID,
+    image_id: uuid.UUID,
+    filename: str = Query("image.jpg"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stream a single product image from S3 as a file download."""
+    import boto3
+    from fastapi.responses import StreamingResponse
+
+    from app.core.config import settings
+    from app.models.product import ProductImage
+
+    result = await db.execute(
+        select(ProductImage).where(
+            ProductImage.id == image_id,
+            ProductImage.product_id == product_id,
+        )
+    )
+    image = result.scalar_one_or_none()
+    if not image:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    url = image.url_large or image.url_medium
+    if not url:
+        raise HTTPException(status_code=404, detail="Image URL not available")
+
+    # Extract S3 key from URL
+    if url.startswith("https://") and ".amazonaws.com/" in url:
+        key = url.split(".amazonaws.com/", 1)[-1]
+    else:
+        key = url.lstrip("/")
+
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_S3_REGION,
+    )
+    try:
+        obj = s3.get_object(Bucket=settings.AWS_S3_BUCKET, Key=key)
+        img_bytes = obj["Body"].read()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Failed to fetch image from storage")
+
+    ext = key.rsplit(".", 1)[-1].lower() if "." in key else "jpg"
+    mime = "image/webp" if ext == "webp" else f"image/{ext}" if ext in ("png", "gif") else "image/jpeg"
+    safe_name = filename.replace('"', "")
+
+    return StreamingResponse(
+        iter([img_bytes]),
+        media_type=mime,
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
+
+
 @router.get("/{product_id}/download-flyer")
 async def download_product_flyer(
     product_id: uuid.UUID,
