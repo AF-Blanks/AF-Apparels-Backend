@@ -503,6 +503,19 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
     items_result = await db.execute(select(OrderItem).where(OrderItem.order_id == order.id))
     items = items_result.scalars().all()
 
+    # Build variant_id → product_code mapping for display
+    from app.models.product import Product as _Product, ProductVariant as _PVCode
+    _variant_ids = [str(i.variant_id) for i in items if i.variant_id]
+    _product_code_map: dict[str, str | None] = {}
+    if _variant_ids:
+        _pc_rows = await db.execute(
+            select(_PVCode.id, _Product.product_code)
+            .join(_Product, _Product.id == _PVCode.product_id)
+            .where(_PVCode.id.in_(_variant_ids))
+        )
+        for _vid, _pc in _pc_rows.all():
+            _product_code_map[str(_vid)] = _pc
+
     # Calculate shipment weight from variant weights (used to pre-fill Shippo label weight)
     _GRAMS_PER_LB = 453.592
     _DEFAULT_LBS_PER_UNIT = 0.5  # standard apparel blank fallback
@@ -593,7 +606,13 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
             qb_invoice_id=order.qb_invoice_id,
             created_at=order.created_at,
             updated_at=order.updated_at,
-            items=[OrderItemOut.model_validate(i) for i in items],
+            items=[
+                OrderItemOut.model_validate({
+                    **{c.key: getattr(i, c.key) for c in i.__table__.columns},
+                    "product_code": _product_code_map.get(str(i.variant_id)),
+                })
+                for i in items
+            ],
             customer_name=customer_name,
             customer_email=customer_email,
             customer_phone=customer_phone,

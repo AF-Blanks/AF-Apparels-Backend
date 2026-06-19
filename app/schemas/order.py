@@ -87,6 +87,7 @@ class OrderItemOut(BaseModel):
     variant_id: UUID
     product_name: str
     sku: str
+    product_code: str | None = None
     color: str | None
     size: str | None
     quantity: int
