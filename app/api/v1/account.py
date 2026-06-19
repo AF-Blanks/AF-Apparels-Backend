@@ -1002,6 +1002,7 @@ async def get_inventory_report(
             ProductVariant.sort_order,
             Product.id.label("product_id"),
             Product.name.label("product_name"),
+            Product.product_code.label("product_code"),
             Warehouse.id.label("warehouse_id"),
             Warehouse.name.label("warehouse_name"),
             InventoryRecord.quantity,
@@ -1036,7 +1037,7 @@ async def get_inventory_report(
     warehouses = warehouses_result.scalars().all()
 
     products_result = await db.execute(
-        select(Product.id, Product.name)
+        select(Product.id, Product.name, Product.product_code)
         .where(Product.status == "active")
         .order_by(Product.name)
     )
@@ -1058,6 +1059,7 @@ async def get_inventory_report(
                 "sku": r["sku"],
                 "product_id": str(r["product_id"]),
                 "product_name": r["product_name"],
+                "product_code": r["product_code"],
                 "color": r["color"] or "—",
                 "size": r["size"] or "—",
                 "warehouse_id": str(r["warehouse_id"]),
@@ -1067,7 +1069,7 @@ async def get_inventory_report(
             for r in rows
         ],
         "warehouses": [{"id": str(w.id), "name": w.name} for w in warehouses],
-        "products": [{"id": str(p[0]), "name": p[1]} for p in products],
+        "products": [{"id": str(p[0]), "name": p[1], "product_code": p[2]} for p in products],
         "colors": colors,
     }
 

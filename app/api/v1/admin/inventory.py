@@ -1,6 +1,7 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, File, Query, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Query, Request, UploadFile, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -122,3 +123,86 @@ async def import_inventory_csv(
     result = await svc.bulk_import_csv(content.decode("utf-8"))
     await db.commit()
     return BulkImportResult(**result)
+
+
+@router.get("/inventory-report")
+async def get_admin_inventory_report(
+    warehouse_id: str | None = None,
+    product_id: str | None = None,
+    color: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Inventory listing report for admin — same as customer endpoint but no company_id required."""
+    from app.models.inventory import InventoryRecord, Warehouse
+    from app.models.product import Product, ProductVariant
+
+    q = (
+        select(
+            ProductVariant.id.label("variant_id"),
+            ProductVariant.sku,
+            ProductVariant.color,
+            ProductVariant.size,
+            ProductVariant.sort_order,
+            Product.id.label("product_id"),
+            Product.name.label("product_name"),
+            Product.product_code.label("product_code"),
+            Warehouse.id.label("warehouse_id"),
+            Warehouse.name.label("warehouse_name"),
+            InventoryRecord.quantity,
+        )
+        .join(Product, Product.id == ProductVariant.product_id)
+        .join(InventoryRecord, InventoryRecord.variant_id == ProductVariant.id)
+        .join(Warehouse, Warehouse.id == InventoryRecord.warehouse_id)
+        .where(ProductVariant.status == "active")
+        .where(Product.status == "active")
+        .where(Warehouse.is_active.is_(True))
+    )
+
+    if warehouse_id and warehouse_id != "all":
+        q = q.where(Warehouse.id == warehouse_id)
+    if product_id and product_id != "all":
+        q = q.where(Product.id == product_id)
+    if color and color != "all":
+        q = q.where(ProductVariant.color == color)
+
+    q = q.order_by(Product.name, ProductVariant.color, ProductVariant.sort_order, ProductVariant.size)
+    rows = (await db.execute(q)).mappings().all()
+
+    warehouses = (await db.execute(
+        select(Warehouse).where(Warehouse.is_active.is_(True)).order_by(Warehouse.name)
+    )).scalars().all()
+
+    products = (await db.execute(
+        select(Product.id, Product.name, Product.product_code)
+        .where(Product.status == "active")
+        .order_by(Product.name)
+    )).all()
+
+    colors = [r[0] for r in (await db.execute(
+        select(ProductVariant.color)
+        .where(ProductVariant.status == "active")
+        .where(ProductVariant.color.isnot(None))
+        .distinct()
+        .order_by(ProductVariant.color)
+    )).all() if r[0]]
+
+    return {
+        "items": [
+            {
+                "variant_id": str(r["variant_id"]),
+                "sku": r["sku"],
+                "product_id": str(r["product_id"]),
+                "product_name": r["product_name"],
+                "product_code": r["product_code"],
+                "color": r["color"] or "—",
+                "size": r["size"] or "—",
+                "warehouse_id": str(r["warehouse_id"]),
+                "warehouse_name": r["warehouse_name"],
+                "available": int(r["quantity"]),
+            }
+            for r in rows
+        ],
+        "warehouses": [{"id": str(w.id), "name": w.name} for w in warehouses],
+        "products": [{"id": str(p[0]), "name": p[1], "product_code": p[2]} for p in products],
+        "colors": colors,
+    }
