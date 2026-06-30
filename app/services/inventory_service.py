@@ -136,6 +136,7 @@ class InventoryService:
         reason: str,
         adjusted_by: UUID | None = None,
         notes: str | None = None,
+        sync_qb: bool = True,
     ) -> InventoryRecord:
         """Adjust stock by delta (positive = add, negative = remove). Creates adjustment log."""
         # Get or create inventory record
@@ -172,11 +173,12 @@ class InventoryService:
         self.db.add(adj)
         await self.db.flush()
 
-        try:
-            from app.tasks.quickbooks_tasks import sync_inventory_to_qb
-            sync_inventory_to_qb.apply_async(args=[str(variant_id)], countdown=15)
-        except Exception as _exc:
-            logger.warning("QB inventory sync dispatch failed: %s", _exc)
+        if sync_qb:
+            try:
+                from app.tasks.quickbooks_tasks import sync_inventory_to_qb
+                sync_inventory_to_qb.apply_async(args=[str(variant_id)], countdown=15)
+            except Exception as _exc:
+                logger.warning("QB inventory sync dispatch failed: %s", _exc)
 
         # Invalidate Redis product detail cache so updated stock shows on all pages
         try:
@@ -246,6 +248,7 @@ class InventoryService:
                     warehouse_id=warehouse.id,
                     quantity_delta=delta,
                     reason="migration",
+                    sync_qb=False,
                     adjusted_by=adjusted_by,
                 )
                 imported += 1
