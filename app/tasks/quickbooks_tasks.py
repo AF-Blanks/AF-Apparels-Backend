@@ -21,6 +21,36 @@ logger = logging.getLogger(__name__)
 logger.info("quickbooks_tasks loaded — broker=%s", settings.CELERY_BROKER_URL)
 
 
+def _retry_delay(exc: Exception, retries: int) -> int:
+    """Return retry countdown in seconds.
+
+    QB 429 (rate limit hit) gets 300 s × 2^n so we back off hard and let
+    the quota window reset before hammering again.  All other errors keep
+    the original 60 s × 2^n schedule.
+    """
+    is_rate_limited = (
+        hasattr(exc, "response") and getattr(exc.response, "status_code", 0) == 429
+    ) or "429" in str(exc)
+    base = 300 if is_rate_limited else 60
+    return base * (2 ** retries)
+
+
+def _failure_status(task) -> str:
+    """Return the QBSyncLog status to record for a FAILED attempt.
+
+    Returns "failed" only on the terminal attempt (no Celery retries left),
+    otherwise "retry". This lets the admin dashboard — which filters on
+    status == "failed" — surface genuinely dead syncs instead of every failed
+    attempt staying stuck on "retry" forever.
+
+    Safe to call from inside a task's nested coroutine: `task` is the bound
+    task instance (self), and task.request.retries / task.max_retries are
+    populated for the duration of execution.
+    """
+    max_r = task.max_retries if task.max_retries is not None else 5
+    return "failed" if task.request.retries >= max_r else "retry"
+
+
 def _run_async(coro):
     """Run a coroutine in a fresh event loop. Call only ONCE per task execution.
 
@@ -176,13 +206,15 @@ def sync_customer_to_qb(self, company_id: str):
 
         except Exception as exc:
             logger.exception("sync_customer_to_qb error: %s", exc)
-            await _log_attempt("company", company_id, "retry", str(exc))
+            # Record "failed" on the terminal attempt (no retries left) so the
+            # admin dashboard surfaces dead syncs; earlier attempts stay "retry".
+            await _log_attempt("company", company_id, _failure_status(self), str(exc))
             raise  # re-raised so the outer except can trigger Celery retry
 
     try:
         return _run_async(_run_all())
     except Exception as exc:
-        delay = 60 * (2 ** self.request.retries)
+        delay = _retry_delay(exc, self.request.retries)
         raise self.retry(exc=exc, countdown=delay)
 
 
@@ -337,8 +369,11 @@ def sync_order_invoice_to_qb(self, order_id: str):
                     qb_customer_id,
                 )
             elif not qb_customer_id:
-                # Company exists but hasn't been synced to QB yet — dispatch and retry
-                sync_customer_to_qb.delay(order_data["company_id"])
+                # Company exists but hasn't been synced to QB yet.
+                # Only dispatch customer sync on the first attempt — subsequent retries
+                # just wait for it to complete (avoids up to 5 duplicate dispatches).
+                if self.request.retries == 0:
+                    sync_customer_to_qb.delay(order_data["company_id"])
                 raise RuntimeError("QB customer not yet synced — retrying after company sync")
 
             # ── 4. Create invoice (sync, run in thread) ───────────────────────
@@ -441,13 +476,15 @@ def sync_order_invoice_to_qb(self, order_id: str):
 
         except Exception as exc:
             logger.exception("sync_order_invoice_to_qb error: %s", exc)
-            await _log_attempt("order", order_id, "retry", str(exc))
+            # Record "failed" on the terminal attempt (no retries left) so the
+            # admin dashboard surfaces dead syncs; earlier attempts stay "retry".
+            await _log_attempt("order", order_id, _failure_status(self), str(exc))
             raise
 
     try:
         return _run_async(_run_all())
     except Exception as exc:
-        delay = 60 * (2 ** self.request.retries)
+        delay = _retry_delay(exc, self.request.retries)
         raise self.retry(exc=exc, countdown=delay)
 
 
@@ -554,7 +591,112 @@ def sync_variant_to_qb(self, variant_id: str):
     try:
         return _run_async(_run_all())
     except Exception as exc:
-        delay = 60 * (2 ** self.request.retries)
+        delay = _retry_delay(exc, self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)
+
+
+@celery_app.task(bind=True, max_retries=5)
+def sync_variant_batch_to_qb(self, variant_ids: list):
+    """Sync multiple ProductVariants to QuickBooks in a single Celery task.
+
+    Replaces the old per-variant dispatch loop in bulk-generate and CSV-import
+    endpoints. Instead of firing N tasks (each with up to 5 retries), this
+    processes all variants serially inside one task — N QB API calls total,
+    one retry envelope for the whole batch.
+
+    Each variant is committed individually so a single failure does not roll
+    back the rest. FOR UPDATE lock per variant prevents concurrent workers from
+    creating duplicate QB items.
+    """
+    logger.info("sync_variant_batch_to_qb started — %d variants", len(variant_ids))
+
+    async def _run_all():
+        from app.core.database import AsyncSessionLocal
+        from app.models.product import ProductVariant, Product, ProductCategory
+        from app.models.inventory import InventoryRecord
+        from app.services.quickbooks_service import QuickBooksService
+        from sqlalchemy import select, func
+        from sqlalchemy.orm import selectinload
+
+        svc = await QuickBooksService().initialize()
+        synced = 0
+
+        async with AsyncSessionLocal() as session:
+            for variant_id in variant_ids:
+                try:
+                    variant = (await session.execute(
+                        select(ProductVariant)
+                        .options(
+                            selectinload(ProductVariant.product)
+                                .selectinload(Product.images),
+                            selectinload(ProductVariant.product)
+                                .selectinload(Product.category_links)
+                                .selectinload(ProductCategory.category),
+                        )
+                        .where(ProductVariant.id == uuid.UUID(variant_id))
+                        .with_for_update()
+                    )).scalar_one_or_none()
+
+                    if not variant:
+                        logger.warning("sync_variant_batch_to_qb: variant %s not found", variant_id)
+                        continue
+
+                    if variant.qb_item_id:
+                        logger.info(
+                            "sync_variant_batch_to_qb: variant %s already synced (qb_item_id=%s) — skipping",
+                            variant_id, variant.qb_item_id,
+                        )
+                        continue
+
+                    total_stock = int((await session.execute(
+                        select(func.coalesce(func.sum(InventoryRecord.quantity), 0))
+                        .where(InventoryRecord.variant_id == uuid.UUID(variant_id))
+                    )).scalar() or 0)
+
+                    product = variant.product
+                    product_name = product.name if product else "Product"
+                    sku = variant.sku
+                    item_name = f"{product_name} - {sku}"
+                    unit_price = float(variant.retail_price)
+                    cost = float(variant.cost_per_item) if variant.cost_per_item else None
+
+                    categories = product.categories if product else []
+                    category_name = categories[0].name if categories else ""
+                    primary_img = product.primary_image if product else None
+                    image_url = primary_img.url_medium if primary_img else ""
+                    desc_parts = []
+                    if category_name:
+                        desc_parts.append(f"Category: {category_name}")
+                    if image_url:
+                        desc_parts.append(f"Image: {image_url}")
+                    description = " | ".join(desc_parts)
+
+                    qb_item_id = await asyncio.to_thread(
+                        svc.find_or_create_item, sku, item_name, unit_price, cost,
+                        total_stock, description,
+                    )
+
+                    variant.qb_item_id = qb_item_id
+                    await session.commit()
+                    synced += 1
+                    logger.info(
+                        "sync_variant_batch_to_qb: synced variant=%s qb_item_id=%s",
+                        variant_id, qb_item_id,
+                    )
+
+                except Exception as exc:
+                    logger.warning(
+                        "sync_variant_batch_to_qb: variant %s failed (skipping): %s",
+                        variant_id, exc,
+                    )
+
+        logger.info("sync_variant_batch_to_qb done — %d/%d synced", synced, len(variant_ids))
+        return {"status": "success", "synced": synced, "total": len(variant_ids)}
+
+    try:
+        return _run_async(_run_all())
+    except Exception as exc:
+        delay = _retry_delay(exc, self.request.retries)
         raise self.retry(exc=exc, countdown=delay)
 
 
@@ -621,7 +763,7 @@ def sync_inventory_to_qb(self, variant_id: str, deferred_count: int = 0):
     try:
         return _run_async(_run_all())
     except Exception as exc:
-        delay = 60 * (2 ** self.request.retries)
+        delay = _retry_delay(exc, self.request.retries)
         raise self.retry(exc=exc, countdown=delay)
 
 
@@ -742,5 +884,78 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
     try:
         return _run_async(_run_all())
     except Exception as exc:
-        delay = 60 * (2 ** self.request.retries)
+        delay = _retry_delay(exc, self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)
+
+
+@celery_app.task(bind=True, max_retries=5)
+def sync_inventory_batch_to_qb(self, variant_ids: list[str]):
+    """Push current stock for multiple variants in one task.
+
+    Called once per order instead of once per variant — replaces the old
+    per-variant loop that fired N separate tasks on every checkout.
+    Reduces QB API calls from (2 × N variants) to a single Celery task.
+    """
+    logger.info("sync_inventory_batch_to_qb started — %d variants", len(variant_ids))
+
+    async def _run_all():
+        from app.core.database import AsyncSessionLocal
+        from app.models.product import ProductVariant
+        from app.models.inventory import InventoryRecord
+        from app.services.quickbooks_service import QuickBooksService
+        from sqlalchemy import select, func
+
+        svc = await QuickBooksService().initialize()
+
+        async with AsyncSessionLocal() as session:
+            for variant_id in variant_ids:
+                try:
+                    variant = (await session.execute(
+                        select(ProductVariant)
+                        .where(ProductVariant.id == uuid.UUID(variant_id))
+                    )).scalar_one_or_none()
+
+                    if not variant:
+                        logger.warning("sync_inventory_batch_to_qb: variant %s not found", variant_id)
+                        continue
+
+                    if not variant.qb_item_id:
+                        # Not yet in QB — dispatch individual sync to create the item
+                        sync_variant_to_qb.delay(variant_id)
+                        logger.info(
+                            "sync_inventory_batch_to_qb: variant %s not in QB yet"
+                            " — dispatched sync_variant_to_qb",
+                            variant_id,
+                        )
+                        continue
+
+                    total_stock = int((await session.execute(
+                        select(func.coalesce(func.sum(InventoryRecord.quantity), 0))
+                        .where(InventoryRecord.variant_id == uuid.UUID(variant_id))
+                    )).scalar() or 0)
+
+                    await asyncio.to_thread(
+                        svc.update_item,
+                        variant.qb_item_id,
+                        float(variant.retail_price),
+                        float(variant.cost_per_item) if variant.cost_per_item else None,
+                        total_stock,
+                    )
+                    logger.info(
+                        "sync_inventory_batch_to_qb: updated variant=%s qty=%d",
+                        variant_id, total_stock,
+                    )
+
+                except Exception as exc:
+                    logger.warning(
+                        "sync_inventory_batch_to_qb: variant %s failed (skipping): %s",
+                        variant_id, exc,
+                    )
+
+        return {"status": "success", "synced": len(variant_ids)}
+
+    try:
+        return _run_async(_run_all())
+    except Exception as exc:
+        delay = _retry_delay(exc, self.request.retries)
         raise self.retry(exc=exc, countdown=delay)
