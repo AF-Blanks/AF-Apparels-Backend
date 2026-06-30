@@ -91,10 +91,24 @@ async def _handle_payment_succeeded(db: AsyncSession, payment_intent: dict) -> N
     )
 
     from app.tasks.email_tasks import send_order_confirmation_email
-    from app.tasks.quickbooks_tasks import sync_order_to_qb
-
     send_order_confirmation_email.delay(str(order.id))
-    sync_order_to_qb.delay(str(order.id))
+
+    # Redis dedup: same key as checkout.py — only one sync fires per order within 120 s.
+    try:
+        import redis as _redis_sync
+        from app.core.config import get_settings as _gs
+        _cfg = _gs()
+        _r = _redis_sync.Redis.from_url(
+            _cfg.REDIS_URL or _cfg.CELERY_BROKER_URL, socket_timeout=2
+        )
+        _dedup_key = f"qb:order_sync_dispatched:{order.id}"
+        if _r.set(_dedup_key, "1", nx=True, ex=120):
+            from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+            sync_order_invoice_to_qb.delay(str(order.id))
+        else:
+            logger.info("QB invoice sync already dispatched for order %s — skipping", order.order_number)
+    except Exception as _exc:
+        logger.warning("QB invoice sync dispatch (webhook) failed: %s", _exc)
 
     logger.info("Order %s confirmed via Stripe webhook", order.order_number)
 
