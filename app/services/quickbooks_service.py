@@ -79,9 +79,13 @@ def _save_tokens_to_db_sync(
 
 
 class _TokenBucket:
-    """Simple thread-safe token bucket for rate limiting (400 req/min)."""
+    """Simple thread-safe token bucket for rate limiting (250 req/min).
 
-    def __init__(self, capacity: int = 400, refill_rate: float = 400 / 60):
+    Used as the per-process fallback when the distributed Redis limiter is
+    unavailable (see _RedisRateLimiter).
+    """
+
+    def __init__(self, capacity: int = 250, refill_rate: float = 250 / 60):
         self._capacity = capacity
         self._tokens = float(capacity)
         self._refill_rate = refill_rate  # tokens per second
@@ -108,7 +112,115 @@ class _TokenBucket:
         raise TimeoutError("QB rate limit: could not acquire token in time")
 
 
-_rate_limiter = _TokenBucket()
+class _RedisRateLimiter:
+    """Distributed token bucket shared across ALL worker/API processes via Redis.
+
+    QB enforces its rate limit per realm (company) server-side, so a per-process
+    bucket lets N processes collectively exceed it (N × local_rate). Running 2
+    Celery workers with a 400/min local bucket each can push ~800/min at a 500/min
+    cap. This limiter coordinates ONE bucket per realm in Redis so the GLOBAL rate
+    stays under the cap no matter how many workers/dynos are running.
+
+    - Atomic refill+consume via a single Lua script (race-free across processes).
+    - Keyed per realm: qb:ratelimit:{realm_id}.
+    - Uses wall-clock time (time.time()), NOT time.monotonic(), because the bucket
+      timestamp is shared across processes and monotonic clocks are not comparable
+      between them.
+    - Fails OPEN to a per-process _TokenBucket if Redis is unavailable, so a Redis
+      blip degrades to the previous behaviour instead of halting all QB syncs.
+    """
+
+    # KEYS[1]=bucket key  ARGV: capacity, refill_per_sec, now_epoch, needed
+    # returns {allowed(1/0), wait_seconds_as_string}
+    _LUA = """
+    local capacity = tonumber(ARGV[1])
+    local refill   = tonumber(ARGV[2])
+    local now      = tonumber(ARGV[3])
+    local needed   = tonumber(ARGV[4])
+    local bucket = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+    local tokens = tonumber(bucket[1])
+    local ts     = tonumber(bucket[2])
+    if tokens == nil then tokens = capacity; ts = now end
+    local elapsed = now - ts
+    if elapsed < 0 then elapsed = 0 end
+    tokens = math.min(capacity, tokens + elapsed * refill)
+    local allowed = 0
+    local wait = 0.0
+    if tokens >= needed then
+        tokens = tokens - needed
+        allowed = 1
+    else
+        wait = (needed - tokens) / refill
+    end
+    redis.call('HSET', KEYS[1], 'tokens', tokens, 'ts', now)
+    redis.call('PEXPIRE', KEYS[1], 120000)
+    return {allowed, tostring(wait)}
+    """
+
+    def __init__(self, capacity: int = 250, refill_rate: float = 250 / 60):
+        self._capacity = capacity
+        self._refill_rate = refill_rate
+        self._local_fallback = _TokenBucket(capacity, refill_rate)
+        self._client = None
+        self._script = None
+        self._init_failed = False
+
+    def _redis(self):
+        """Lazily connect a SYNC redis client + register the Lua script.
+
+        _request() runs in a worker thread (via asyncio.to_thread), so the limiter
+        must be synchronous — we use redis-py's sync client, not the async one.
+        Returns None (and caches that) if Redis can't be reached, triggering the
+        local fallback for the rest of this process's life.
+        """
+        if self._client is not None or self._init_failed:
+            return self._client
+        try:
+            import redis as _redis  # redis-py (sync) — already present for Celery broker
+            url = getattr(settings, "REDIS_URL", None) or getattr(settings, "CELERY_BROKER_URL", None)
+            if not url:
+                raise RuntimeError("no REDIS_URL / CELERY_BROKER_URL configured")
+            client = _redis.Redis.from_url(url, socket_timeout=2, socket_connect_timeout=2)
+            client.ping()
+            self._client = client
+            self._script = client.register_script(self._LUA)
+            logger.info("QB rate limiter: using distributed Redis bucket (global cap)")
+        except Exception as exc:
+            self._init_failed = True
+            logger.warning(
+                "QB rate limiter: Redis unavailable (%s) — falling back to per-process bucket",
+                exc,
+            )
+        return self._client
+
+    def wait(self, tokens: int = 1, timeout: float = 30.0, realm: str | None = None) -> None:
+        client = self._redis()
+        if client is None:
+            # Redis not reachable — degrade to the original per-process behaviour.
+            return self._local_fallback.wait(tokens, min(timeout, 5.0))
+
+        key = f"qb:ratelimit:{realm or 'default'}"
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                res = self._script(
+                    keys=[key],
+                    args=[self._capacity, self._refill_rate, time.time(), tokens],
+                )
+                allowed = int(res[0])
+            except Exception as exc:
+                # Redis hiccup mid-flight — degrade to local bucket for this call.
+                logger.warning("QB rate limiter: Redis error (%s) — local fallback", exc)
+                return self._local_fallback.wait(tokens, max(0.05, deadline - time.monotonic()))
+            if allowed == 1:
+                return
+            time.sleep(0.05)
+        raise TimeoutError("QB rate limit: could not acquire token in time")
+
+
+# Distributed limiter shared across every worker + API process (global QB cap).
+# Falls back to a per-process token bucket automatically if Redis is unreachable.
+_rate_limiter = _RedisRateLimiter()
 
 # Process-level cache for QB account IDs (Income/Asset/COGS).
 # These IDs are permanent in QB and never change, so no TTL needed.
@@ -288,7 +400,8 @@ class QuickBooksService:
         return f"{self._base_url}/v3/company/{self._company_id}/{path}"
 
     def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
-        _rate_limiter.wait()
+        # Global rate limit, keyed per realm so the whole fleet shares one budget.
+        _rate_limiter.wait(realm=self._company_id)
         url = self._url(path)
         with httpx.Client(transport=httpx.HTTPTransport(retries=3)) as client:
             resp = client.request(method, url, headers=self._headers(), timeout=15, **kwargs)
@@ -389,20 +502,41 @@ class QuickBooksService:
     def _get_account_id(self, name: str, account_type: str) -> str:
         """Return the QB account Id for the given name+type.
 
-        Checks process-level cache first (persists across Celery tasks),
-        then instance cache, then QB API. Raises ValueError if not found.
+        Lookup priority:
+          1. Process-level dict  (same worker process, no I/O)
+          2. Redis cache         (survives worker restarts — saves 1 QB call per key)
+          3. QB API              (only on very first lookup ever, or after Redis flush)
         """
         cache_key = f"{account_type}:{name}"
+        redis_key = f"qb:account_id:{cache_key}"
 
-        # 1. Process-level cache (survives across tasks in same worker process)
+        # 1. Process-level cache
         if cache_key in _qb_account_id_cache:
             return _qb_account_id_cache[cache_key]
 
-        # 2. Instance-level cache (same task, multiple lookups)
+        # 2. Instance-level cache
         if cache_key in self._account_id_cache:
             return self._account_id_cache[cache_key]
 
-        # 3. QB API call (only on first lookup per worker process)
+        # 3. Redis cache (no TTL — QB account IDs never change)
+        _redis_client = None
+        try:
+            import redis  # redis-py (sync) — already in requirements for Celery
+            _redis_client = redis.Redis.from_url(
+                getattr(settings, "REDIS_URL", None) or settings.CELERY_BROKER_URL,
+                socket_timeout=2,
+            )
+            cached = _redis_client.get(redis_key)
+            if cached:
+                account_id = cached.decode()
+                _qb_account_id_cache[cache_key] = account_id
+                self._account_id_cache[cache_key] = account_id
+                logger.info("QB _get_account_id — Redis hit: %s → %s", cache_key, account_id)
+                return account_id
+        except Exception:
+            _redis_client = None  # Redis unavailable — fall through to QB API
+
+        # 4. QB API call (only on very first lookup or after Redis flush)
         escaped_name = name.replace("'", "\\'")
         escaped_type = account_type.replace("'", "\\'")
         result = self._request(
@@ -417,7 +551,15 @@ class QuickBooksService:
         account_id = str(accounts[0]["Id"])
         _qb_account_id_cache[cache_key] = account_id
         self._account_id_cache[cache_key] = account_id
-        logger.info("QB _get_account_id — name=%s type=%s → id=%s (cached process-wide)", name, account_type, account_id)
+
+        # Persist to Redis so next worker restart skips the QB API call
+        if _redis_client is not None:
+            try:
+                _redis_client.set(redis_key, account_id)
+            except Exception:
+                pass
+
+        logger.info("QB _get_account_id — QB API: %s → %s (cached Redis+process)", cache_key, account_id)
         return account_id
 
     def get_item(self, qb_item_id: str) -> dict[str, Any]:
@@ -490,18 +632,59 @@ class QuickBooksService:
         cost: float | None = None,
         qty_on_hand: int | None = None,
     ) -> bool:
-        """Sparse-update a QB Item's price and/or inventory quantity."""
+        """Sparse-update a QB Item's price and/or inventory quantity.
+
+        SyncToken is cached in Redis to avoid a GET /item call on every update.
+        Cache key: qb:synctoken:item:{qb_item_id} — updated after every successful write.
+        On 409 Conflict (stale token) the cache is cleared and we fall back to GET once.
+        """
         from datetime import date
 
-        try:
-            item = self.get_item(qb_item_id)
-            if not item:
-                logger.warning("QB update_item — item %s not found in QB (stale qb_item_id?)", qb_item_id)
-                return False
+        redis_token_key = f"qb:synctoken:item:{qb_item_id}"
 
+        def _get_redis():
+            try:
+                import redis
+                return redis.Redis.from_url(
+                    getattr(settings, "REDIS_URL", None) or settings.CELERY_BROKER_URL,
+                    socket_timeout=2,
+                )
+            except Exception:
+                return None
+
+        def _cached_sync_token() -> str | None:
+            r = _get_redis()
+            if r is None:
+                return None
+            try:
+                val = r.get(redis_token_key)
+                return val.decode() if val else None
+            except Exception:
+                return None
+
+        def _cache_sync_token(token: str) -> None:
+            r = _get_redis()
+            if r is None:
+                return
+            try:
+                r.set(redis_token_key, token, ex=3600)  # 1-hour TTL as safety net
+            except Exception:
+                pass
+
+        def _clear_sync_token() -> None:
+            r = _get_redis()
+            if r is None:
+                return
+            try:
+                r.delete(redis_token_key)
+            except Exception:
+                pass
+
+        def _do_update(sync_token: str) -> dict:
+            from datetime import date as _date
             payload: dict[str, Any] = {
                 "Id": qb_item_id,
-                "SyncToken": item["SyncToken"],
+                "SyncToken": sync_token,
                 "sparse": True,
             }
             if unit_price is not None:
@@ -510,13 +693,40 @@ class QuickBooksService:
                 payload["PurchaseCost"] = cost
             if qty_on_hand is not None:
                 payload["QtyOnHand"] = qty_on_hand
-                payload["InvStartDate"] = str(date.today())
-
+                payload["InvStartDate"] = str(_date.today())
             import json as _json
             logger.info("QB update_item payload — id=%s: %s", qb_item_id, _json.dumps(payload, default=str))
-            self._request("POST", "item", json=payload)
+            return self._request("POST", "item", json=payload)
+
+        try:
+            # Try cached SyncToken first (saves 1 GET call)
+            token = _cached_sync_token()
+            if token:
+                try:
+                    resp = _do_update(token)
+                    new_token = resp.get("Item", {}).get("SyncToken")
+                    if new_token:
+                        _cache_sync_token(new_token)
+                    logger.info("QB update_item success (cached token) — id=%s", qb_item_id)
+                    return True
+                except Exception as cache_exc:
+                    # 409 = stale token; any other error also falls back to fresh GET
+                    logger.info("QB update_item cached token failed (%s) — falling back to GET", cache_exc)
+                    _clear_sync_token()
+
+            # Fallback: GET item for fresh SyncToken
+            item = self.get_item(qb_item_id)
+            if not item:
+                logger.warning("QB update_item — item %s not found in QB (stale qb_item_id?)", qb_item_id)
+                return False
+
+            resp = _do_update(item["SyncToken"])
+            new_token = resp.get("Item", {}).get("SyncToken")
+            if new_token:
+                _cache_sync_token(new_token)
             logger.info("QB update_item success — id=%s", qb_item_id)
             return True
+
         except Exception as exc:
             logger.error("QB update_item failed for %s: %s", qb_item_id, exc)
             return False
