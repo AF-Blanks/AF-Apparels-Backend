@@ -356,9 +356,20 @@ async def _confirm_checkout_inner(
         _log.warning("Order confirmation email failed: %s", _exc)
 
     # ── QB invoice sync ───────────────────────────────────────────────────────
+    # Redis dedup: checkout.py and webhooks.py both try to fire this for the
+    # same order. Only the first one within 120 s wins — prevents double sync.
     try:
-        from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
-        sync_order_invoice_to_qb.delay(str(order.id))
+        import redis as _redis_sync
+        from app.core.config import settings as _cfg
+        _r = _redis_sync.Redis.from_url(
+            _cfg.REDIS_URL or _cfg.CELERY_BROKER_URL, socket_timeout=2
+        )
+        _dedup_key = f"qb:order_sync_dispatched:{order.id}"
+        if _r.set(_dedup_key, "1", nx=True, ex=120):
+            from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+            sync_order_invoice_to_qb.delay(str(order.id))
+        else:
+            _log.info("QB invoice sync already dispatched for order %s — skipping", order.id)
     except Exception as _exc:
         _log.warning("QB invoice sync dispatch failed: %s", _exc)
 
