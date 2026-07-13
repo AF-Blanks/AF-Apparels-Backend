@@ -111,6 +111,7 @@ class OrderOut(BaseModel):
     balance_due: Decimal | None = None
     is_fully_paid: bool = False
     convenience_fee: Decimal | None = None
+    qb_invoice_id: str | None = None
     items: list[OrderItemOut]
     created_at: datetime
     updated_at: datetime

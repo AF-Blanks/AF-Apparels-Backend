@@ -323,6 +323,126 @@ async def customer_report(
     }
 
 
+@router.get("/reports/variant-sales")
+async def variant_sales_report(
+    period: str = Query("week", description="today|week|month|quarter|year"),
+    _: None = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sales broken down by product → color → size for a given period."""
+    from collections import defaultdict
+
+    start, end = _date_range(period)
+
+    rows = (await db.execute(
+        select(
+            OrderItem.product_name,
+            OrderItem.color,
+            OrderItem.size,
+            func.sum(OrderItem.quantity).label("units_sold"),
+            func.sum(OrderItem.line_total).label("revenue"),
+        )
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(Order.created_at.between(start, end))
+        .where(Order.status.notin_(["cancelled", "refunded"]))
+        .group_by(OrderItem.product_name, OrderItem.color, OrderItem.size)
+        .order_by(OrderItem.product_name, OrderItem.color, OrderItem.size)
+    )).all()
+
+    # Group into product → variants
+    products: dict = defaultdict(lambda: {"product_name": "", "total_units": 0, "total_revenue": 0.0, "variants": []})
+    for r in rows:
+        key = r.product_name or "—"
+        products[key]["product_name"] = key
+        products[key]["total_units"] += int(r.units_sold)
+        products[key]["total_revenue"] += float(r.revenue or 0)
+        products[key]["variants"].append({
+            "color": r.color or "—",
+            "size": r.size or "—",
+            "units_sold": int(r.units_sold),
+            "revenue": float(r.revenue or 0),
+        })
+
+    return {
+        "period": period,
+        "date_from": start.date().isoformat(),
+        "date_to": end.date().isoformat(),
+        "products": list(products.values()),
+        "summary": {
+            "total_products": len(products),
+            "total_units": sum(p["total_units"] for p in products.values()),
+            "total_revenue": sum(p["total_revenue"] for p in products.values()),
+        },
+    }
+
+
+# ── Customer Purchase History ─────────────────────────────────────────────────
+
+@router.get("/reports/customer-purchase-history")
+async def customer_purchase_history(
+    company_id: str = Query(..., description="Company UUID to pull history for"),
+    year: int | None = Query(None),
+    display: str = Query("product", description="product | price"),
+    _: None = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin view of a specific customer's purchase history (same logic as /account/sales-history)."""
+    import uuid as _uuid
+    from collections import defaultdict
+    from sqlalchemy import extract
+
+    try:
+        company_uuid = _uuid.UUID(str(company_id))
+    except ValueError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="Invalid company_id")
+
+    q = (
+        select(OrderItem, Order.created_at, Order.order_number)
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(Order.company_id == company_uuid)
+        .where(Order.status.notin_(["cancelled", "refunded"]))
+    )
+    if year:
+        q = q.where(extract("year", Order.created_at) == year)
+    q = q.order_by(OrderItem.product_name, Order.created_at)
+    rows = (await db.execute(q)).all()
+
+    if display == "price":
+        result_items = [
+            {
+                "order_number": r[2],
+                "product_name": r[0].product_name,
+                "sku": r[0].sku,
+                "color": r[0].color or "—",
+                "size": r[0].size or "—",
+                "quantity": r[0].quantity,
+                "unit_price": float(r[0].unit_price),
+                "line_total": float(r[0].line_total),
+                "ordered_at": r[1].isoformat() if r[1] else None,
+            }
+            for r in rows
+        ]
+    else:
+        grouped: dict = defaultdict(lambda: {"product_name": "", "units_sold": 0, "total_revenue": 0.0, "_variants": {}})
+        for r in rows:
+            key = r[0].product_name
+            grouped[key]["product_name"] = r[0].product_name
+            grouped[key]["units_sold"] += r[0].quantity
+            grouped[key]["total_revenue"] += float(r[0].line_total)
+            vkey = f"{r[0].color or '—'} / {r[0].size or '—'}"
+            if vkey not in grouped[key]["_variants"]:
+                grouped[key]["_variants"][vkey] = {"color": r[0].color or "—", "size": r[0].size or "—", "units_sold": 0, "total_revenue": 0.0}
+            grouped[key]["_variants"][vkey]["units_sold"] += r[0].quantity
+            grouped[key]["_variants"][vkey]["total_revenue"] += float(r[0].line_total)
+        result_items = []
+        for g in grouped.values():
+            variants = sorted(g.pop("_variants").values(), key=lambda v: (v["color"], v["size"]))
+            result_items.append({**g, "variants": variants})
+
+    return {"items": result_items, "year": year, "display": display}
+
+
 # ── T188: CSV Export ──────────────────────────────────────────────────────────
 
 @router.get("/reports/{report_type}/export-csv")

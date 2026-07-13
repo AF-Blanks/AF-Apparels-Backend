@@ -1548,6 +1548,12 @@ async def mark_order_paid(
     )
     await db.commit()
 
+    # If invoice already exists in QB, record payment now (Net-30 / mark-paid flow)
+    if order.qb_invoice_id:
+        from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+        sync_order_invoice_to_qb.delay(str(order_id), force_payment=True)
+        logger.info("mark_order_paid: QB payment sync queued for order %s", order_id)
+
     return {"message": "Order marked as paid"}
 
 

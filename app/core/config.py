@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     QB_COMPANY_ID: str = ""
     QB_ACCESS_TOKEN: str = ""
     QB_REFRESH_TOKEN: str = ""
+    QB_SHIPPING_ITEM_ID: str = ""       # QB item ID for Shipping & Handling line
+    QB_CONVENIENCE_FEE_ITEM_ID: str = ""  # QB item ID for 3% Credit Card Convenience Fee
 
     # ── Email (Resend) ────────────────────────────────────────────────────────
     RESEND_API_KEY: str = ""

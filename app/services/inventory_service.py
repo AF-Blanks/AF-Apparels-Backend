@@ -161,6 +161,30 @@ class InventoryService:
         quantity_after = max(0, quantity_before + quantity_delta)
         record.quantity = quantity_after
 
+        # Low stock alert — only fires when qty CROSSES below threshold (not on every low-stock adjustment)
+        _threshold = record.low_stock_threshold
+        if quantity_before > _threshold >= quantity_after:
+            try:
+                from app.models.product import Product as _Prod
+                _pv = (await self.db.execute(
+                    select(ProductVariant).where(ProductVariant.id == variant_id)
+                )).scalar_one_or_none()
+                _prod = (await self.db.execute(
+                    select(_Prod).where(_Prod.id == _pv.product_id)
+                )).scalar_one_or_none() if _pv else None
+                from app.services.email_service import EmailService
+                EmailService().send_admin_low_stock_alert(
+                    product_name=_prod.name if _prod else "Product",
+                    sku=_pv.sku if _pv else str(variant_id),
+                    qty=quantity_after,
+                )
+                logger.info(
+                    "Low stock alert sent — sku=%s qty=%d threshold=%d",
+                    _pv.sku if _pv else variant_id, quantity_after, _threshold,
+                )
+            except Exception as _alert_exc:
+                logger.warning("Low stock email failed: %s", _alert_exc)
+
         # Log adjustment
         adj = InventoryAdjustment(
             inventory_record_id=record.id,

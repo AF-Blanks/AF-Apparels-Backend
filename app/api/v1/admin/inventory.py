@@ -114,6 +114,47 @@ async def adjust_inventory(
     )
 
 
+@router.patch("/inventory/threshold")
+async def update_low_stock_threshold(
+    payload: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update low_stock_threshold for a specific variant+warehouse record."""
+    from sqlalchemy import select
+    from app.models.inventory import InventoryRecord, Warehouse
+    from app.models.product import ProductVariant
+
+    variant_id = payload.get("variant_id")
+    warehouse_id = payload.get("warehouse_id")
+    threshold = payload.get("threshold")
+
+    if threshold is None or int(threshold) < 0:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="threshold must be a non-negative integer")
+
+    record = (await db.execute(
+        select(InventoryRecord).where(
+            InventoryRecord.variant_id == UUID(str(variant_id)),
+            InventoryRecord.warehouse_id == UUID(str(warehouse_id)),
+        )
+    )).scalar_one_or_none()
+
+    if not record:
+        # Create record with 0 qty if it doesn't exist yet
+        record = InventoryRecord(
+            variant_id=UUID(str(variant_id)),
+            warehouse_id=UUID(str(warehouse_id)),
+            quantity=0,
+            low_stock_threshold=int(threshold),
+        )
+        db.add(record)
+    else:
+        record.low_stock_threshold = int(threshold)
+
+    await db.commit()
+    return {"variant_id": variant_id, "warehouse_id": warehouse_id, "threshold": int(threshold)}
+
+
 @router.post("/inventory/import-csv", response_model=BulkImportResult)
 async def import_inventory_csv(
     file: UploadFile = File(...), db: AsyncSession = Depends(get_db)

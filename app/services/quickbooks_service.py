@@ -417,6 +417,10 @@ class QuickBooksService:
         resp.raise_for_status()
         return resp.json()
 
+    def query(self, soql: str) -> dict[str, Any]:
+        """Run a raw SOQL query against the QB Accounting API (rate-limited via _request)."""
+        return self._request("GET", f"query?query={soql}&minorversion=65")
+
     # ── Customer ──────────────────────────────────────────────────────────────
 
     def create_customer(
@@ -463,18 +467,27 @@ class QuickBooksService:
         line_items: list[dict],
         total: float,
         due_date: str | None = None,
+        shipping_addr: dict | None = None,
     ) -> str:
         """Create a QB Invoice. Returns QB invoice Id (idempotent by DocNumber).
 
         line_items: list of {description, quantity, unit_price, amount}
+        shipping_addr: optional dict with keys Line1, City, CountrySubDivisionCode, PostalCode
         """
         # DocNumber idempotency is handled at the task level (order.qb_invoice_id check).
         # Skipping the CorePlus SELECT query here to preserve monthly API call budget.
 
         lines = []
         for item in line_items:
+            _qb_item_id = item.get("qb_item_id")
+            if not _qb_item_id:
+                logger.critical(
+                    "QB invoice line missing qb_item_id — falling back to item '1' (Services). "
+                    "Revenue and COGS will be misclassified. description=%s",
+                    item.get("description"),
+                )
             line_detail: dict[str, Any] = {
-                "ItemRef": {"value": item.get("qb_item_id") or "1"},
+                "ItemRef": {"value": _qb_item_id or "1"},
                 "Qty": item["quantity"],
                 "UnitPrice": float(item["unit_price"]),
             }
@@ -489,9 +502,14 @@ class QuickBooksService:
             "CustomerRef": {"value": qb_customer_id},
             "DocNumber": order_number,
             "Line": lines,
+            # QB Automated Sales Tax — calculates tax based on ShipAddr
+            "TxnTaxDetail": {"TxnTaxCodeRef": {"value": "TAX"}},
+            "GlobalTaxCalculation": "TaxExcluded",
         }
         if due_date:
             payload["DueDate"] = due_date
+        if shipping_addr:
+            payload["ShipAddr"] = shipping_addr
 
         logger.info("QB create_invoice payload: %s", payload)
         resp = self._request("POST", "invoice", json=payload)

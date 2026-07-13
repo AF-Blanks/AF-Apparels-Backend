@@ -1494,33 +1494,19 @@ async def sync_payments_from_qb(
         return {"message": "No QuickBooks customer linked", "synced": 0}
 
     try:
+        import asyncio
         from app.services.quickbooks_service import QuickBooksService
-        import httpx
 
         qb_svc = await QuickBooksService().initialize()
-        access_token = qb_svc.get_access_token()
 
-        base_url = (
-            "https://sandbox-quickbooks.api.intuit.com"
-            if settings.QB_ENVIRONMENT == "sandbox"
-            else "https://quickbooks.api.intuit.com"
-        )
         query = f"SELECT * FROM Payment WHERE CustomerRef = '{company.qb_customer_id}' MAXRESULTS 100"
 
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"{base_url}/v3/company/{settings.QB_COMPANY_ID}/query",
-                params={"query": query, "minorversion": "65"},
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "application/json",
-                },
-            )
+        try:
+            query_resp = await asyncio.to_thread(qb_svc.query, query)
+        except Exception as exc:
+            return {"message": f"QB sync failed ({exc})", "synced": 0}
 
-        if resp.status_code != 200:
-            return {"message": f"QB sync failed (HTTP {resp.status_code})", "synced": 0}
-
-        payments = resp.json().get("QueryResponse", {}).get("Payment", [])
+        payments = query_resp.get("QueryResponse", {}).get("Payment", [])
         synced = 0
         for payment in payments:
             qb_id = str(payment.get("Id", ""))
@@ -2001,40 +1987,63 @@ async def list_qb_invoices(
         select(Company).where(Company.id == company_id)
     )).scalar_one_or_none()
 
+    async def _local_invoice_fallback() -> list:
+        """Return orders with a synced QB invoice ID as a fallback when QB is unreachable."""
+        from app.models.order import Order as OrderModel
+        rows = (await db.execute(
+            select(OrderModel)
+            .where(
+                OrderModel.company_id == company_id,
+                OrderModel.qb_invoice_id.isnot(None),
+            )
+            .order_by(OrderModel.created_at.desc())
+            .limit(100)
+        )).scalars().all()
+
+        result = []
+        for o in rows:
+            total = float(o.total or 0)
+            paid = float(o.amount_paid or 0)
+            balance = max(0.0, total - paid)
+            if balance <= 0:
+                inv_status = "paid"
+            elif paid > 0:
+                inv_status = "partial"
+            else:
+                inv_status = "open"
+            result.append({
+                "id": str(o.id),
+                "doc_number": o.qb_invoice_id or o.order_number,
+                "txn_date": o.created_at.strftime("%Y-%m-%d") if o.created_at else None,
+                "due_date": None,
+                "total_amt": total,
+                "balance": balance,
+                "status": inv_status,
+                "email_status": None,
+                "customer_memo": o.notes,
+            })
+        return result
+
     if not company or not company.qb_customer_id:
-        return []
+        return await _local_invoice_fallback()
 
     try:
-        import httpx
+        import asyncio
         from app.services.quickbooks_service import QuickBooksService
 
         qb_svc = await QuickBooksService().initialize()
-        access_token = qb_svc.get_access_token()
 
-        base_url = (
-            "https://sandbox-quickbooks.api.intuit.com"
-            if settings.QB_ENVIRONMENT == "sandbox"
-            else "https://quickbooks.api.intuit.com"
-        )
         query = (
             f"SELECT * FROM Invoice WHERE CustomerRef = '{company.qb_customer_id}' "
             "ORDER BY TxnDate DESC MAXRESULTS 100"
         )
 
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"{base_url}/v3/company/{settings.QB_COMPANY_ID}/query",
-                params={"query": query, "minorversion": "65"},
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "application/json",
-                },
-            )
+        try:
+            query_resp = await asyncio.to_thread(qb_svc.query, query)
+        except Exception:
+            return await _local_invoice_fallback()
 
-        if resp.status_code != 200:
-            return []
-
-        raw_invoices = resp.json().get("QueryResponse", {}).get("Invoice", [])
+        raw_invoices = query_resp.get("QueryResponse", {}).get("Invoice", [])
 
         invoices = []
         for inv in raw_invoices:
@@ -2059,7 +2068,7 @@ async def list_qb_invoices(
                 "customer_memo": (inv.get("CustomerMemo") or {}).get("value"),
             })
 
-        return invoices
+        return invoices if invoices else await _local_invoice_fallback()
 
     except Exception:
-        return []
+        return await _local_invoice_fallback()

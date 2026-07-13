@@ -219,8 +219,10 @@ def sync_customer_to_qb(self, company_id: str):
 
 
 @celery_app.task(bind=True, max_retries=5)
-def sync_order_invoice_to_qb(self, order_id: str):
+def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
     """Sync an Order to QuickBooks as an Invoice.
+
+    force_payment=True: create QB payment even for Net-30 orders (used by mark-paid endpoint).
 
     Handles three customer types:
     - True guest (company_id is NULL): create QB customer on-the-fly from guest fields.
@@ -321,28 +323,88 @@ def sync_order_invoice_to_qb(self, order_id: str):
                         "unit_price": float(i.unit_price),
                         "amount": float(i.line_total),
                         "qb_item_id": sku_to_qb_item.get(i.sku),
+                        "_sku": i.sku,  # internal field — used for inline QB sync below
                     }
                     for i in order.items
                 ]
-                # Add shipping and tax as line items so QB invoice total = charged amount
+
+                # Collect variants not yet in QB so we can sync them inline after svc init.
+                # This prevents the fallback to item "1" (Services) which misclassifies revenue.
+                from app.models.inventory import InventoryRecord as _IR
+                from sqlalchemy import func as _func
+                _unsynced_variants: list[dict] = []
+                _sku_to_product_name = {i.sku: i.product_name for i in order.items}
+                for _sku_key, _qb_id in sku_to_qb_item.items():
+                    if _qb_id:
+                        continue
+                    _pv2 = (await session.execute(
+                        select(_PV).where(_PV.sku == _sku_key)
+                    )).scalar_one_or_none()
+                    if _pv2:
+                        _stk = int((await session.execute(
+                            select(_func.coalesce(_func.sum(_IR.quantity), 0))
+                            .where(_IR.variant_id == _pv2.id)
+                        )).scalar() or 0)
+                        _unsynced_variants.append({
+                            "variant_id": str(_pv2.id),
+                            "sku": _sku_key,
+                            "name": f"{_sku_to_product_name.get(_sku_key, 'Product')} - {_sku_key}",
+                            "price": float(_pv2.retail_price),
+                            "cost": float(_pv2.cost_per_item) if _pv2.cost_per_item else None,
+                            "stock": _stk,
+                        })
+                # Add shipping as a line item; tax is handled by QB Automated Sales Tax
                 shipping = float(order.shipping_cost or 0)
-                tax = float(order.tax_amount or 0)
                 if shipping > 0:
                     line_items.append({
                         "description": "Shipping & Handling",
                         "quantity": 1,
                         "unit_price": shipping,
                         "amount": shipping,
-                        "qb_item_id": None,
+                        "qb_item_id": settings.QB_SHIPPING_ITEM_ID or None,
                     })
-                if tax > 0:
+
+                # Add 3% credit card convenience fee if charged
+                _conv_fee = float(getattr(order, "convenience_fee", None) or 0)
+                if _conv_fee > 0:
+                    _conv_item_id = settings.QB_CONVENIENCE_FEE_ITEM_ID or None
+                    if not _conv_item_id:
+                        logger.warning(
+                            "QB invoice: convenience_fee=%.2f but QB_CONVENIENCE_FEE_ITEM_ID"
+                            " not set — fee will use fallback item '1' (Services)."
+                            " Create a 'CC Convenience Fee' service item in QB and set"
+                            " QB_CONVENIENCE_FEE_ITEM_ID in .env",
+                            _conv_fee,
+                        )
                     line_items.append({
-                        "description": "Sales Tax",
+                        "description": "Credit Card Convenience Fee (3%)",
                         "quantity": 1,
-                        "unit_price": tax,
-                        "amount": tax,
-                        "qb_item_id": None,
+                        "unit_price": _conv_fee,
+                        "amount": _conv_fee,
+                        "qb_item_id": _conv_item_id,
                     })
+                    logger.info(
+                        "QB invoice: convenience_fee=%.2f added as line item (qb_item_id=%s)",
+                        _conv_fee, _conv_item_id,
+                    )
+
+                # Parse shipping address for QB AST (Automated Sales Tax)
+                import json as _json
+                _addr_raw: dict = {}
+                try:
+                    if order.shipping_address_snapshot:
+                        _addr_raw = _json.loads(order.shipping_address_snapshot)
+                except Exception:
+                    pass
+                shipping_addr: dict | None = None
+                if _addr_raw:
+                    shipping_addr = {
+                        "Line1": _addr_raw.get("address_line1") or _addr_raw.get("line1") or _addr_raw.get("street1") or "",
+                        "City": _addr_raw.get("city") or "",
+                        "CountrySubDivisionCode": _addr_raw.get("state") or _addr_raw.get("state_province") or "",
+                        "PostalCode": _addr_raw.get("postal_code") or _addr_raw.get("zip") or _addr_raw.get("zip_code") or "",
+                        "Country": "US",
+                    }
 
                 order_data = {
                     "company_id": str(order.company_id) if order.company_id else None,
@@ -353,10 +415,47 @@ def sync_order_invoice_to_qb(self, order_id: str):
                     "created_at_date": order.created_at.strftime("%Y-%m-%d") if order.created_at else None,
                     "items": line_items,
                     "qb_invoice_id": order.qb_invoice_id,  # cached from prior successful run
+                    "shipping_addr": shipping_addr,
                 }
 
             # ── 2. Load live QB tokens ────────────────────────────────────────
             svc = await QuickBooksService().initialize()
+
+            # ── 2.5. Inline-sync variants missing from QB before invoice ──────
+            # Prevents "1" (Services) fallback which misclassifies revenue + COGS.
+            if _unsynced_variants:
+                logger.warning(
+                    "sync_order_invoice_to_qb: %d SKU(s) not in QB — syncing inline before invoice",
+                    len(_unsynced_variants),
+                )
+                from sqlalchemy import text as _sql_v
+                for _uv in _unsynced_variants:
+                    try:
+                        _new_qb_id = await asyncio.to_thread(
+                            svc.find_or_create_item,
+                            _uv["sku"], _uv["name"], _uv["price"], _uv["cost"], _uv["stock"], "",
+                        )
+                        sku_to_qb_item[_uv["sku"]] = _new_qb_id
+                        async with AsyncSessionLocal() as _vs:
+                            await _vs.execute(
+                                _sql_v("UPDATE product_variants SET qb_item_id=:qid WHERE id=CAST(:vid AS UUID)"),
+                                {"qid": str(_new_qb_id), "vid": _uv["variant_id"]},
+                            )
+                            await _vs.commit()
+                        logger.info(
+                            "sync_order_invoice_to_qb: inline-synced sku=%s → qb_item_id=%s",
+                            _uv["sku"], _new_qb_id,
+                        )
+                    except Exception as _uv_exc:
+                        logger.error(
+                            "sync_order_invoice_to_qb: inline-sync failed for sku=%s: %s — "
+                            "invoice line will fall back to item '1'",
+                            _uv["sku"], _uv_exc,
+                        )
+                # Patch order_data line items with newly resolved qb_item_ids
+                for _li in order_data["items"]:
+                    if not _li.get("qb_item_id") and _li.get("_sku"):
+                        _li["qb_item_id"] = sku_to_qb_item.get(_li["_sku"])
 
             # ── 3. Resolve QB customer ────────────────────────────────────────
             if is_guest_no_company:
@@ -398,6 +497,7 @@ def sync_order_invoice_to_qb(self, order_id: str):
                     order_number=order_data["order_number"],
                     line_items=order_data["items"],
                     total=order_data["total"],
+                    shipping_addr=order_data.get("shipping_addr"),
                 )
                 logger.info("sync_order_invoice_to_qb success — qb_invoice_id=%s order=%s", qb_invoice_id, order_data["order_number"])
 
@@ -431,7 +531,7 @@ def sync_order_invoice_to_qb(self, order_id: str):
             _pmt_method = order_data.get("payment_method") or ""
             _is_paid = order_data.get("payment_status") == "paid"
             _is_net30 = _pmt_method.lower() in ("net_30", "net30")
-            if _is_paid and not _is_net30:
+            if _is_paid and (not _is_net30 or force_payment):
                 logger.info(
                     "sync_order_invoice_to_qb: recording QB payment — order=%s invoice=%s"
                     " method=%s total=%.2f",
@@ -486,7 +586,6 @@ def sync_order_invoice_to_qb(self, order_id: str):
     except Exception as exc:
         delay = _retry_delay(exc, self.request.retries)
         raise self.retry(exc=exc, countdown=delay)
-
 
 @celery_app.task(bind=True, max_retries=5)
 def sync_variant_to_qb(self, variant_id: str):
