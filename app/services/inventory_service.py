@@ -173,7 +173,7 @@ class InventoryService:
                     select(_Prod).where(_Prod.id == _pv.product_id)
                 )).scalar_one_or_none() if _pv else None
                 from app.services.email_service import EmailService
-                EmailService().send_admin_low_stock_alert(
+                EmailService(self.db).send_admin_low_stock_alert(
                     product_name=_prod.name if _prod else "Product",
                     sku=_pv.sku if _pv else str(variant_id),
                     qty=quantity_after,
