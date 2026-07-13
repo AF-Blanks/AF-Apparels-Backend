@@ -490,6 +490,9 @@ class QuickBooksService:
                 "ItemRef": {"value": _qb_item_id or "1"},
                 "Qty": item["quantity"],
                 "UnitPrice": float(item["unit_price"]),
+                # Mark line as taxable — QB Automated Sales Tax decides the actual
+                # jurisdiction-specific treatment (nexus, product/shipping taxability).
+                "TaxCodeRef": {"value": "TAX"},
             }
             lines.append({
                 "Amount": float(item["amount"]),
