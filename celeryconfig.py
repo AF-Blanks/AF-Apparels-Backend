@@ -39,7 +39,10 @@ from celery.schedules import crontab  # noqa: E402
 beat_schedule = {
     "detect-abandoned-carts": {
         "task": "app.tasks.cart_tasks.detect_abandoned_carts",
-        "schedule": crontab(hour="*/1"),  # every hour
+        # NOTE: crontab(hour="*/1") alone was firing every MINUTE, not every
+        # hour — "minute" defaults to "*" (every minute) when not specified.
+        # minute=0 makes this fire once, on the hour, every hour.
+        "schedule": crontab(minute="0", hour="*/1"),
     },
     "check-low-stock": {
         "task": "app.tasks.inventory_tasks.check_low_stock_levels",
