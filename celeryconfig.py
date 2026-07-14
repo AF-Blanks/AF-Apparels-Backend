@@ -50,3 +50,12 @@ beat_schedule = {
         "schedule": crontab(hour="7", minute="0"),  # daily at 7am UTC — staggered from other daily jobs
     },
 }
+
+# ── RedBeat scheduler ─────────────────────────────────────────────────────────
+# Railway's filesystem is ephemeral — the default file-based beat scheduler
+# stores "last run" state in a local file that gets wiped on every deploy or
+# restart, risking missed or duplicate runs. RedBeat stores that same state in
+# Redis instead, which persists across restarts. Requires `celery-redbeat`.
+beat_scheduler = "redbeat.RedBeatScheduler"
+redbeat_redis_url = os.environ.get("REDIS_URL", broker_url)
+redbeat_lock_timeout = 90  # seconds — prevents two Beat instances from double-scheduling
