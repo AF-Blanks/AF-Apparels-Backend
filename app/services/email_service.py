@@ -416,6 +416,54 @@ class EmailService:
             attachments=attachments,
         )
 
+    def send_qb_invoice_ready(
+        self,
+        order: "Order",  # type: ignore[name-defined]
+        to_email: str,
+        name: str,
+        pdf_bytes: bytes,
+    ) -> bool:
+        """Follow-up email with the real QuickBooks-generated invoice PDF attached.
+
+        Sent a short delay after the order confirmation email, once the
+        background QuickBooks sync has actually produced the invoice — the
+        confirmation email fires instantly and can only include a locally
+        generated summary, not this PDF.
+        """
+        order_num = getattr(order, "order_number", "N/A")
+        total_val = float(getattr(order, "total", 0))
+        amount_paid_val = float(getattr(order, "amount_paid", None) or 0)
+        balance_due_val = max(0.0, total_val - amount_paid_val)
+        is_paid = balance_due_val <= 0.01
+
+        status_line = (
+            f'<span style="color:#059669">Paid in full — no action needed.</span>'
+            if is_paid else
+            f'<span style="color:#E8242A">Balance due: ${balance_due_val:.2f}</span>'
+        )
+
+        content_html = (
+            f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
+            f'Your Invoice is Ready — {order_num}</h2>'
+            f'<p style="color:#374151;margin:0 0 12px">'
+            f'Hi {name}, the official invoice for order {order_num} has been generated '
+            f'and is attached to this email as a PDF.</p>'
+            f'<p style="font-size:14px;font-weight:600;margin:0 0 20px">{status_line}</p>'
+            f'<p style="color:#6b7280;font-size:13px;margin:0">'
+            f'Questions? Call '
+            f'<a href="tel:4693679753" style="color:#1B3A5C">+1\xa0(469)\xa0367-9753</a> or '
+            f'<a href="mailto:info@afblanks.com" style="color:#1B3A5C">info@afblanks.com</a></p>'
+        )
+
+        attachments = [{"filename": f"invoice-{order_num}.pdf", "content": pdf_bytes}]
+
+        return self._send_via_resend(
+            to_email=to_email,
+            subject=f"Your Invoice is Ready — {order_num} | AF Apparels",
+            body_html=self._base_template(content_html),
+            attachments=attachments,
+        )
+
     def send_admin_new_order_alert(self, order: "Order") -> bool:  # type: ignore[name-defined]
         """Notify admin of a new order placement."""
         from app.core.config import settings as _s

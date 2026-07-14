@@ -479,6 +479,7 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
             # Fast path: if qb_invoice_id is already stored in our DB (from a prior task
             # run that succeeded at create but failed at payment), skip the invoice create
             # entirely — avoids 1 CorePlus DocNumber query on every retry.
+            _invoice_freshly_created = False
             _existing_invoice_id = order_data.get("qb_invoice_id")
             if _existing_invoice_id:
                 qb_invoice_id = _existing_invoice_id
@@ -517,6 +518,7 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
                             "QB invoice ID %s saved to DB for order %s",
                             qb_invoice_id, order_data["order_number"],
                         )
+                        _invoice_freshly_created = True
                     except Exception as _save_exc:
                         await session.rollback()
                         logger.error(
@@ -572,6 +574,23 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
 
             # ── 6. Log success ────────────────────────────────────────────────
             await _log_attempt("order", order_id, "success", None, qb_entity_id=qb_invoice_id)
+
+            # ── 7. Follow-up "invoice ready" email with the real QB PDF ────────
+            # Only on the run that actually created the invoice — not on retries
+            # that hit the fast-path skip-create branch above — so the customer
+            # gets exactly one of these, not one per retry. countdown=20 gives
+            # QuickBooks a moment to finish indexing the invoice before the
+            # email task tries to fetch its PDF (which itself retries too).
+            if _invoice_freshly_created:
+                try:
+                    from app.tasks.email_tasks import send_qb_invoice_ready_email
+                    send_qb_invoice_ready_email.apply_async(args=[order_id], countdown=20)
+                except Exception as _email_exc:
+                    logger.warning(
+                        "Failed to dispatch invoice-ready email for order %s: %s",
+                        order_data["order_number"], _email_exc,
+                    )
+
             return {"status": "success", "qb_invoice_id": qb_invoice_id}
 
         except Exception as exc:

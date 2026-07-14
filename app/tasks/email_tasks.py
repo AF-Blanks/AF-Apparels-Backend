@@ -114,6 +114,79 @@ def send_order_confirmation_email(self, order_id: str) -> dict:
         raise self.retry(exc=exc, countdown=delay)
 
 
+# ─── QuickBooks invoice ready (real QB PDF, sent after order confirmation) ───
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_qb_invoice_ready_email(self, order_id: str) -> dict:
+    """Follow-up email with the real QuickBooks invoice PDF attached.
+
+    Dispatched by sync_order_invoice_to_qb once the QB invoice actually
+    exists — the instant order-confirmation email can only attach a locally
+    generated summary since the QB invoice doesn't exist yet at that point.
+    """
+    try:
+        async def _send():
+            import httpx as _httpx
+            from sqlalchemy import select
+            from sqlalchemy.orm import selectinload
+            from app.models.order import Order
+            from app.services.email_service import EmailService
+            from app.services.quickbooks_service import QuickBooksService
+
+            async with AsyncSessionLocal() as db:
+                order = (await db.execute(
+                    select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+                )).scalar_one_or_none()
+                if not order or not order.qb_invoice_id:
+                    return {"status": "skipped", "reason": "no_qb_invoice"}
+
+                recipients = await _get_order_recipients(order, db)
+                if not recipients:
+                    return {"status": "skipped", "reason": "no_recipients"}
+
+                # Fetch the real QuickBooks invoice PDF — same proxy the
+                # customer-facing "Download Invoice" button uses.
+                pdf_bytes: bytes | None = None
+                try:
+                    svc = await QuickBooksService().initialize()
+                    async with _httpx.AsyncClient(timeout=30) as client:
+                        resp = await client.get(
+                            svc._url(f"invoice/{order.qb_invoice_id}/pdf"),
+                            params={"minorversion": "65"},
+                            headers={
+                                "Authorization": f"Bearer {svc._access_token}",
+                                "Accept": "application/pdf",
+                            },
+                        )
+                    if resp.status_code == 200:
+                        pdf_bytes = resp.content
+                    else:
+                        logger.warning(
+                            "QB invoice PDF fetch returned %s for order %s invoice %s",
+                            resp.status_code, order.order_number, order.qb_invoice_id,
+                        )
+                except Exception as exc:
+                    logger.warning("QB invoice PDF fetch failed for order %s: %s", order.order_number, exc)
+
+                if not pdf_bytes:
+                    # Don't send an "invoice ready" email without the actual
+                    # invoice attached — retry later via the outer except block
+                    # instead (QB may just need a bit more time to index it).
+                    raise RuntimeError(f"QB invoice PDF not yet available for order {order.order_number}")
+
+                email_svc = EmailService(db)
+                sent = 0
+                for email, name in recipients:
+                    ok = email_svc.send_qb_invoice_ready(order, email, name, pdf_bytes)
+                    if ok:
+                        sent += 1
+                return {"status": "sent", "sent": sent, "order_id": order_id}
+        return _run(_send())
+    except Exception as exc:
+        delay = 60 * (2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)
+
+
 # ─── Shared helpers ──────────────────────────────────────────────────────────
 
 async def _get_order_recipients(order, db) -> list[tuple[str, str]]:
