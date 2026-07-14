@@ -1063,13 +1063,23 @@ def sync_inventory_batch_to_qb(self, variant_ids: list[str]):
 
 # ── Chargeback / payment-reversal detection (daily sweep) ─────────────────────
 
-# Statuses that indicate money was reversed after an initial successful charge.
-# Intuit does not publish a complete enum of QB Payments charge statuses, so this
-# list is intentionally conservative — only well-understood "money went back"
-# states trigger auto-suspend. Anything else is logged for manual review only.
+# Statuses that indicate money was reversed AFTER an initial successful charge.
+#
+# IMPORTANT — learned the hard way in production: "DECLINED" does NOT mean
+# what it sounds like here. It reflects the ORIGINAL charge attempt's outcome
+# on QB's side, not a later reversal — many historical/test orders that were
+# already marked "paid" in our own DB (via a separate, decoupled QB Accounting
+# call) still show "DECLINED" when queried back from QB Payments. Treating it
+# as a reversal signal caused a mass false-positive that auto-suspended real
+# customer accounts. Do NOT add DECLINED/CANCELLED/VOIDED/REVERSED back here
+# without first confirming their real meaning against live data — they are
+# ambiguous (could describe the initial attempt, not a reversal).
+#
+# Only keep terms that are unambiguous by definition — you cannot "refund" or
+# "charge back" a payment that was never successfully captured in the first
+# place, so these two are safe.
 _CHARGEBACK_BAD_STATUSES = {
-    "REFUNDED", "CANCELLED", "CANCELED", "CHARGEBACK",
-    "DISPUTED", "DECLINED", "REVERSED", "VOIDED",
+    "REFUNDED", "CHARGEBACK",
 }
 
 # Hard caps so this sweep can NEVER turn into an API storm, regardless of how
