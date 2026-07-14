@@ -587,6 +587,7 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
         delay = _retry_delay(exc, self.request.retries)
         raise self.retry(exc=exc, countdown=delay)
 
+
 @celery_app.task(bind=True, max_retries=5)
 def sync_variant_to_qb(self, variant_id: str):
     """Sync a ProductVariant to QuickBooks as an Inventory Item.
@@ -1058,3 +1059,156 @@ def sync_inventory_batch_to_qb(self, variant_ids: list[str]):
     except Exception as exc:
         delay = _retry_delay(exc, self.request.retries)
         raise self.retry(exc=exc, countdown=delay)
+
+
+# ── Chargeback / payment-reversal detection (daily sweep) ─────────────────────
+
+# Statuses that indicate money was reversed after an initial successful charge.
+# Intuit does not publish a complete enum of QB Payments charge statuses, so this
+# list is intentionally conservative — only well-understood "money went back"
+# states trigger auto-suspend. Anything else is logged for manual review only.
+_CHARGEBACK_BAD_STATUSES = {
+    "REFUNDED", "CANCELLED", "CANCELED", "CHARGEBACK",
+    "DISPUTED", "DECLINED", "REVERSED", "VOIDED",
+}
+
+# Hard caps so this sweep can NEVER turn into an API storm, regardless of how
+# many paid card orders accumulate:
+#   - at most this many QB Payments status checks in one run
+#   - a small fixed pause between each check on top of the shared rate limiter
+_CHARGEBACK_MAX_ORDERS_PER_RUN = 100
+_CHARGEBACK_PAUSE_BETWEEN_CALLS_SEC = 0.5
+# Card network dispute windows are ~120 days; no need to ever check older orders.
+_CHARGEBACK_LOOKBACK_DAYS = 120
+
+
+@celery_app.task(bind=True, max_retries=1)
+def check_card_payment_chargebacks(self):
+    """Daily sweep — re-checks recent *card* orders against QuickBooks Payments
+    to detect chargebacks/refunds/reversals that happened after the fact.
+
+    ACH/bank-transfer orders are intentionally excluded: they never create a
+    QuickBooks Payments transaction in this system (admin verifies them
+    manually against the bank statement), so there is nothing in QB to poll.
+
+    On detecting a reversed payment: suspends the company (existing
+    CompanyService.suspend) and emails the admin. Never re-processes an
+    already-suspended company, and hard-caps how many QB calls it makes per
+    run — see the constants above.
+    """
+
+    async def _run_all():
+        from datetime import datetime, timedelta, timezone
+
+        from app.core.database import AsyncSessionLocal
+        from app.models.company import Company
+        from app.models.order import Order
+        from app.services.company_service import CompanyService
+        from app.services.email_service import EmailService
+        from app.services.qb_payments_service import QBPaymentsService
+        from sqlalchemy import select
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=_CHARGEBACK_LOOKBACK_DAYS)
+
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(Order, Company)
+                .join(Company, Company.id == Order.company_id)
+                .where(
+                    Order.payment_method.in_(["card", "credit_card", "qb_payments"]),
+                    Order.qb_payment_charge_id.isnot(None),
+                    Order.payment_status == "paid",
+                    Order.created_at >= cutoff,
+                    Company.status != "suspended",
+                )
+                .order_by(Order.created_at.desc())
+                .limit(_CHARGEBACK_MAX_ORDERS_PER_RUN)
+            )).all()
+
+        if not rows:
+            logger.info("check_card_payment_chargebacks: nothing to check")
+            return {"checked": 0, "flagged": 0}
+
+        logger.info("check_card_payment_chargebacks: checking %d order(s)", len(rows))
+
+        qb_pay = QBPaymentsService()
+        flagged = 0
+
+        for order, company in rows:
+            try:
+                charge = await asyncio.to_thread(qb_pay.get_charge, order.qb_payment_charge_id)
+                charge_status = str(charge.get("status", "")).upper()
+
+                if charge_status in _CHARGEBACK_BAD_STATUSES:
+                    flagged += 1
+                    logger.warning(
+                        "check_card_payment_chargebacks: REVERSAL DETECTED — "
+                        "order=%s company=%s status=%s",
+                        order.order_number, company.name, charge_status,
+                    )
+                    async with AsyncSessionLocal() as sess:
+                        try:
+                            svc = CompanyService(sess)
+                            await svc.suspend(
+                                company.id,
+                                f"Auto-suspended: payment for order {order.order_number} "
+                                f"was reversed by QuickBooks (status={charge_status}).",
+                            )
+                            await sess.commit()
+                        except Exception:
+                            await sess.rollback()
+                            logger.exception(
+                                "check_card_payment_chargebacks: failed to suspend company %s",
+                                company.id,
+                            )
+                            continue
+
+                        if settings.ADMIN_NOTIFICATION_EMAIL:
+                            try:
+                                EmailService(sess).send_raw(
+                                    to_email=settings.ADMIN_NOTIFICATION_EMAIL,
+                                    subject=f"⚠️ Payment reversed — {company.name} auto-suspended",
+                                    body_html=(
+                                        f"<h2 style='color:#B91C1C'>Payment Reversal Detected</h2>"
+                                        f"<p>QuickBooks reports this payment is no longer valid "
+                                        f"(status: <b>{charge_status}</b>).</p>"
+                                        f"<table style='width:100%;font-size:14px'>"
+                                        f"<tr><td>Company</td><td><b>{company.name}</b></td></tr>"
+                                        f"<tr><td>Order</td><td><b>{order.order_number}</b></td></tr>"
+                                        f"<tr><td>Amount</td><td><b>${float(order.total):.2f}</b></td></tr>"
+                                        f"<tr><td>QB Charge ID</td><td>{order.qb_payment_charge_id}</td></tr>"
+                                        f"</table>"
+                                        f"<p style='margin-top:16px'>The company's account has been "
+                                        f"<b>automatically suspended</b>. Review the order and, if "
+                                        f"appropriate, reactivate the account from the admin panel.</p>"
+                                    ),
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "check_card_payment_chargebacks: admin alert email failed for order %s",
+                                    order.order_number,
+                                )
+
+            except Exception as exc:
+                logger.warning(
+                    "check_card_payment_chargebacks: status check failed for order %s: %s",
+                    order.order_number, exc,
+                )
+
+            # Explicit pacing on top of the shared rate limiter — belt and
+            # suspenders against any burst, even though _rate_limiter.wait()
+            # inside QBPaymentsService already throttles every call.
+            await asyncio.sleep(_CHARGEBACK_PAUSE_BETWEEN_CALLS_SEC)
+
+        logger.info(
+            "check_card_payment_chargebacks: done — checked=%d flagged=%d",
+            len(rows), flagged,
+        )
+        return {"checked": len(rows), "flagged": flagged}
+
+    # Single attempt per scheduled run — if something goes wrong mid-sweep,
+    # tomorrow's run picks up any orders that weren't reached. No aggressive
+    # retry loop that could pile up extra QB calls.
+    return _run_async(_run_all())
+
+

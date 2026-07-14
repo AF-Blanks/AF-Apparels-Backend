@@ -45,4 +45,8 @@ beat_schedule = {
         "task": "app.tasks.inventory_tasks.check_low_stock_levels",
         "schedule": crontab(hour="6", minute="0"),  # daily at 6am UTC
     },
+    "check-card-chargebacks": {
+        "task": "app.tasks.quickbooks_tasks.check_card_payment_chargebacks",
+        "schedule": crontab(hour="7", minute="0"),  # daily at 7am UTC — staggered from other daily jobs
+    },
 }

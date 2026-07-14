@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
-from app.services.quickbooks_service import QuickBooksService
+from app.services.quickbooks_service import QuickBooksService, _rate_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,12 @@ class QBPaymentsService:
         return f"{QB_CUSTOMERS_BASE[settings.QB_ENVIRONMENT]}/{path.lstrip('/')}"
 
     def _do_request(self, method: str, url: str, label: str, **kwargs) -> dict[str, Any]:
-        """Execute an httpx request with one 401-refresh retry. Raises RuntimeError on failure."""
+        """Execute an httpx request with one 401-refresh retry. Raises RuntimeError on failure.
+
+        Shares the same distributed rate limiter as QuickBooksService (Accounting API)
+        so Payments + Accounting calls together stay under the QB-wide cap.
+        """
+        _rate_limiter.wait(realm=self._qb._company_id)
         try:
             resp = httpx.request(method, url, headers=self._headers(), timeout=15, **kwargs)
         except (httpx.ConnectError, httpx.TimeoutException, OSError) as exc:
