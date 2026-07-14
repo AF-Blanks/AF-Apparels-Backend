@@ -1075,11 +1075,19 @@ def sync_inventory_batch_to_qb(self, variant_ids: list[str]):
 # without first confirming their real meaning against live data — they are
 # ambiguous (could describe the initial attempt, not a reversal).
 #
-# Only keep terms that are unambiguous by definition — you cannot "refund" or
-# "charge back" a payment that was never successfully captured in the first
-# place, so these two are safe.
+# REFUNDED was also removed after further thought: a refund can be issued by
+# OUR OWN admin for a completely legitimate reason (RMA/return, wrong size,
+# damaged item, goodwill gesture) — that is normal business, not a sign the
+# customer did anything wrong, and must NOT auto-suspend their account. There
+# is no reliable way to tell "we chose to refund this" apart from "a refund
+# was forced on us" using only the status string.
+#
+# CHARGEBACK is the one term that is unambiguous in BOTH directions: it is
+# always initiated by the customer's bank/card network, against the
+# merchant's wishes — no business ever chargebacks itself. That is the only
+# safe auto-suspend trigger for now.
 _CHARGEBACK_BAD_STATUSES = {
-    "REFUNDED", "CHARGEBACK",
+    "CHARGEBACK",
 }
 
 # Hard caps so this sweep can NEVER turn into an API storm, regardless of how
