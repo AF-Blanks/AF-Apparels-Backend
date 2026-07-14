@@ -61,4 +61,10 @@ beat_schedule = {
 # Redis instead, which persists across restarts. Requires `celery-redbeat`.
 beat_scheduler = "redbeat.RedBeatScheduler"
 redbeat_redis_url = os.environ.get("REDIS_URL", broker_url)
-redbeat_lock_timeout = 90  # seconds — prevents two Beat instances from double-scheduling
+
+# NOTE: Beat's tick() can sleep up to `maxinterval` (default 300s) between
+# lock-refresh calls. A lock_timeout shorter than that window lets the lock
+# expire mid-sleep, so the next refresh call (lock.extend()) raises
+# LockNotOwnedError and crashes the whole Beat process. Keep this well above
+# 300s so the lock always outlives the longest possible gap between ticks.
+redbeat_lock_timeout = 1800  # seconds — prevents two Beat instances from double-scheduling
