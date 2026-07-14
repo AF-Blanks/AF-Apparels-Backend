@@ -1100,111 +1100,125 @@ def check_card_payment_chargebacks(self):
     async def _run_all():
         from datetime import datetime, timedelta, timezone
 
-        from app.core.database import AsyncSessionLocal
+        from sqlalchemy import select
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
         from app.models.company import Company
         from app.models.order import Order
         from app.services.company_service import CompanyService
         from app.services.email_service import EmailService
         from app.services.qb_payments_service import QBPaymentsService
-        from sqlalchemy import select
 
-        cutoff = datetime.now(timezone.utc) - timedelta(days=_CHARGEBACK_LOOKBACK_DAYS)
+        # Dedicated engine for this run, isolated from the long-lived shared
+        # engine in app.core.database. This task runs once a day inside a
+        # long-running worker process; reusing the shared engine's pool
+        # across many independent per-task event loops can leave a pooled
+        # asyncpg connection bound to an earlier, already-closed loop,
+        # raising "Future attached to a different loop". A small engine
+        # created and disposed within this single run avoids that entirely.
+        _task_engine = create_async_engine(settings.DATABASE_URL, pool_size=2, max_overflow=2)
+        _TaskSession = async_sessionmaker(bind=_task_engine, expire_on_commit=False)
 
-        async with AsyncSessionLocal() as session:
-            rows = (await session.execute(
-                select(Order, Company)
-                .join(Company, Company.id == Order.company_id)
-                .where(
-                    Order.payment_method.in_(["card", "credit_card", "qb_payments"]),
-                    Order.qb_payment_charge_id.isnot(None),
-                    Order.payment_status == "paid",
-                    Order.created_at >= cutoff,
-                    Company.status != "suspended",
-                )
-                .order_by(Order.created_at.desc())
-                .limit(_CHARGEBACK_MAX_ORDERS_PER_RUN)
-            )).all()
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=_CHARGEBACK_LOOKBACK_DAYS)
 
-        if not rows:
-            logger.info("check_card_payment_chargebacks: nothing to check")
-            return {"checked": 0, "flagged": 0}
-
-        logger.info("check_card_payment_chargebacks: checking %d order(s)", len(rows))
-
-        qb_pay = QBPaymentsService()
-        flagged = 0
-
-        for order, company in rows:
-            try:
-                charge = await asyncio.to_thread(qb_pay.get_charge, order.qb_payment_charge_id)
-                charge_status = str(charge.get("status", "")).upper()
-
-                if charge_status in _CHARGEBACK_BAD_STATUSES:
-                    flagged += 1
-                    logger.warning(
-                        "check_card_payment_chargebacks: REVERSAL DETECTED — "
-                        "order=%s company=%s status=%s",
-                        order.order_number, company.name, charge_status,
+            async with _TaskSession() as session:
+                rows = (await session.execute(
+                    select(Order, Company)
+                    .join(Company, Company.id == Order.company_id)
+                    .where(
+                        Order.payment_method.in_(["card", "credit_card", "qb_payments"]),
+                        Order.qb_payment_charge_id.isnot(None),
+                        Order.payment_status == "paid",
+                        Order.created_at >= cutoff,
+                        Company.status != "suspended",
                     )
-                    async with AsyncSessionLocal() as sess:
-                        try:
-                            svc = CompanyService(sess)
-                            await svc.suspend(
-                                company.id,
-                                f"Auto-suspended: payment for order {order.order_number} "
-                                f"was reversed by QuickBooks (status={charge_status}).",
-                            )
-                            await sess.commit()
-                        except Exception:
-                            await sess.rollback()
-                            logger.exception(
-                                "check_card_payment_chargebacks: failed to suspend company %s",
-                                company.id,
-                            )
-                            continue
+                    .order_by(Order.created_at.desc())
+                    .limit(_CHARGEBACK_MAX_ORDERS_PER_RUN)
+                )).all()
 
-                        if settings.ADMIN_NOTIFICATION_EMAIL:
+            if not rows:
+                logger.info("check_card_payment_chargebacks: nothing to check")
+                return {"checked": 0, "flagged": 0}
+
+            logger.info("check_card_payment_chargebacks: checking %d order(s)", len(rows))
+
+            qb_pay = QBPaymentsService()
+            flagged = 0
+
+            for order, company in rows:
+                try:
+                    charge = await asyncio.to_thread(qb_pay.get_charge, order.qb_payment_charge_id)
+                    charge_status = str(charge.get("status", "")).upper()
+
+                    if charge_status in _CHARGEBACK_BAD_STATUSES:
+                        flagged += 1
+                        logger.warning(
+                            "check_card_payment_chargebacks: REVERSAL DETECTED — "
+                            "order=%s company=%s status=%s",
+                            order.order_number, company.name, charge_status,
+                        )
+                        async with _TaskSession() as sess:
                             try:
-                                EmailService(sess).send_raw(
-                                    to_email=settings.ADMIN_NOTIFICATION_EMAIL,
-                                    subject=f"⚠️ Payment reversed — {company.name} auto-suspended",
-                                    body_html=(
-                                        f"<h2 style='color:#B91C1C'>Payment Reversal Detected</h2>"
-                                        f"<p>QuickBooks reports this payment is no longer valid "
-                                        f"(status: <b>{charge_status}</b>).</p>"
-                                        f"<table style='width:100%;font-size:14px'>"
-                                        f"<tr><td>Company</td><td><b>{company.name}</b></td></tr>"
-                                        f"<tr><td>Order</td><td><b>{order.order_number}</b></td></tr>"
-                                        f"<tr><td>Amount</td><td><b>${float(order.total):.2f}</b></td></tr>"
-                                        f"<tr><td>QB Charge ID</td><td>{order.qb_payment_charge_id}</td></tr>"
-                                        f"</table>"
-                                        f"<p style='margin-top:16px'>The company's account has been "
-                                        f"<b>automatically suspended</b>. Review the order and, if "
-                                        f"appropriate, reactivate the account from the admin panel.</p>"
-                                    ),
+                                svc = CompanyService(sess)
+                                await svc.suspend(
+                                    company.id,
+                                    f"Auto-suspended: payment for order {order.order_number} "
+                                    f"was reversed by QuickBooks (status={charge_status}).",
                                 )
+                                await sess.commit()
                             except Exception:
+                                await sess.rollback()
                                 logger.exception(
-                                    "check_card_payment_chargebacks: admin alert email failed for order %s",
-                                    order.order_number,
+                                    "check_card_payment_chargebacks: failed to suspend company %s",
+                                    company.id,
                                 )
+                                continue
 
-            except Exception as exc:
-                logger.warning(
-                    "check_card_payment_chargebacks: status check failed for order %s: %s",
-                    order.order_number, exc,
-                )
+                            if settings.ADMIN_NOTIFICATION_EMAIL:
+                                try:
+                                    EmailService(sess).send_raw(
+                                        to_email=settings.ADMIN_NOTIFICATION_EMAIL,
+                                        subject=f"⚠️ Payment reversed — {company.name} auto-suspended",
+                                        body_html=(
+                                            f"<h2 style='color:#B91C1C'>Payment Reversal Detected</h2>"
+                                            f"<p>QuickBooks reports this payment is no longer valid "
+                                            f"(status: <b>{charge_status}</b>).</p>"
+                                            f"<table style='width:100%;font-size:14px'>"
+                                            f"<tr><td>Company</td><td><b>{company.name}</b></td></tr>"
+                                            f"<tr><td>Order</td><td><b>{order.order_number}</b></td></tr>"
+                                            f"<tr><td>Amount</td><td><b>${float(order.total):.2f}</b></td></tr>"
+                                            f"<tr><td>QB Charge ID</td><td>{order.qb_payment_charge_id}</td></tr>"
+                                            f"</table>"
+                                            f"<p style='margin-top:16px'>The company's account has been "
+                                            f"<b>automatically suspended</b>. Review the order and, if "
+                                            f"appropriate, reactivate the account from the admin panel.</p>"
+                                        ),
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "check_card_payment_chargebacks: admin alert email failed for order %s",
+                                        order.order_number,
+                                    )
 
-            # Explicit pacing on top of the shared rate limiter — belt and
-            # suspenders against any burst, even though _rate_limiter.wait()
-            # inside QBPaymentsService already throttles every call.
-            await asyncio.sleep(_CHARGEBACK_PAUSE_BETWEEN_CALLS_SEC)
+                except Exception as exc:
+                    logger.warning(
+                        "check_card_payment_chargebacks: status check failed for order %s: %s",
+                        order.order_number, exc,
+                    )
 
-        logger.info(
-            "check_card_payment_chargebacks: done — checked=%d flagged=%d",
-            len(rows), flagged,
-        )
-        return {"checked": len(rows), "flagged": flagged}
+                # Explicit pacing on top of the shared rate limiter — belt and
+                # suspenders against any burst, even though _rate_limiter.wait()
+                # inside QBPaymentsService already throttles every call.
+                await asyncio.sleep(_CHARGEBACK_PAUSE_BETWEEN_CALLS_SEC)
+
+            logger.info(
+                "check_card_payment_chargebacks: done — checked=%d flagged=%d",
+                len(rows), flagged,
+            )
+            return {"checked": len(rows), "flagged": flagged}
+        finally:
+            await _task_engine.dispose()
 
     # Single attempt per scheduled run — if something goes wrong mid-sweep,
     # tomorrow's run picks up any orders that weren't reached. No aggressive
