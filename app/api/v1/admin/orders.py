@@ -1665,6 +1665,16 @@ async def update_rma(
         if not order:
             raise NotFoundError(f"Order for RMA {rma.rma_number} not found")
 
+        # Capture plain values before any commit/rollback below — those expire
+        # ORM attributes, and touching a relationship or column afterward can
+        # trigger an implicit reload that isn't safe in every async context
+        # (this exact pattern crashed the first live test of this endpoint).
+        rma_number = rma.rma_number
+        restock_items = [
+            (item.order_item.variant_id, item.quantity)
+            for item in rma.items
+            if item.order_item and item.order_item.variant_id
+        ]
         refund_amount = sum(
             float(item.order_item.unit_price) * item.quantity
             for item in rma.items
@@ -1673,6 +1683,7 @@ async def update_rma(
 
         # ── Refund via QuickBooks Payments (the actual card charge) ────────
         refund_error: str | None = None
+        refund_failed = False
         if order.payment_status == "paid" and order.qb_payment_charge_id:
             try:
                 from app.services.qb_payments_service import QBPaymentsService
@@ -1689,45 +1700,52 @@ async def update_rma(
                 if refund_amount >= float(order.total) - 0.01:
                     order.payment_status = "refunded"
             except Exception as exc:
-                logger.error("RMA %s refund failed: %s", rma.rma_number, exc, exc_info=True)
+                logger.error("RMA %s refund failed: %s", rma_number, exc, exc_info=True)
                 rma.refund_status = "failed"
                 rma.refund_amount = refund_amount
                 refund_error = str(exc)
+                refund_failed = True
         else:
             # Net-30/unpaid/manual-ACH order — no card charge exists to refund
             # via QB Payments; admin handles any repayment outside this flow.
             rma.refund_status = "not_applicable"
             rma.refund_amount = refund_amount
 
+        # Commit the refund outcome durably before attempting restock — a
+        # restock failure below must not roll back a refund that already
+        # went through.
+        await db.commit()
+
         # ── Restock returned items ──────────────────────────────────────────
         restock_error: str | None = None
+        restock_ok = False
         try:
             from app.services.inventory_service import InventoryService
             inv_svc = InventoryService(db)
-            for item in rma.items:
-                if not item.order_item or not item.order_item.variant_id:
-                    continue
-                warehouse_id = await _resolve_warehouse_for_variant(item.order_item.variant_id, db)
+            for variant_id, quantity in restock_items:
+                warehouse_id = await _resolve_warehouse_for_variant(variant_id, db)
                 if warehouse_id:
                     await inv_svc.adjust_stock_with_log(
-                        variant_id=item.order_item.variant_id,
+                        variant_id=variant_id,
                         warehouse_id=warehouse_id,
-                        quantity_delta=item.quantity,
-                        reason=f"RMA {rma.rma_number} approved — item returned",
+                        quantity_delta=quantity,
+                        reason="returned",
+                        notes=f"RMA {rma_number} approved — item returned",
                     )
-            rma.restock_status = "done"
-            rma.restocked_at = datetime.now(timezone.utc)
+            restock_ok = True
         except Exception as exc:
-            logger.error("RMA %s restock failed: %s", rma.rma_number, exc, exc_info=True)
-            rma.restock_status = "failed"
+            # A failed flush/insert leaves the session's transaction unusable
+            # until rolled back — must happen before touching rma/order again.
+            await db.rollback()
+            logger.error("RMA %s restock failed: %s", rma_number, exc, exc_info=True)
             restock_error = str(exc)
 
-        if refund_error or restock_error:
-            rma.processing_error = " | ".join(filter(None, [refund_error, restock_error]))
-        else:
-            rma.processing_error = None
+        rma.restock_status = "done" if restock_ok else "failed"
+        if restock_ok:
+            rma.restocked_at = datetime.now(timezone.utc)
+        rma.processing_error = " | ".join(filter(None, [refund_error, restock_error])) or None
 
-        if rma.refund_status == "failed":
+        if refund_failed:
             # Don't tell the customer their return was approved (or silently
             # reject it) when the refund itself failed — leave it pending so
             # an admin sees it needs attention and can retry.
