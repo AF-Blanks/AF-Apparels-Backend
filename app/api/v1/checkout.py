@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.exceptions import ForbiddenError, ValidationError
+from app.core.exceptions import ForbiddenError, PaymentError, ValidationError
 from app.schemas.order import CheckoutConfirmRequest, CreatePaymentIntentRequest, OrderOut
 from app.services.cart_service import CartService
 from app.services.order_service import OrderService
@@ -143,7 +143,7 @@ async def confirm_checkout(
     """
     try:
         return await _confirm_checkout_inner(payload, request, db)
-    except (ForbiddenError, ValidationError, HTTPException):
+    except (ForbiddenError, PaymentError, ValidationError, HTTPException):
         raise  # let framework handle these as-is
     except Exception as exc:
         _log.exception("confirm_checkout UNHANDLED ERROR — payload fields: %s", getattr(payload, "__fields_set__", None))
@@ -275,6 +275,17 @@ async def _confirm_checkout_inner(
         qb_charge_id = charge_resp.get("id")
         qb_payment_status = charge_resp.get("status", "UNKNOWN")
 
+        # The charge API call not raising an exception only means QuickBooks
+        # accepted the request — it doesn't mean the card was approved. A
+        # declined/errored charge must never result in an order: without
+        # this check, a declined card still produced a fully "paid" order
+        # (confirmed, inventory deducted, invoice+payment synced to QB) with
+        # no money actually collected.
+        if qb_payment_status != "CAPTURED":
+            raise PaymentError(
+                f"Payment was not approved (status: {qb_payment_status}). "
+                "Please check your card details or try a different payment method."
+            )
 
     # ── Create order record ───────────────────────────────────────────────────
     order_svc = OrderService(db)

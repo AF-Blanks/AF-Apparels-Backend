@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.exceptions import NotFoundError, ValidationError, InsufficientStockError
+from app.core.exceptions import NotFoundError, PaymentError, ValidationError, InsufficientStockError
 from app.models.inventory import InventoryRecord
 from app.models.order import Order, OrderItem
 from app.models.user import User
@@ -213,10 +213,15 @@ async def guest_checkout(
 
         qb_charge_id = charge_resp.get("id")
         qb_payment_status = charge_resp.get("status", "UNKNOWN")
-        # Card charge succeeded (RuntimeError raised on any failure above),
-        # so the order is paid regardless of the specific status string QB returns.
-        # This mirrors order_service.create_order which uses payment_method, not
-        # qb_payment_status, to determine payment_status.
+        # The charge call not raising an exception only means QuickBooks
+        # accepted the request — a declined card returns normally with
+        # status="DECLINED", no exception. Without this check the order
+        # still went through as "paid" with nothing actually collected.
+        if qb_payment_status != "CAPTURED":
+            raise PaymentError(
+                f"Payment was not approved (status: {qb_payment_status}). "
+                "Please check your card details or try a different payment method."
+            )
         _payment_status = "paid"
 
     # 4. Generate order number — delegate to the single shared generator so
