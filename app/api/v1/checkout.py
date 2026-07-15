@@ -222,6 +222,15 @@ async def _confirm_checkout_inner(
             base_shipping = Decimal(str(payload.shipping_cost)) if payload.shipping_cost else cart.validation.estimated_shipping
             expedited_surcharge = Decimal("45.00") if payload.shipping_method == "expedited" else Decimal("0")
 
+            # Guard against a tampered/near-zero client-supplied shipping cost.
+            # A full server-side recompute would need address resolution moved
+            # earlier (it currently happens inside create_order, after the
+            # card is already charged) — too invasive to restructure safely
+            # right now. This at least blocks the crude "shipping_cost: 0.01"
+            # tampering pattern.
+            if base_shipping < Decimal("1.00"):
+                raise ValidationError("Invalid shipping cost")
+
         # Validate and apply discount code if provided
         if payload.discount_code:
             cart_total_for_coupon = float(cart.subtotal)  # discount applies to subtotal only, not shipping
@@ -239,6 +248,10 @@ async def _confirm_checkout_inner(
             ))
 
         tax_amount_dc = Decimal(str(payload.tax_amount or 0))
+        if tax_amount_dc < 0:
+            # $0 is legitimate (tax-exempt companies, no-tax-nexus states) —
+            # only a negative value is unambiguously invalid/tampered.
+            raise ValidationError("Invalid tax amount")
         _convenience_fee_dc = (cart.subtotal * Decimal("0.03")).quantize(Decimal("0.01")) if _account_type == "wholesale" else Decimal("0.00")
         total_float = float(cart.subtotal + base_shipping + expedited_surcharge + tax_amount_dc - coupon_discount_amount + _convenience_fee_dc)
 

@@ -187,8 +187,14 @@ async def guest_checkout(
         shipping_cost = GUEST_SHIPPING_STANDARD
     if payload.shipping_cost and payload.shipping_cost > 0:
         shipping_cost = payload.shipping_cost
+    # Guard against a tampered/near-zero client-supplied shipping cost (e.g.
+    # "shipping_cost: 0.01") slipping through the ">0" check above.
+    if method != "will_call" and shipping_cost < Decimal("1.00"):
+        raise ValidationError("Invalid shipping cost")
 
     tax_amount_val = payload.tax_amount or Decimal("0")
+    if tax_amount_val < 0:
+        raise ValidationError("Invalid tax amount")
     convenience_fee = Decimal("0.00")  # Guest/retail orders never incur a convenience fee
     total = subtotal + shipping_cost + tax_amount_val + convenience_fee
 
