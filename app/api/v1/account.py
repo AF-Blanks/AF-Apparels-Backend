@@ -1217,15 +1217,28 @@ async def create_rma(
         ))
 
     await db.commit()
-    await db.refresh(rma)
+
+    # Re-fetch with items eagerly loaded — response_model=RMAOut needs .items,
+    # and a plain db.refresh() only reloads scalar columns, not relationships.
+    # Touching rma.items later without this raises MissingGreenlet during
+    # response serialization, which aborts the connection (client sees a
+    # generic "Failed to fetch" rather than a clean error).
+    from sqlalchemy.orm import selectinload as _rma_selectinload
+    rma = (await db.execute(
+        select(RMARequest)
+        .options(_rma_selectinload(RMARequest.items))
+        .where(RMARequest.id == rma.id)
+    )).scalar_one()
 
     # Confirm RMA submission to the customer
     try:
+        import asyncio as _rma_asyncio
         from app.services.email_service import EmailService as _RMAES
         from app.core.config import settings as _rma_settings
         _rma_user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
         if _rma_user:
-            _RMAES(db).send_raw(
+            await _rma_asyncio.to_thread(
+                _RMAES(db).send_raw,
                 to_email=_rma_user.email,
                 subject=f"RMA Request Received &#8212; {rma_number}",
                 body_html=(
