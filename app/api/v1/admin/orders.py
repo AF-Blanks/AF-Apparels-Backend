@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError
 from app.models.company import Company
 from app.models.order import Order, OrderItem
 from app.models.user import User
@@ -1571,25 +1571,67 @@ async def sync_order_to_quickbooks(order_id: UUID, db: AsyncSession = Depends(ge
 @router.get("/rma")
 async def list_admin_rma(
     status: str | None = None,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    query = select(RMARequest)
+    from sqlalchemy.orm import selectinload
+
+    query = select(RMARequest).options(
+        selectinload(RMARequest.items).selectinload(RMAItem.order_item)
+    )
     if status:
         query = query.where(RMARequest.status == status)
-    total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar_one()
-    result = await db.execute(
-        query.order_by(RMARequest.created_at.desc())
-        .offset((page - 1) * page_size).limit(page_size)
-    )
-    return PaginatedResponse(
-        items=list(result.scalars().all()),
-        total=total,
-        page=page,
-        page_size=page_size,
-        pages=(total + page_size - 1) // page_size,
-    )
+    result = await db.execute(query.order_by(RMARequest.created_at.desc()))
+    rmas = result.scalars().all()
+
+    return [
+        {
+            "id": str(r.id),
+            "rma_number": r.rma_number,
+            "order_id": str(r.order_id),
+            "status": r.status,
+            "reason": r.reason,
+            "notes": r.notes,
+            "admin_notes": r.admin_notes,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "refund_status": r.refund_status,
+            "refund_amount": float(r.refund_amount) if r.refund_amount is not None else None,
+            "restock_status": r.restock_status,
+            "processing_error": r.processing_error,
+            "items": [
+                {
+                    "id": str(item.id),
+                    "quantity": item.quantity,
+                    "reason": item.reason,
+                    "product_name": item.order_item.product_name if item.order_item else None,
+                    "sku": item.order_item.sku if item.order_item else None,
+                    "color": item.order_item.color if item.order_item else None,
+                    "size": item.order_item.size if item.order_item else None,
+                    "unit_price": float(item.order_item.unit_price) if item.order_item else None,
+                }
+                for item in r.items
+            ],
+        }
+        for r in rmas
+    ]
+
+
+async def _resolve_warehouse_for_variant(variant_id: UUID, db: AsyncSession) -> UUID | None:
+    """Pick a warehouse to restock into: whichever already holds this variant
+    (highest quantity, mirroring the warehouse checkout deducts from), else
+    fall back to any existing warehouse so a fresh InventoryRecord can be created."""
+    from app.models.inventory import InventoryRecord, Warehouse
+
+    rec = (await db.execute(
+        select(InventoryRecord)
+        .where(InventoryRecord.variant_id == variant_id)
+        .order_by(InventoryRecord.quantity.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    if rec:
+        return rec.warehouse_id
+
+    wh = (await db.execute(select(Warehouse.id).limit(1))).scalar_one_or_none()
+    return wh
 
 
 @router.patch("/rma/{rma_id}", response_model=dict)
@@ -1598,22 +1640,120 @@ async def update_rma(
     payload: RMAUpdateRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    rma = (await db.execute(select(RMARequest).where(RMARequest.id == rma_id))).scalar_one_or_none()
+    from sqlalchemy.orm import selectinload
+
+    rma = (await db.execute(
+        select(RMARequest)
+        .options(selectinload(RMARequest.items).selectinload(RMAItem.order_item))
+        .where(RMARequest.id == rma_id)
+    )).scalar_one_or_none()
     if not rma:
         raise NotFoundError(f"RMA {rma_id} not found")
-    rma.status = payload.status
+
+    # Idempotency — an already-approved RMA has already been refunded and
+    # restocked; re-approving would double-refund and double-restock.
+    if payload.status == "approved" and rma.status == "approved":
+        raise ConflictError(f"RMA {rma.rma_number} is already approved")
+
     if payload.admin_notes:
         rma.admin_notes = payload.admin_notes
+
+    should_notify = True
+
+    if payload.status == "approved":
+        order = (await db.execute(select(Order).where(Order.id == rma.order_id))).scalar_one_or_none()
+        if not order:
+            raise NotFoundError(f"Order for RMA {rma.rma_number} not found")
+
+        refund_amount = sum(
+            float(item.order_item.unit_price) * item.quantity
+            for item in rma.items
+            if item.order_item
+        )
+
+        # ── Refund via QuickBooks Payments (the actual card charge) ────────
+        refund_error: str | None = None
+        if order.payment_status == "paid" and order.qb_payment_charge_id:
+            try:
+                from app.services.qb_payments_service import QBPaymentsService
+                qb_pay = QBPaymentsService()
+                refund_resp = await asyncio.to_thread(
+                    qb_pay.refund_charge, order.qb_payment_charge_id, refund_amount
+                )
+                rma.refund_status = "refunded"
+                rma.qb_refund_id = str(refund_resp.get("id") or "")
+                rma.refund_amount = refund_amount
+                # A near-full refund flips the order to "refunded" so reports/
+                # statements reflect it. Partial refunds keep the order "paid" —
+                # the RMA's own refund_amount is the record of what came back.
+                if refund_amount >= float(order.total) - 0.01:
+                    order.payment_status = "refunded"
+            except Exception as exc:
+                logger.error("RMA %s refund failed: %s", rma.rma_number, exc, exc_info=True)
+                rma.refund_status = "failed"
+                rma.refund_amount = refund_amount
+                refund_error = str(exc)
+        else:
+            # Net-30/unpaid/manual-ACH order — no card charge exists to refund
+            # via QB Payments; admin handles any repayment outside this flow.
+            rma.refund_status = "not_applicable"
+            rma.refund_amount = refund_amount
+
+        # ── Restock returned items ──────────────────────────────────────────
+        restock_error: str | None = None
+        try:
+            from app.services.inventory_service import InventoryService
+            inv_svc = InventoryService(db)
+            for item in rma.items:
+                if not item.order_item or not item.order_item.variant_id:
+                    continue
+                warehouse_id = await _resolve_warehouse_for_variant(item.order_item.variant_id, db)
+                if warehouse_id:
+                    await inv_svc.adjust_stock_with_log(
+                        variant_id=item.order_item.variant_id,
+                        warehouse_id=warehouse_id,
+                        quantity_delta=item.quantity,
+                        reason=f"RMA {rma.rma_number} approved — item returned",
+                    )
+            rma.restock_status = "done"
+            rma.restocked_at = datetime.now(timezone.utc)
+        except Exception as exc:
+            logger.error("RMA %s restock failed: %s", rma.rma_number, exc, exc_info=True)
+            rma.restock_status = "failed"
+            restock_error = str(exc)
+
+        if refund_error or restock_error:
+            rma.processing_error = " | ".join(filter(None, [refund_error, restock_error]))
+        else:
+            rma.processing_error = None
+
+        if rma.refund_status == "failed":
+            # Don't tell the customer their return was approved (or silently
+            # reject it) when the refund itself failed — leave it pending so
+            # an admin sees it needs attention and can retry.
+            rma.status = "pending"
+            should_notify = False
+        else:
+            rma.status = "approved"
+    else:
+        rma.status = payload.status
+
     await db.commit()
 
-    # Notify customer of status change
-    try:
-        from app.tasks.email_tasks import send_rma_status_email
-        send_rma_status_email.delay(str(rma_id))
-    except Exception:
-        pass
+    if should_notify:
+        try:
+            from app.tasks.email_tasks import send_rma_status_email
+            send_rma_status_email.delay(str(rma_id))
+        except Exception:
+            pass
 
-    return {"message": f"RMA {payload.status}"}
+    return {
+        "message": f"RMA {rma.status}",
+        "refund_status": rma.refund_status,
+        "refund_amount": float(rma.refund_amount) if rma.refund_amount is not None else None,
+        "restock_status": rma.restock_status,
+        "processing_error": rma.processing_error,
+    }
 
 
 # ---------------------------------------------------------------------------

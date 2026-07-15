@@ -1,8 +1,9 @@
 """Return Merchandise Authorization (RMA) models."""
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Enum, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -35,6 +36,16 @@ class RMARequest(BaseModel):
     reason: Mapped[str] = mapped_column(String(500), nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
     admin_notes: Mapped[str | None] = mapped_column(Text)
+
+    # Set when an "approved" transition triggers refund + restock.
+    # refund_status / restock_status: null | pending | done | failed
+    # (refund also allows "not_applicable" — no card charge to refund, e.g. Net-30 unpaid)
+    refund_status: Mapped[str | None] = mapped_column(String(20))
+    refund_amount: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    qb_refund_id: Mapped[str | None] = mapped_column(String(255))
+    restock_status: Mapped[str | None] = mapped_column(String(20))
+    restocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processing_error: Mapped[str | None] = mapped_column(Text)
 
     order: Mapped["Order"] = relationship("Order")
     submitted_by: Mapped["User"] = relationship("User")
