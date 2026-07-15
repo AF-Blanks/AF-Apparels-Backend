@@ -1999,99 +1999,49 @@ async def list_qb_invoices(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Fetch all QB invoices for the authenticated company customer."""
+    """List invoices for the authenticated company.
+
+    Reads from our own orders table (kept in sync by the QuickBooks
+    invoice-sync task on every order/payment) instead of querying QB live
+    on every page view — this page can get visited far more often than
+    invoices actually change, and there's no reason to spend QB API calls
+    on a read that our own DB already has the answer to.
+    """
     company_id = getattr(request.state, "company_id", None)
     if not company_id:
         raise ForbiddenError("Company account required")
 
-    from app.models.company import Company
-
-    company = (await db.execute(
-        select(Company).where(Company.id == company_id)
-    )).scalar_one_or_none()
-
-    async def _local_invoice_fallback() -> list:
-        """Return orders with a synced QB invoice ID as a fallback when QB is unreachable."""
-        from app.models.order import Order as OrderModel
-        rows = (await db.execute(
-            select(OrderModel)
-            .where(
-                OrderModel.company_id == company_id,
-                OrderModel.qb_invoice_id.isnot(None),
-            )
-            .order_by(OrderModel.created_at.desc())
-            .limit(100)
-        )).scalars().all()
-
-        result = []
-        for o in rows:
-            total = float(o.total or 0)
-            paid = float(o.amount_paid or 0)
-            balance = max(0.0, total - paid)
-            if balance <= 0:
-                inv_status = "paid"
-            elif paid > 0:
-                inv_status = "partial"
-            else:
-                inv_status = "open"
-            result.append({
-                "id": str(o.id),
-                "doc_number": o.qb_invoice_id or o.order_number,
-                "txn_date": o.created_at.strftime("%Y-%m-%d") if o.created_at else None,
-                "due_date": None,
-                "total_amt": total,
-                "balance": balance,
-                "status": inv_status,
-                "email_status": None,
-                "customer_memo": o.notes,
-            })
-        return result
-
-    if not company or not company.qb_customer_id:
-        return await _local_invoice_fallback()
-
-    try:
-        import asyncio
-        from app.services.quickbooks_service import QuickBooksService
-
-        qb_svc = await QuickBooksService().initialize()
-
-        query = (
-            f"SELECT * FROM Invoice WHERE CustomerRef = '{company.qb_customer_id}' "
-            "ORDER BY TxnDate DESC MAXRESULTS 100"
+    from app.models.order import Order as OrderModel
+    rows = (await db.execute(
+        select(OrderModel)
+        .where(
+            OrderModel.company_id == company_id,
+            OrderModel.qb_invoice_id.isnot(None),
         )
+        .order_by(OrderModel.created_at.desc())
+        .limit(100)
+    )).scalars().all()
 
-        try:
-            query_resp = await asyncio.to_thread(qb_svc.query, query)
-        except Exception:
-            return await _local_invoice_fallback()
-
-        raw_invoices = query_resp.get("QueryResponse", {}).get("Invoice", [])
-
-        invoices = []
-        for inv in raw_invoices:
-            total = float(inv.get("TotalAmt", 0))
-            balance = float(inv.get("Balance", 0))
-            if balance <= 0:
-                inv_status = "paid"
-            elif balance < total:
-                inv_status = "partial"
-            else:
-                inv_status = "open"
-
-            invoices.append({
-                "id": inv.get("Id"),
-                "doc_number": inv.get("DocNumber"),
-                "txn_date": inv.get("TxnDate"),
-                "due_date": inv.get("DueDate"),
-                "total_amt": total,
-                "balance": balance,
-                "status": inv_status,
-                "email_status": inv.get("EmailStatus"),
-                "customer_memo": (inv.get("CustomerMemo") or {}).get("value"),
-            })
-
-        return invoices if invoices else await _local_invoice_fallback()
-
-    except Exception:
-        return await _local_invoice_fallback()
+    result = []
+    for o in rows:
+        total = float(o.total or 0)
+        paid = float(o.amount_paid or 0)
+        balance = max(0.0, total - paid)
+        if balance <= 0:
+            inv_status = "paid"
+        elif paid > 0:
+            inv_status = "partial"
+        else:
+            inv_status = "open"
+        result.append({
+            "id": str(o.id),
+            "doc_number": o.qb_invoice_id or o.order_number,
+            "txn_date": o.created_at.strftime("%Y-%m-%d") if o.created_at else None,
+            "due_date": None,
+            "total_amt": total,
+            "balance": balance,
+            "status": inv_status,
+            "email_status": None,
+            "customer_memo": o.notes,
+        })
+    return result
