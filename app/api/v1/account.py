@@ -1168,6 +1168,8 @@ from app.schemas.order import RMACreate, RMAOut  # noqa: E402
 
 @router.get("/rma", response_model=list[RMAOut])
 async def list_my_rma(request: Request, db: AsyncSession = Depends(get_db)):
+    from sqlalchemy.orm import selectinload
+
     company_id = getattr(request.state, "company_id", None)
     if not company_id:
         raise ForbiddenError("Company account required")
@@ -1177,7 +1179,9 @@ async def list_my_rma(request: Request, db: AsyncSession = Depends(get_db)):
         select(Order.id).where(Order.company_id == company_id)
     )).scalars().all()
     result = await db.execute(
-        select(RMARequest).where(RMARequest.order_id.in_(order_ids))
+        select(RMARequest)
+        .options(selectinload(RMARequest.items))
+        .where(RMARequest.order_id.in_(order_ids))
         .order_by(RMARequest.created_at.desc())
     )
     return result.scalars().all()
@@ -1274,10 +1278,16 @@ async def create_rma(
 
 @router.get("/rma/{rma_id}", response_model=RMAOut)
 async def get_rma(rma_id: UUID, request: Request, db: AsyncSession = Depends(get_db)):
+    from sqlalchemy.orm import selectinload
+
     company_id = getattr(request.state, "company_id", None)
     if not company_id:
         raise ForbiddenError("Company account required")
-    rma = (await db.execute(select(RMARequest).where(RMARequest.id == rma_id))).scalar_one_or_none()
+    rma = (await db.execute(
+        select(RMARequest)
+        .options(selectinload(RMARequest.items))
+        .where(RMARequest.id == rma_id)
+    )).scalar_one_or_none()
     if not rma:
         raise NotFoundError("RMA not found")
     return rma
