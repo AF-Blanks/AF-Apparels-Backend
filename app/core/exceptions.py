@@ -89,3 +89,8 @@ class AccountNotActivatedError(ForbiddenError):
 class AccountPendingApprovalError(ForbiddenError):
     error_code = "ACCOUNT_PENDING_APPROVAL"
     message = "Your application is pending review. You'll receive an email once approved."
+
+
+class WholesaleAccountExistsError(ConflictError):
+    error_code = "WHOLESALE_ACCOUNT_EXISTS"
+    message = "An account already exists for this email. Please log in to place your order with your wholesale pricing."

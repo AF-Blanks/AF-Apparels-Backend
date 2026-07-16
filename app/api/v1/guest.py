@@ -12,7 +12,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.exceptions import NotFoundError, PaymentError, ValidationError, InsufficientStockError
+from app.core.exceptions import (
+    NotFoundError, PaymentError, ValidationError, InsufficientStockError, WholesaleAccountExistsError,
+)
 from app.models.inventory import InventoryRecord
 from app.models.order import Order, OrderItem
 from app.models.user import User
@@ -119,6 +121,18 @@ async def guest_checkout(
 
     if not payload.items:
         raise ValidationError("Cart is empty")
+
+    # 0. Block guest checkout when this email already belongs to a wholesale
+    #    account. Without this, the auto-link in step 7 below would silently
+    #    attach the order to that account's placed_by_id with zero
+    #    authentication (no password, no session) — at retail pricing, not
+    #    billed to their company. They must log in instead.
+    existing_account_result = await db.execute(
+        select(User).where(User.email == payload.guest_email.lower().strip())
+    )
+    existing_account = existing_account_result.scalar_one_or_none()
+    if existing_account and existing_account.account_type == "wholesale":
+        raise WholesaleAccountExistsError()
 
     # 1. Validate + price each item using MSRP
     order_items_data = []
