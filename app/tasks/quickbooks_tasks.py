@@ -78,29 +78,46 @@ async def _log_attempt(
     error: str | None,
     qb_entity_id: str | None = None,
 ) -> None:
-    """Upsert a QBSyncLog row. Always opens its own fresh session."""
-    from app.core.database import AsyncSessionLocal
+    """Upsert a QBSyncLog row.
+
+    Uses its own isolated engine rather than the shared AsyncSessionLocal
+    pool. This runs from an except-block, right after some other DB
+    operation in this same task already failed — if that failure was a
+    poisoned/cross-loop pooled connection (each task run gets its own
+    fresh event loop via _run_async, but the pool is a module-level
+    singleton), a "fresh" session from that same pool can still hand back
+    the same bad connection. A dedicated engine avoids that entirely, so
+    failure-logging can't itself throw and mask the real error.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from app.models.system import QBSyncLog
     from sqlalchemy import select
 
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(QBSyncLog)
-            .where(QBSyncLog.entity_type == entity_type)
-            .where(QBSyncLog.entity_id == uuid.UUID(entity_id))
-            .order_by(QBSyncLog.created_at.desc())
-            .limit(1)
-        )
-        log = result.scalar_one_or_none()
-        if log is None:
-            log = QBSyncLog(entity_type=entity_type, entity_id=uuid.UUID(entity_id))
-            session.add(log)
-        log.status = status
-        log.attempt_count = (log.attempt_count or 0) + 1
-        log.error_message = error
-        if qb_entity_id:
-            log.qb_entity_id = qb_entity_id
-        await session.commit()
+    _log_engine = create_async_engine(settings.DATABASE_URL, pool_size=1, max_overflow=1)
+    _LogSession = async_sessionmaker(bind=_log_engine, expire_on_commit=False)
+    try:
+        async with _LogSession() as session:
+            result = await session.execute(
+                select(QBSyncLog)
+                .where(QBSyncLog.entity_type == entity_type)
+                .where(QBSyncLog.entity_id == uuid.UUID(entity_id))
+                .order_by(QBSyncLog.created_at.desc())
+                .limit(1)
+            )
+            log = result.scalar_one_or_none()
+            if log is None:
+                log = QBSyncLog(entity_type=entity_type, entity_id=uuid.UUID(entity_id))
+                session.add(log)
+            log.status = status
+            log.attempt_count = (log.attempt_count or 0) + 1
+            log.error_message = error
+            if qb_entity_id:
+                log.qb_entity_id = qb_entity_id
+            await session.commit()
+    except Exception as _log_exc:
+        logger.warning("_log_attempt itself failed for %s %s: %s", entity_type, entity_id, _log_exc)
+    finally:
+        await _log_engine.dispose()
 
 
 @celery_app.task(bind=True, max_retries=5)
