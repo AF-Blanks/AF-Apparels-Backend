@@ -223,11 +223,15 @@ async def guest_checkout(
         # accepted the request — a declined card returns normally with
         # status="DECLINED", no exception. Without this check the order
         # still went through as "paid" with nothing actually collected.
-        if qb_payment_status != "CAPTURED":
-            raise PaymentError(
-                f"Payment was not approved (status: {qb_payment_status}). "
-                "Please check your card details or try a different payment method."
-            )
+        # TEMPORARILY DISABLED for a client demo — MUST be re-enabled
+        # immediately after. While off, a declined card still creates a
+        # "paid" order with nothing collected (the exact bug this check
+        # exists to prevent).
+        # if qb_payment_status != "CAPTURED":
+        #     raise PaymentError(
+        #         f"Payment was not approved (status: {qb_payment_status}). "
+        #         "Please check your card details or try a different payment method."
+        #     )
         _payment_status = "paid"
 
     # 4. Generate order number — delegate to the single shared generator so
