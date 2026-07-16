@@ -791,6 +791,7 @@ async def update_admin_order(
                 send_order_confirmed_email,
                 send_order_processing_email,
                 send_ready_for_pickup_email,
+                send_order_shipped_email,
                 send_order_delivered_email,
                 send_order_cancelled_email,
             )
@@ -798,11 +799,14 @@ async def update_admin_order(
                 "confirmed":        send_order_confirmed_email,
                 "processing":       send_order_processing_email,
                 "ready_for_pickup": send_ready_for_pickup_email,
+                "shipped":          send_order_shipped_email,
                 "delivered":        send_order_delivered_email,
                 "cancelled":        send_order_cancelled_email,
             }
             _task = _status_task_map.get(payload.status)
-            if _task:
+            if _task is send_order_shipped_email:
+                _task.delay(str(order.id), order.tracking_number or "")
+            elif _task:
                 _task.delay(str(order.id))
         except Exception as _e:
             logger.warning("Status email dispatch failed: %s", _e)
@@ -854,6 +858,7 @@ async def update_order_status(
                 send_order_confirmed_email,
                 send_order_processing_email,
                 send_ready_for_pickup_email,
+                send_order_shipped_email,
                 send_order_delivered_email,
                 send_order_cancelled_email,
             )
@@ -861,11 +866,14 @@ async def update_order_status(
                 "confirmed":        send_order_confirmed_email,
                 "processing":       send_order_processing_email,
                 "ready_for_pickup": send_ready_for_pickup_email,
+                "shipped":          send_order_shipped_email,
                 "delivered":        send_order_delivered_email,
                 "cancelled":        send_order_cancelled_email,
             }
             _task = _status_task_map.get(payload.status)
-            if _task:
+            if _task is send_order_shipped_email:
+                _task.delay(str(order.id), order.tracking_number or "")
+            elif _task:
                 _task.delay(str(order.id))
         except Exception as _e:
             logger.warning("Status email dispatch failed: %s", _e)
