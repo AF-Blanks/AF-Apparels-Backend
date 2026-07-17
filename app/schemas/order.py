@@ -224,6 +224,17 @@ class OrderUpdateRequest(BaseModel):
     payment_terms: str | None = None
 
 
+class ShippingAddressUpdate(BaseModel):
+    full_name: str | None = None
+    address_line1: str = Field(..., min_length=1)
+    address_line2: str | None = None
+    city: str = Field(..., min_length=1)
+    state: str = Field(..., min_length=1)
+    postal_code: str = Field(..., min_length=1)
+    country: str = "US"
+    phone: str | None = None
+
+
 class DraftOrderCreate(BaseModel):
     company_id: str
     po_number: str | None = None

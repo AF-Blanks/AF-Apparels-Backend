@@ -33,6 +33,7 @@ from app.schemas.order import (
     RMAOut,
     RMAUpdateRequest,
     SendInvoicePayload,
+    ShippingAddressUpdate,
 )
 from app.types.api import PaginatedResponse
 
@@ -812,6 +813,53 @@ async def update_admin_order(
             logger.warning("Status email dispatch failed: %s", _e)
 
     return {"message": "Order updated"}
+
+
+@router.patch("/orders/{order_id}/shipping-address", response_model=dict)
+async def update_order_shipping_address(
+    order_id: UUID,
+    payload: ShippingAddressUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Correct an order's shipping address — used when Shippo/USPS rejects the
+    address on file (e.g. "Address not found") and the admin needs to fix a
+    typo or add a missing unit/suite number before regenerating the label.
+
+    Fully replaces the snapshot with the canonical key set (address_line1,
+    full_name, postal_code, ...) that every reader (label generation, PDF
+    invoices, emails) already checks first, regardless of which legacy key
+    format (line1/street1) the order was originally created with.
+    """
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+
+    snapshot = {
+        "full_name": payload.full_name,
+        "address_line1": payload.address_line1,
+        "address_line2": payload.address_line2,
+        "city": payload.city,
+        "state": payload.state,
+        "postal_code": payload.postal_code,
+        "country": payload.country,
+        "phone": payload.phone,
+    }
+    order.shipping_address_snapshot = _json.dumps(snapshot)
+    await db.commit()
+
+    return {
+        "message": "Shipping address updated",
+        "shipping_address": {
+            "full_name": snapshot["full_name"],
+            "address_line1": snapshot["address_line1"],
+            "address_line2": snapshot["address_line2"],
+            "city": snapshot["city"],
+            "state": snapshot["state"],
+            "postal_code": snapshot["postal_code"],
+            "zip_code": snapshot["postal_code"],
+            "country": snapshot["country"],
+        },
+    }
 
 
 @router.patch("/orders/{order_id}/status", response_model=dict)
