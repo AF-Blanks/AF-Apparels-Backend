@@ -5,7 +5,7 @@ from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -170,6 +170,145 @@ async def create_company(
         "message": "Company created",
         "company_id": str(company.id),
         "user_created": user_created,
+    }
+
+
+# ── Shopify customer import (T-migration) ───────────────────────────────────
+# Bulk-imports customers from a Shopify "Export customers" CSV as wholesale
+# companies. Accounts are created inactive with no password and NO EMAIL IS
+# EVER SENT from this endpoint — admin sends a bulk activation email later,
+# separately, when ready. Duplicate emails (already in our users table) are
+# skipped, never overwritten.
+
+_SHOPIFY_HEADER_ALIASES: dict[str, list[str]] = {
+    "email": ["email"],
+    "first_name": ["first name", "firstname"],
+    "last_name": ["last name", "lastname"],
+    "phone": ["phone", "default address phone"],
+    "company": ["company", "default address company"],
+    "address1": ["address1", "default address address1"],
+    "address2": ["address2", "default address address2"],
+    "city": ["city", "default address city"],
+    "province": ["province code", "province", "default address province code", "default address province"],
+    "country": ["country code", "country", "default address country code", "default address country"],
+    "zip": ["zip", "default address zip"],
+    "total_spent": ["total spent"],
+    "total_orders": ["total orders"],
+    "tags": ["tags"],
+    "note": ["note"],
+    "accepts_marketing": ["accepts email marketing", "accepts marketing", "email marketing consent"],
+}
+
+
+def _normalize_csv_headers(fieldnames: list[str]) -> dict[str, str]:
+    """Map our logical field names → the actual CSV column name present, tolerant
+    of Shopify's several export header variants (case/spacing-insensitive)."""
+    normalized = {(fn or "").strip().lower(): fn for fn in fieldnames}
+    resolved: dict[str, str] = {}
+    for field, aliases in _SHOPIFY_HEADER_ALIASES.items():
+        for alias in aliases:
+            if alias in normalized:
+                resolved[field] = normalized[alias]
+                break
+    return resolved
+
+
+@router.post("/companies/import-csv")
+async def import_companies_csv(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Bulk-import a Shopify customer export as wholesale companies. Silent —
+    no activation or notification email is sent to anyone for any row."""
+    import csv
+    import io
+    import secrets
+    from datetime import datetime, timedelta, timezone
+
+    raw = (await file.read()).decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(raw))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV has no header row")
+
+    cols = _normalize_csv_headers(list(reader.fieldnames))
+    if "email" not in cols:
+        raise HTTPException(status_code=400, detail="CSV is missing an Email column")
+
+    created, skipped_duplicate, skipped_no_email, errors = 0, 0, 0, []
+
+    for i, row in enumerate(reader, start=2):  # start=2: row 1 is the header
+        def get(field: str) -> str:
+            col = cols.get(field)
+            return (row.get(col) or "").strip() if col else ""
+
+        email = get("email").lower()
+        if not email:
+            skipped_no_email += 1
+            continue
+
+        try:
+            existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+            if existing:
+                skipped_duplicate += 1
+                continue
+
+            first_name = get("first_name") or "Customer"
+            last_name = get("last_name")
+            company_name = get("company") or f"{first_name} {last_name}".strip() or email
+
+            notes_parts = ["Imported from Shopify customer export."]
+            if get("total_spent"):
+                notes_parts.append(f"Shopify total spent: ${get('total_spent')}")
+            if get("total_orders"):
+                notes_parts.append(f"Shopify total orders: {get('total_orders')}")
+            if get("accepts_marketing"):
+                notes_parts.append(f"Shopify marketing consent: {get('accepts_marketing')}")
+            if get("tags"):
+                notes_parts.append(f"Shopify tags: {get('tags')}")
+            if get("note"):
+                notes_parts.append(f"Shopify note: {get('note')}")
+
+            company = Company(
+                name=company_name,
+                phone=get("phone") or None,
+                company_email=email,
+                address_line1=get("address1") or None,
+                address_line2=get("address2") or None,
+                city=get("city") or None,
+                state_province=get("province") or None,
+                postal_code=get("zip") or None,
+                country=get("country") or "US",
+                status="active",
+                admin_notes="\n".join(notes_parts),
+            )
+            db.add(company)
+            await db.flush()
+
+            user = User(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                phone=get("phone") or None,
+                hashed_password=None,
+                is_active=False,
+                email_verified=False,
+                activation_token=secrets.token_urlsafe(32),
+                activation_token_expires=datetime.now(timezone.utc) + timedelta(days=180),
+            )
+            db.add(user)
+            await db.flush()
+
+            db.add(CompanyUser(company_id=company.id, user_id=user.id, role="owner", is_active=True))
+            created += 1
+        except Exception as exc:
+            errors.append(f"Row {i} ({email}): {exc}")
+
+    await db.commit()
+    return {
+        "created": created,
+        "skipped_duplicate": skipped_duplicate,
+        "skipped_no_email": skipped_no_email,
+        "errors": errors,
     }
 
 
