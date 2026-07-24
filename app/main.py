@@ -511,6 +511,15 @@ async def _ensure_content_tables() -> None:
                     updated_at TIMESTAMPTZ DEFAULT now()
                 )
             """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS custom_swatch_colors (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name VARCHAR(100) UNIQUE NOT NULL,
+                    hex VARCHAR(7) NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
         print("Content tables: OK")
     except Exception as exc:
         print(f"Content tables warning (non-fatal): {exc}")
@@ -738,7 +747,7 @@ async def health_check() -> dict:
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-from app.api.v1 import auth, products, cart, checkout, orders, account, webhooks, reviews, discounts, guest, contact, style_sheets, product_specs, upload, tax_rate, tax, pages_seo, blog_posts, shipping as public_shipping  # noqa: E402
+from app.api.v1 import auth, products, cart, checkout, orders, account, webhooks, reviews, discounts, guest, contact, style_sheets, product_specs, upload, tax_rate, tax, pages_seo, blog_posts, custom_colors, shipping as public_shipping  # noqa: E402
 from app.api.v1.admin import (  # noqa: E402
     customers,
     pricing as admin_pricing,
@@ -792,6 +801,7 @@ app.include_router(upload.router, prefix=_V1)
 app.include_router(tax_rate.router, prefix=_V1)
 app.include_router(tax.router, prefix=_V1)
 app.include_router(public_shipping.router, prefix=_V1)
+app.include_router(custom_colors.router, prefix=_V1)
 
 app.include_router(customers.router, prefix=f"{_V1}/admin")
 app.include_router(admin_pricing.router, prefix=_V1)

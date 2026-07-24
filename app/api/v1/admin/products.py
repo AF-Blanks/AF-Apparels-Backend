@@ -523,6 +523,30 @@ async def import_products_csv(
     return ImportResult(**result)
 
 
+class CustomColorSet(BaseModel):
+    name: str
+    hex: str
+
+
+@router.post("/custom-colors")
+async def set_custom_color(payload: CustomColorSet, db: AsyncSession = Depends(get_db)) -> dict:
+    """Persist an admin-picked color-name → hex override so it resolves everywhere
+    (other admins, other products, the customer-facing product page) — not just
+    the browser that set it."""
+    from app.models.custom_color import CustomSwatchColor
+
+    name_key = payload.name.strip()
+    existing = (await db.execute(
+        select(CustomSwatchColor).where(CustomSwatchColor.name == name_key)
+    )).scalar_one_or_none()
+    if existing:
+        existing.hex = payload.hex
+    else:
+        db.add(CustomSwatchColor(name=name_key, hex=payload.hex))
+    await db.commit()
+    return {"name": name_key, "hex": payload.hex}
+
+
 @router.get("/export-csv")
 async def export_products_csv(db: AsyncSession = Depends(get_db)):
     svc = ProductService(db)
