@@ -197,19 +197,24 @@ _SHOPIFY_HEADER_ALIASES: dict[str, list[str]] = {
     "tags": ["tags"],
     "note": ["note"],
     "accepts_marketing": ["accepts email marketing", "accepts marketing", "email marketing consent"],
+    "tax_exempt": ["tax exempt"],
 }
 
 
-def _normalize_csv_headers(fieldnames: list[str]) -> dict[str, str]:
-    """Map our logical field names → the actual CSV column name present, tolerant
-    of Shopify's several export header variants (case/spacing-insensitive)."""
+def _normalize_csv_headers(fieldnames: list[str]) -> dict[str, list[str]]:
+    """Map our logical field names → ALL matching CSV column names present (in
+    alias-priority order), tolerant of Shopify's several export header variants
+    (case/spacing-insensitive). Some fields are genuinely backed by two separate
+    columns per row (e.g. "Phone" vs "Default Address Phone" — different rows
+    populate different ones), so callers try each in order and use the first
+    non-empty value for that row rather than a single column fixed for the
+    whole file."""
     normalized = {(fn or "").strip().lower(): fn for fn in fieldnames}
-    resolved: dict[str, str] = {}
+    resolved: dict[str, list[str]] = {}
     for field, aliases in _SHOPIFY_HEADER_ALIASES.items():
-        for alias in aliases:
-            if alias in normalized:
-                resolved[field] = normalized[alias]
-                break
+        cols = [normalized[alias] for alias in aliases if alias in normalized]
+        if cols:
+            resolved[field] = cols
     return resolved
 
 
@@ -238,67 +243,81 @@ async def import_companies_csv(
 
     for i, row in enumerate(reader, start=2):  # start=2: row 1 is the header
         def get(field: str) -> str:
-            col = cols.get(field)
-            return (row.get(col) or "").strip() if col else ""
+            for col in cols.get(field, []):
+                val = (row.get(col) or "").strip()
+                # Excel/Shopify export prefixes long numbers and zero-padded
+                # values (phones, ZIPs) with a literal apostrophe to force
+                # text formatting — strip it so it doesn't end up stored as
+                # part of the data.
+                if val.startswith("'"):
+                    val = val[1:]
+                if val:
+                    return val
+            return ""
 
         email = get("email").lower()
         if not email:
             skipped_no_email += 1
             continue
 
+        existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+        if existing:
+            skipped_duplicate += 1
+            continue
+
         try:
-            existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
-            if existing:
-                skipped_duplicate += 1
-                continue
+            # SAVEPOINT per row: if this row fails for any reason (bad data,
+            # constraint violation), roll back just this row instead of
+            # poisoning the whole import so every later row also fails.
+            async with db.begin_nested():
+                first_name = get("first_name") or "Customer"
+                last_name = get("last_name")
+                company_name = get("company") or f"{first_name} {last_name}".strip() or email
 
-            first_name = get("first_name") or "Customer"
-            last_name = get("last_name")
-            company_name = get("company") or f"{first_name} {last_name}".strip() or email
+                notes_parts = ["Imported from Shopify customer export."]
+                if get("total_spent"):
+                    notes_parts.append(f"Shopify total spent: ${get('total_spent')}")
+                if get("total_orders"):
+                    notes_parts.append(f"Shopify total orders: {get('total_orders')}")
+                if get("accepts_marketing"):
+                    notes_parts.append(f"Shopify marketing consent: {get('accepts_marketing')}")
+                if get("tags"):
+                    notes_parts.append(f"Shopify tags: {get('tags')}")
+                if get("note"):
+                    notes_parts.append(f"Shopify note: {get('note')}")
 
-            notes_parts = ["Imported from Shopify customer export."]
-            if get("total_spent"):
-                notes_parts.append(f"Shopify total spent: ${get('total_spent')}")
-            if get("total_orders"):
-                notes_parts.append(f"Shopify total orders: {get('total_orders')}")
-            if get("accepts_marketing"):
-                notes_parts.append(f"Shopify marketing consent: {get('accepts_marketing')}")
-            if get("tags"):
-                notes_parts.append(f"Shopify tags: {get('tags')}")
-            if get("note"):
-                notes_parts.append(f"Shopify note: {get('note')}")
+                company = Company(
+                    name=company_name,
+                    phone=get("phone") or None,
+                    company_email=email,
+                    address_line1=get("address1") or None,
+                    address_line2=get("address2") or None,
+                    city=get("city") or None,
+                    state_province=get("province") or None,
+                    postal_code=get("zip") or None,
+                    country=get("country") or "US",
+                    status="active",
+                    tax_exempt=get("tax_exempt").lower() in ("yes", "true", "1"),
+                    admin_notes="\n".join(notes_parts),
+                )
+                db.add(company)
+                await db.flush()
 
-            company = Company(
-                name=company_name,
-                phone=get("phone") or None,
-                company_email=email,
-                address_line1=get("address1") or None,
-                address_line2=get("address2") or None,
-                city=get("city") or None,
-                state_province=get("province") or None,
-                postal_code=get("zip") or None,
-                country=get("country") or "US",
-                status="active",
-                admin_notes="\n".join(notes_parts),
-            )
-            db.add(company)
-            await db.flush()
+                user = User(
+                    email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    phone=get("phone") or None,
+                    hashed_password=None,
+                    is_active=False,
+                    email_verified=False,
+                    activation_token=secrets.token_urlsafe(32),
+                    activation_token_expires=datetime.now(timezone.utc) + timedelta(days=180),
+                )
+                db.add(user)
+                await db.flush()
 
-            user = User(
-                email=email,
-                first_name=first_name,
-                last_name=last_name,
-                phone=get("phone") or None,
-                hashed_password=None,
-                is_active=False,
-                email_verified=False,
-                activation_token=secrets.token_urlsafe(32),
-                activation_token_expires=datetime.now(timezone.utc) + timedelta(days=180),
-            )
-            db.add(user)
-            await db.flush()
-
-            db.add(CompanyUser(company_id=company.id, user_id=user.id, role="owner", is_active=True))
+                db.add(CompanyUser(company_id=company.id, user_id=user.id, role="owner", is_active=True))
             created += 1
         except Exception as exc:
             errors.append(f"Row {i} ({email}): {exc}")
