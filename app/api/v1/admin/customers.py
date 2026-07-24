@@ -42,6 +42,7 @@ class CreateCompanyRequest(BaseModel):
     pricing_tier_id: uuid.UUID | None = None
     shipping_tier_id: uuid.UUID | None = None
     admin_notes: str | None = None
+    tax_exempt: bool = False
 
 router = APIRouter()
 
@@ -125,6 +126,7 @@ async def create_company(
         pricing_tier_id=payload.pricing_tier_id,
         shipping_tier_id=payload.shipping_tier_id,
         admin_notes=payload.admin_notes,
+        tax_exempt=payload.tax_exempt,
     )
     db.add(company)
     await db.flush()
