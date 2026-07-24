@@ -718,12 +718,15 @@ async def delete_variants_bulk(
 
         # Pre-NULL PO line item references for all selected variants.
         # Per-row individual updates avoid asyncpg array-binding issues entirely.
-        valid_ids = [str(v.id) for v in variants]
-        logger.info("delete_variants_bulk %s: nulling PO refs for %d variants", product_id, len(valid_ids))
-        for vid in valid_ids:
+        # Bind the actual UUID object (not a string + "::uuid" cast) — asyncpg
+        # accepts uuid.UUID natively, and gluing a "::uuid" cast onto a named
+        # bind param confuses SQLAlchemy's parameter substitution with asyncpg,
+        # producing "syntax error at or near ':'" at the database.
+        logger.info("delete_variants_bulk %s: nulling PO refs for %d variants", product_id, len(variants))
+        for variant in variants:
             await db.execute(
-                _text("UPDATE po_line_items SET product_variant_id = NULL WHERE product_variant_id = :vid::uuid"),
-                {"vid": vid},
+                _text("UPDATE po_line_items SET product_variant_id = NULL WHERE product_variant_id = :vid"),
+                {"vid": variant.id},
             )
         await db.flush()
 
