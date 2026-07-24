@@ -607,18 +607,28 @@ async def get_admin_product(slug: str, db: AsyncSession = Depends(get_db)):
 async def force_delete_product(product_id: str, db: AsyncSession = Depends(get_db)):
     """Temporary one-shot endpoint: hard-delete a specific product bypassing ORM cascade."""
     from sqlalchemy import text as _text
+    import uuid as _uuid
+
+    # Bind an actual UUID object rather than a string + "::uuid" cast — gluing
+    # a cast onto a named bind param breaks SQLAlchemy's parameter substitution
+    # with asyncpg ("syntax error at or near ':'").
+    try:
+        pid = _uuid.UUID(product_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid product id: {exc}") from exc
+
     async with db.begin():
         await db.execute(_text(
             "UPDATE po_line_items SET product_variant_id = NULL "
             "WHERE product_variant_id IN "
-            "(SELECT id FROM product_variants WHERE product_id = :pid::uuid)"
-        ), {"pid": product_id})
+            "(SELECT id FROM product_variants WHERE product_id = :pid)"
+        ), {"pid": pid})
         await db.execute(_text(
-            "DELETE FROM product_variants WHERE product_id = :pid::uuid"
-        ), {"pid": product_id})
+            "DELETE FROM product_variants WHERE product_id = :pid"
+        ), {"pid": pid})
         await db.execute(_text(
-            "DELETE FROM products WHERE id = :pid::uuid"
-        ), {"pid": product_id})
+            "DELETE FROM products WHERE id = :pid"
+        ), {"pid": pid})
     logger.info("force_delete_product: deleted %s", product_id)
     return {"success": True, "deleted": product_id}
 
@@ -646,13 +656,15 @@ async def delete_product(product_id: UUID, db: AsyncSession = Depends(get_db)):
 
         # Pre-NULL PO line item references for all variants (prevents FK IntegrityError on hard delete).
         # Per-row individual updates avoid asyncpg array-binding issues entirely.
-        variant_ids = [str(v.id) for v in product.variants]
-        if variant_ids:
-            logger.info("delete_product %s: nulling %d PO line item references", product_id, len(variant_ids))
-            for vid in variant_ids:
+        # Bind the actual UUID object (not a string + "::uuid" cast) — see
+        # delete_variants_bulk above for why the cast-glued-to-bind-param form
+        # breaks SQLAlchemy's parameter substitution with asyncpg.
+        if product.variants:
+            logger.info("delete_product %s: nulling %d PO line item references", product_id, len(product.variants))
+            for v in product.variants:
                 await db.execute(
-                    _text("UPDATE po_line_items SET product_variant_id = NULL WHERE product_variant_id = :vid::uuid"),
-                    {"vid": vid},
+                    _text("UPDATE po_line_items SET product_variant_id = NULL WHERE product_variant_id = :vid"),
+                    {"vid": v.id},
                 )
             await db.flush()
 
