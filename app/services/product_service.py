@@ -4,7 +4,7 @@ import logging
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import exists, func, inspect as sa_inspect, or_, select, text
+from sqlalchemy import Integer, cast, case, exists, func, inspect as sa_inspect, or_, select, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,7 +60,7 @@ class ProductService:
             f"{params.price_min}:{params.price_max}:{params.q}:{params.page}:"
             f"{params.page_size}:{discount_percent}:{discount_group_id or 'none'}:{'g' if is_guest else 'a'}"
             f"{params.gender}:{params.fabric}:{params.weight}:{params.in_stock}:"
-            f"{params.product_code}"
+            f"{params.product_code}:{params.is_bestseller}"
         )
         cached = await redis_get(cache_key)
         if cached:
@@ -154,23 +154,46 @@ class ProductService:
         if params.product_code:
             query = query.where(Product.product_code.ilike(f"%{params.product_code}%"))
 
+        if params.is_bestseller is True:
+            query = query.where(Product.is_bestseller == True)  # noqa: E712
+
         # Count before applying order/pagination
         count_query = select(func.count()).select_from(query.subquery())
         total_result = await self.db.execute(count_query)
         total = total_result.scalar_one()
 
-        # Order and paginate — sort_order ASC (0 = new/unassigned, appears first until admin reorders)
+        # Dedup matching product ids first (joins above can multiply rows) so the
+        # final ordered/paginated query below can carry a computed ORDER BY —
+        # Postgres rejects a computed ORDER BY expression on a query using DISTINCT.
         offset = (params.page - 1) * params.page_size
-        query = (
-            query
-            .order_by(Product.sort_order.asc(), Product.created_at.desc())
-            .offset(offset)
-            .limit(params.page_size)
-            .distinct()
+        id_subquery = query.with_only_columns(Product.id).distinct().subquery()
+
+        # Numeric-aware ordering by product code (e.g. 1000, 1001, 1122, 2011, 11001 —
+        # plain text sort would wrongly put "11001" before "2011"). Falls back to
+        # sort_order for products with a non-numeric or missing code.
+        numeric_code = case(
+            (Product.product_code.op("~")(r"^\d+$"), cast(Product.product_code, Integer)),
+            else_=None,
         )
 
-        result = await self.db.execute(query)
-        products = result.scalars().unique().all()
+        final_query = (
+            select(Product)
+            .options(
+                selectinload(Product.variants),
+                selectinload(Product.images),
+                selectinload(Product.assets),
+                selectinload(Product.category_links).selectinload(
+                    ProductCategory.category
+                ).selectinload(Category.children),
+            )
+            .where(Product.id.in_(select(id_subquery.c.id)))
+            .order_by(numeric_code.is_(None), numeric_code.asc(), Product.sort_order.asc(), Product.created_at.desc())
+            .offset(offset)
+            .limit(params.page_size)
+        )
+
+        result = await self.db.execute(final_query)
+        products = result.scalars().all()
 
         # Apply pricing
         products = await self._attach_pricing_and_stock(list(products), discount_percent, discount_group_id, is_guest)
@@ -370,6 +393,8 @@ class ProductService:
             status=data.status,
             meta_title=data.meta_title,
             meta_description=data.meta_description,
+            tagline=data.tagline,
+            is_bestseller=data.is_bestseller,
         )
         self.db.add(product)
         await self.db.flush()

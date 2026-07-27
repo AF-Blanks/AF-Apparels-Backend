@@ -68,6 +68,10 @@ class Product(BaseModel):
     # Manual sort order — lower numbers appear first; 0 = unsorted (appears last)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
+    # Merchandising
+    tagline: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_bestseller: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     # Tab content fields
     care_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     print_guide: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

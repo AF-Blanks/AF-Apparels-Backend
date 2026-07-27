@@ -520,6 +520,25 @@ async def _ensure_content_tables() -> None:
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """))
+            # Merchandising: tagline + best-seller flag on products (idempotent)
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='products' AND column_name='tagline') THEN
+                        ALTER TABLE products ADD COLUMN tagline VARCHAR(255);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='products' AND column_name='is_bestseller') THEN
+                        ALTER TABLE products ADD COLUMN is_bestseller BOOLEAN NOT NULL DEFAULT false;
+                    END IF;
+                END$$;
+            """))
+            # Category rename: Activewear -> Work Wear (idempotent, skips if already renamed
+            # or if a "Work Wear" category already exists under a different id)
+            await conn.execute(text("""
+                UPDATE categories SET name = 'Work Wear', slug = 'work-wear'
+                WHERE lower(name) = 'activewear'
+                AND NOT EXISTS (SELECT 1 FROM categories c2 WHERE c2.slug = 'work-wear')
+            """))
         print("Content tables: OK")
     except Exception as exc:
         print(f"Content tables warning (non-fatal): {exc}")

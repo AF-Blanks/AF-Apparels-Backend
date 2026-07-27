@@ -94,6 +94,8 @@ class ProductListItem(BaseModel):
     product_code: str | None = None
     weight: str | None = None
     gender: str | None = None
+    tagline: str | None = None
+    is_bestseller: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -144,6 +146,8 @@ class ProductDetail(BaseModel):
     review_count: int = 0
     avg_rating: float = 0.0
     sort_order: int = 0
+    tagline: str | None = None
+    is_bestseller: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -166,6 +170,7 @@ class FilterParams(BaseModel):
     weight: str | None = None
     in_stock: bool | None = None
     product_code: str | None = None
+    is_bestseller: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +193,8 @@ class ProductCreate(BaseModel):
     weight: str | None = None
     gender: str | None = None
     category_ids: list[UUID] = []
+    tagline: str | None = None
+    is_bestseller: bool = False
 
 
 class ProductUpdate(BaseModel):
@@ -209,6 +216,8 @@ class ProductUpdate(BaseModel):
     print_guide: dict | None = None
     size_chart_data: list | None = None
     highlight_text: str | None = None
+    tagline: str | None = None
+    is_bestseller: bool | None = None
 
 
 class ImageUploadResponse(BaseModel):
