@@ -925,3 +925,27 @@ def send_payment_failed_email(self, order_id: str) -> dict:
     except Exception as exc:
         delay = 60 * (2 ** self.request.retries)
         raise self.retry(exc=exc, countdown=delay)
+
+
+# ─── Marketing broadcast ──────────────────────────────────────────────────────
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_marketing_email(self, user_id: str, to_email: str, first_name: str, subject: str, body_html: str) -> dict:
+    """Send one recipient's copy of an admin-composed marketing broadcast.
+
+    Queued one task per recipient (not looped synchronously) so Celery's own
+    worker concurrency paces outbound calls to Resend instead of firing them
+    all at once in a tight loop.
+    """
+    try:
+        async def _send():
+            from app.services.email_service import EmailService
+            async with AsyncSessionLocal() as db:
+                svc = EmailService(db)
+                rendered = body_html.replace("{{first_name}}", first_name or "there")
+                ok = svc.send_raw(to_email=to_email, subject=subject, body_html=rendered)
+                return {"status": "sent" if ok else "failed", "user_id": user_id}
+        return _run(_send())
+    except Exception as exc:
+        delay = 60 * (2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)

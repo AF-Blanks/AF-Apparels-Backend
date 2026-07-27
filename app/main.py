@@ -539,6 +539,15 @@ async def _ensure_content_tables() -> None:
                 WHERE lower(name) = 'activewear'
                 AND NOT EXISTS (SELECT 1 FROM categories c2 WHERE c2.slug = 'work-wear')
             """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS marketing_campaigns (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    subject VARCHAR(255) NOT NULL,
+                    body_html TEXT NOT NULL,
+                    recipient_count INTEGER NOT NULL DEFAULT 0,
+                    sent_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
         print("Content tables: OK")
     except Exception as exc:
         print(f"Content tables warning (non-fatal): {exc}")
@@ -788,6 +797,7 @@ from app.api.v1.admin import (  # noqa: E402
     pages_seo as admin_pages_seo,
     blog_posts as admin_blog_posts,
     purchase_orders as admin_purchase_orders,
+    marketing as admin_marketing,
 )
 
 _cors_origins = list({settings.FRONTEND_URL, *settings.allowed_origins_list} - {""})
@@ -844,6 +854,7 @@ app.include_router(blog_posts.router, prefix=_V1)
 app.include_router(admin_pages_seo.router, prefix=_V1)
 app.include_router(admin_blog_posts.router, prefix=_V1)
 app.include_router(admin_purchase_orders.router, prefix=f"{_V1}/admin/purchase-orders", tags=["purchase-orders"])
+app.include_router(admin_marketing.router, prefix=_V1)
 
 # ── Debug: log all registered routes at import time ──────────────────────────
 for _route in app.routes:

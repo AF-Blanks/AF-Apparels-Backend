@@ -250,6 +250,7 @@ class OrderStatusUpdate(BaseModel):
     tracking_number: str | None = None
     courier: str | None = None
     courier_service: str | None = None
+    shipping_cost: Decimal | None = None
 
 
 class CancelOrderRequest(BaseModel):

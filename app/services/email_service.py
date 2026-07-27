@@ -226,8 +226,8 @@ class EmailService:
             + content_html
             + '<div style="border-top:1px solid #e5e7eb;margin-top:28px;padding-top:20px">'
             '<p style="color:#9ca3af;font-size:12px;margin:0 0 4px">'
-            'Questions? Call <a href="tel:4693679753" style="color:#1B3A5C;font-weight:700">'
-            '+1\xa0(469)\xa0367-9753</a> or '
+            'Questions? Call <a href="tel:2142727213" style="color:#1B3A5C;font-weight:700">'
+            '+1\xa0(214)\xa0272-7213</a> or '
             '<a href="mailto:info@afblanks.com" style="color:#1B3A5C">'
             'info@afblanks.com</a></p>'
             f'{note_html}'
@@ -386,7 +386,7 @@ class EmailService:
             f'</div>'
             f'<p style="color:#6b7280;font-size:13px;margin:0">'
             f'The invoice PDF is attached. Questions? Call '
-            f'<a href="tel:4693679753" style="color:#1B3A5C">+1\xa0(469)\xa0367-9753</a> or '
+            f'<a href="tel:2142727213" style="color:#1B3A5C">+1\xa0(214)\xa0272-7213</a> or '
             f'<a href="mailto:info@afblanks.com" style="color:#1B3A5C">info@afblanks.com</a></p>'
         )
 
@@ -440,7 +440,7 @@ class EmailService:
             f'and is attached to this email as a PDF.</p>'
             f'<p style="color:#6b7280;font-size:13px;margin:0">'
             f'Questions? Call '
-            f'<a href="tel:4693679753" style="color:#1B3A5C">+1\xa0(469)\xa0367-9753</a> or '
+            f'<a href="tel:2142727213" style="color:#1B3A5C">+1\xa0(214)\xa0272-7213</a> or '
             f'<a href="mailto:info@afblanks.com" style="color:#1B3A5C">info@afblanks.com</a></p>'
         )
 

@@ -619,7 +619,7 @@ async def send_po_email(po_id: UUID, db: AsyncSession = Depends(get_db)):
     </p>
     <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
     <p style="color:#999;font-size:12px;margin:0;">
-      Questions? Call <strong>+1 (469) 367-9753</strong> or
+      Questions? Call <strong>+1 (214) 272-7213</strong> or
       <a href="mailto:info@afblanks.com" style="color:#e63946;">info@afblanks.com</a><br>
       AF Apparels Wholesale Team | 10719 Turbeville Rd, Dallas, TX 75243
     </p>

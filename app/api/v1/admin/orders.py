@@ -61,8 +61,8 @@ def _af_email(content_html: str) -> str:
         + content_html
         + '<div style="border-top:1px solid #e5e7eb;margin-top:28px;padding-top:20px">'
         '<p style="color:#9ca3af;font-size:12px;margin:0 0 4px">'
-        'Questions? Call <a href="tel:4693679753" style="color:#1B3A5C;font-weight:700">'
-        '+1\xa0(469)\xa0367-9753</a> or '
+        'Questions? Call <a href="tel:2142727213" style="color:#1B3A5C;font-weight:700">'
+        '+1\xa0(214)\xa0272-7213</a> or '
         '<a href="mailto:info@afblanks.com" style="color:#1B3A5C">info@afblanks.com</a></p>'
         '<p style="color:#9ca3af;font-size:12px;margin:4px 0 0">— AF Apparels Team</p>'
         '</div>'
@@ -882,6 +882,8 @@ async def update_order_status(
         order.courier = payload.courier
     if payload.courier_service is not None:
         order.courier_service = payload.courier_service
+    if payload.shipping_cost is not None:
+        order.shipping_cost = payload.shipping_cost
     if payload.status == "shipped" and not order.shipped_at:
         order.shipped_at = datetime.now(timezone.utc)
 
