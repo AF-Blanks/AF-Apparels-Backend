@@ -4,19 +4,17 @@ import logging
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Integer, cast, case, exists, func, inspect as sa_inspect, or_, select, text
+from sqlalchemy import Integer, cast, case, exists, func, or_, select, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
 from app.core.redis import redis_delete, redis_delete_pattern, redis_get, redis_set
-from app.models.product import Category, Product, ProductAsset, ProductCategory, ProductVariant, ProductImage
+from app.models.product import Category, Product, ProductAsset, ProductCategory, ProductVariant
 from app.schemas.product import FilterParams
 
 logger = logging.getLogger(__name__)
 
-_LISTING_TTL = 300    # 5 min
-_DETAIL_TTL = 600     # 10 min
 _CATEGORY_TTL = 3600  # 1 hr
 
 
@@ -55,17 +53,9 @@ class ProductService:
         discount_group_id: str | None = None,
         is_guest: bool = False,
     ) -> tuple[list[Product], int]:
-        cache_key = (
-            f"products:list:{params.category}:{params.size}:{params.color}:"
-            f"{params.price_min}:{params.price_max}:{params.q}:{params.page}:"
-            f"{params.page_size}:{discount_percent}:{discount_group_id or 'none'}:{'g' if is_guest else 'a'}"
-            f"{params.gender}:{params.fabric}:{params.weight}:{params.in_stock}:"
-            f"{params.product_code}:{params.is_bestseller}"
-        )
-        cached = await redis_get(cache_key)
-        if cached:
-            data = json.loads(cached)
-            return data["items"], data["total"]
+        # No listing cache here — the catalog is small enough that querying the DB
+        # directly every time is cheap, and it avoids an entire class of staleness
+        # bugs (guest vs. authenticated cache keys drifting out of sync, etc.).
 
         query = (
             select(Product)
@@ -198,11 +188,6 @@ class ProductService:
         # Apply pricing
         products = await self._attach_pricing_and_stock(list(products), discount_percent, discount_group_id, is_guest)
 
-        await redis_set(
-            cache_key,
-            json.dumps({"items": [_product_to_dict(p) for p in products], "total": total}),
-            expire=_LISTING_TTL,
-        )
         return list(products), total
 
     # ------------------------------------------------------------------
@@ -214,11 +199,6 @@ class ProductService:
         discount_group_id: str | None = None,
         is_guest: bool = False,
     ) -> Product:
-        cache_key = f"products:detail:{slug}:{discount_percent}:{discount_group_id or 'none'}:{'g' if is_guest else 'a'}"
-        cached = await redis_get(cache_key)
-        if cached:
-            return json.loads(cached)
-
         result = await self.db.execute(
             select(Product)
             .options(
@@ -252,7 +232,6 @@ class ProductService:
         product.review_count = int(rv.cnt or 0)
         product.avg_rating = round(float(rv.avg), 1) if rv.avg else 0.0
 
-        await redis_set(cache_key, json.dumps(_product_to_dict(product)), expire=_DETAIL_TTL)
         return product
 
     # ------------------------------------------------------------------
@@ -574,105 +553,6 @@ class ProductService:
                 ])
 
         return buf.getvalue()
-
-
-# def _product_to_dict(product: Product) -> dict:
-#     """Serialize a Product ORM object to a plain dict (JSON-safe)."""
-#     return {
-#         "id": str(product.id),
-#         "name": product.name,
-#         "slug": product.slug,
-#         "status": product.status,
-#         "moq": product.moq,
-#         "description": product.description,
-#         "meta_title": getattr(product, "meta_title", None),
-#         "meta_description": getattr(product, "meta_description", None),
-#         "images": [_image_to_dict(i) for i in getattr(product, "images", [])],
-#         "variants": [_variant_to_dict(v) for v in getattr(product, "variants", [])],
-#         "categories": [_cat_to_dict(link.category) for link in getattr(product, "category_links", []) if getattr(link, "category", None)],
-#         "created_at": str(product.created_at),
-#         "updated_at": str(product.updated_at),
-#     }
-
-
-def _loaded_assets(product: Product) -> list:
-    """Return assets only if they were eagerly loaded; never trigger a lazy load."""
-    try:
-        if "assets" in sa_inspect(product).unloaded:
-            return []
-        return [
-            {"id": str(a.id), "asset_type": a.asset_type, "url": a.url, "file_name": a.file_name}
-            for a in product.assets
-        ]
-    except Exception:
-        return []
-
-
-def _product_to_dict(product: Product) -> dict:
-    images = getattr(product, "images", []) or []
-    primary = next((img for img in images if getattr(img, "is_primary", False)), None)
-    if primary is None and images:
-        primary = images[0]
-
-    return {
-        "id": str(product.id),
-        "name": product.name,
-        "slug": product.slug,
-        "status": product.status,
-        "moq": product.moq,
-        "description": product.description,
-        "meta_title": getattr(product, "meta_title", None),
-        "meta_description": getattr(product, "meta_description", None),
-        "primary_image": _image_to_dict(primary) if primary else None,
-        "images": [_image_to_dict(i) for i in images],
-        "variants": [_variant_to_dict(v) for v in getattr(product, "variants", [])],
-        "categories": [_cat_to_dict(link.category) for link in getattr(product, "category_links", []) if getattr(link, "category", None)],
-        "created_at": str(product.created_at),
-        "updated_at": str(product.updated_at),
-        "fabric": getattr(product, "fabric", None),
-        "product_code": getattr(product, "product_code", None),
-        "weight": getattr(product, "weight", None),
-        "gender": getattr(product, "gender", None),
-        "care_instructions": getattr(product, "care_instructions", None),
-        "print_guide": getattr(product, "print_guide", None),
-        "size_chart_data": getattr(product, "size_chart_data", None),
-        "assets": _loaded_assets(product),
-        "highlight_text": getattr(product, "highlight_text", None),
-        "review_count": getattr(product, "review_count", 0),
-        "avg_rating": getattr(product, "avg_rating", 0.0),
-    }
-
-
-def _variant_to_dict(variant: ProductVariant) -> dict:
-    msrp = getattr(variant, "msrp", None)
-    return {
-        "id": str(variant.id),
-        "sku": variant.sku,
-        "color": variant.color,
-        "size": variant.size,
-        "retail_price": str(variant.retail_price),
-        "compare_price": str(variant.compare_price) if variant.compare_price is not None else None,
-        "msrp": str(msrp) if msrp is not None else None,
-        "effective_price": str(getattr(variant, "effective_price", variant.retail_price)),
-        "stock_quantity": getattr(variant, "stock_quantity", 0),
-        "weight_grams": getattr(variant, "weight_grams", None),
-        "status": variant.status,
-    }
-
-
-def _image_to_dict(image: ProductImage) -> dict:
-    return {
-        "id": str(image.id),
-        "url_thumbnail": image.url_thumbnail,
-        "url_medium": image.url_medium,
-        "url_large": image.url_large,
-        "url_thumbnail_webp": getattr(image, "url_thumbnail_webp", None),
-        "url_medium_webp": getattr(image, "url_medium_webp", None),
-        "url_large_webp": getattr(image, "url_large_webp", None),
-        "alt_text": image.alt_text,
-        "is_primary": image.is_primary,
-        "position": image.position,
-    }
 
 
 def _cat_to_dict(cat: Category) -> dict:
