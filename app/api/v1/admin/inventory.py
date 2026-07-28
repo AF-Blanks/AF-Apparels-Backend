@@ -69,13 +69,13 @@ async def list_inventory(
     from app.models.product import Product, ProductVariant
 
     result = await db.execute(
-        select(ProductVariant, InventoryRecord, Warehouse, Product.name.label("product_name"))
+        select(ProductVariant, InventoryRecord, Warehouse, Product.name.label("product_name"), Product.product_code)
         .join(Product, ProductVariant.product_id == Product.id)
         .outerjoin(InventoryRecord, InventoryRecord.variant_id == ProductVariant.id)
         .outerjoin(Warehouse, InventoryRecord.warehouse_id == Warehouse.id)
         .where(ProductVariant.status != "discontinued")
         .order_by(Product.name, ProductVariant.color, ProductVariant.size)
-        .limit(500)
+        .limit(2000)
     )
     return [
         {
@@ -84,12 +84,13 @@ async def list_inventory(
             "color": v.color,
             "size": v.size,
             "product_name": product_name,
+            "product_code": product_code,
             "warehouse_id": str(wh.id) if wh else None,
             "warehouse_name": wh.name if wh else "—",
             "quantity": rec.quantity if rec else 0,
             "low_stock_threshold": rec.low_stock_threshold if rec else 10,
         }
-        for v, rec, wh, product_name in result.all()
+        for v, rec, wh, product_name, product_code in result.all()
     ]
 
 
