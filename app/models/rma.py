@@ -43,6 +43,9 @@ class RMARequest(BaseModel):
     refund_status: Mapped[str | None] = mapped_column(String(20))
     refund_amount: Mapped[float | None] = mapped_column(Numeric(10, 2))
     qb_refund_id: Mapped[str | None] = mapped_column(String(255))
+    # QB Accounting Credit Memo id (the ledger reversal — separate from the
+    # QB Payments card refund stored in qb_refund_id above)
+    qb_credit_memo_id: Mapped[str | None] = mapped_column(String(255))
     restock_status: Mapped[str | None] = mapped_column(String(20))
     restocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processing_error: Mapped[str | None] = mapped_column(Text)

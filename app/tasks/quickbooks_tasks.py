@@ -625,6 +625,212 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
 
 
 @celery_app.task(bind=True, max_retries=5)
+def void_order_invoice_in_qb(self, order_id: str):
+    """Void an order's QuickBooks invoice when the order is cancelled.
+
+    Reverses the revenue booked by the original invoice so QB's P&L isn't
+    inflated by a cancelled order. Idempotent: QB voiding an already-voided
+    invoice is a no-op, and orders without a qb_invoice_id are skipped.
+    """
+    async def _run_all():
+        from app.core.database import AsyncSessionLocal
+        from app.models.order import Order
+        from app.services.quickbooks_service import QuickBooksService
+        from sqlalchemy import select
+
+        try:
+            async with AsyncSessionLocal() as session:
+                order = (await session.execute(
+                    select(Order).where(Order.id == uuid.UUID(order_id))
+                )).scalar_one_or_none()
+                if not order:
+                    return None
+                invoice_id = order.qb_invoice_id
+            if not invoice_id:
+                logger.info(
+                    "void_order_invoice_in_qb: order %s has no qb_invoice_id — nothing to void",
+                    order_id,
+                )
+                return {"status": "skipped"}
+
+            svc = await QuickBooksService().initialize()
+            ok = await asyncio.to_thread(svc.void_invoice, invoice_id)
+            logger.info(
+                "void_order_invoice_in_qb: order=%s invoice=%s voided=%s",
+                order_id, invoice_id, ok,
+            )
+            await _log_attempt(
+                "order", order_id,
+                "success" if ok else _failure_status(self),
+                None if ok else "void_invoice returned False",
+                qb_entity_id=invoice_id,
+            )
+            if not ok:
+                raise RuntimeError(f"QB void_invoice returned False for invoice {invoice_id}")
+            return {"status": "success", "qb_invoice_id": invoice_id}
+
+        except Exception as exc:
+            logger.exception("void_order_invoice_in_qb error: %s", exc)
+            await _log_attempt("order", order_id, _failure_status(self), str(exc))
+            raise
+
+    try:
+        return _run_async(_run_all())
+    except Exception as exc:
+        delay = _retry_delay(exc, self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)
+
+
+@celery_app.task(bind=True, max_retries=5)
+def sync_rma_credit_memo_to_qb(self, rma_id: str):
+    """Create a QuickBooks Credit Memo when an RMA (return) is approved.
+
+    This is the accounting reversal for a return — separate from the QB Payments
+    card refund (which moves the money). The credit memo reverses revenue,
+    restores inventory quantity, and reverses COGS inside QB so the P&L is
+    correct. Idempotent via rma.qb_credit_memo_id.
+    """
+    async def _run_all():
+        import json as _json
+        from app.core.database import AsyncSessionLocal
+        from app.models.rma import RMARequest, RMAItem
+        from app.models.order import Order
+        from app.models.company import Company
+        from app.models.product import ProductVariant
+        from app.models.system import QBSyncLog
+        from app.services.quickbooks_service import QuickBooksService
+        from sqlalchemy import select, text as _sql_text
+        from sqlalchemy.orm import selectinload
+
+        try:
+            async with AsyncSessionLocal() as session:
+                rma = (await session.execute(
+                    select(RMARequest)
+                    .options(selectinload(RMARequest.items).selectinload(RMAItem.order_item))
+                    .where(RMARequest.id == uuid.UUID(rma_id))
+                )).scalar_one_or_none()
+                if not rma:
+                    logger.warning("sync_rma_credit_memo_to_qb: RMA %s not found", rma_id)
+                    return None
+                if rma.qb_credit_memo_id:
+                    logger.info(
+                        "sync_rma_credit_memo_to_qb: already synced rma=%s memo=%s",
+                        rma_id, rma.qb_credit_memo_id,
+                    )
+                    return {"status": "success", "qb_credit_memo_id": rma.qb_credit_memo_id}
+
+                order = (await session.execute(
+                    select(Order).where(Order.id == rma.order_id)
+                )).scalar_one_or_none()
+                if not order:
+                    logger.warning("sync_rma_credit_memo_to_qb: order for RMA %s not found", rma_id)
+                    return None
+
+                # ── Resolve QB customer id (same rules as invoice sync) ────────
+                qb_customer_id: str | None = None
+                is_guest = order.company_id is None
+                guest_name = order.guest_name or f"Guest {order.order_number}"
+                guest_email = order.guest_email or f"guest+{str(order.id)[:8]}@afapparels.com"
+                if not is_guest:
+                    company = (await session.execute(
+                        select(Company).where(Company.id == order.company_id)
+                    )).scalar_one_or_none()
+                    raw_qb_id = company.qb_customer_id if company else None
+                    if raw_qb_id and "-" not in raw_qb_id:
+                        qb_customer_id = raw_qb_id
+                    else:
+                        log = (await session.execute(
+                            select(QBSyncLog)
+                            .where(QBSyncLog.entity_type == "company")
+                            .where(QBSyncLog.entity_id == order.company_id)
+                            .where(QBSyncLog.status == "success")
+                            .order_by(QBSyncLog.created_at.desc())
+                            .limit(1)
+                        )).scalar_one_or_none()
+                        qb_customer_id = log.qb_entity_id if log else None
+
+                # ── Build credit-memo line items from RMA items ────────────────
+                line_items: list[dict] = []
+                for it in rma.items:
+                    oi = it.order_item
+                    if not oi:
+                        continue
+                    qb_item_id = None
+                    if oi.variant_id:
+                        pv = (await session.execute(
+                            select(ProductVariant).where(ProductVariant.id == oi.variant_id)
+                        )).scalar_one_or_none()
+                        qb_item_id = pv.qb_item_id if pv else None
+                    amount = round(float(oi.unit_price) * it.quantity, 2)
+                    line_items.append({
+                        "description": f"Return {rma.rma_number}: {oi.product_name} ({oi.sku})",
+                        "quantity": it.quantity,
+                        "unit_price": float(oi.unit_price),
+                        "amount": amount,
+                        "qb_item_id": qb_item_id,
+                    })
+
+                if not line_items:
+                    logger.warning("sync_rma_credit_memo_to_qb: no line items for RMA %s", rma_id)
+                    return None
+
+                # Shipping address for QB Automated Sales Tax (reverse the tax too)
+                shipping_addr: dict | None = None
+                try:
+                    if order.shipping_address_snapshot:
+                        _a = _json.loads(order.shipping_address_snapshot)
+                        shipping_addr = {
+                            "Line1": _a.get("address_line1") or _a.get("line1") or _a.get("street1") or "",
+                            "City": _a.get("city") or "",
+                            "CountrySubDivisionCode": _a.get("state") or _a.get("state_province") or "",
+                            "PostalCode": _a.get("postal_code") or _a.get("zip") or _a.get("zip_code") or "",
+                            "Country": "US",
+                        }
+                except Exception:
+                    shipping_addr = None
+
+                doc_number = rma.rma_number
+
+            # ── Resolve customer + create credit memo (outside DB session) ─────
+            svc = await QuickBooksService().initialize()
+            if is_guest or not qb_customer_id:
+                qb_customer_id = await asyncio.to_thread(
+                    svc.create_customer, guest_name, guest_email
+                )
+
+            qb_memo_id = await asyncio.to_thread(
+                svc.create_credit_memo,
+                qb_customer_id, doc_number, line_items, shipping_addr,
+            )
+            logger.info(
+                "sync_rma_credit_memo_to_qb: credit memo created rma=%s memo=%s",
+                rma_id, qb_memo_id,
+            )
+
+            # ── Persist the memo id back to the RMA row ────────────────────────
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    _sql_text("UPDATE rma_requests SET qb_credit_memo_id=:mid WHERE id=CAST(:rid AS UUID)"),
+                    {"mid": str(qb_memo_id), "rid": rma_id},
+                )
+                await session.commit()
+
+            await _log_attempt("rma", rma_id, "success", None, qb_entity_id=qb_memo_id)
+            return {"status": "success", "qb_credit_memo_id": qb_memo_id}
+
+        except Exception as exc:
+            logger.exception("sync_rma_credit_memo_to_qb error: %s", exc)
+            await _log_attempt("rma", rma_id, _failure_status(self), str(exc))
+            raise
+
+    try:
+        return _run_async(_run_all())
+    except Exception as exc:
+        delay = _retry_delay(exc, self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)
+
+
+@celery_app.task(bind=True, max_retries=5)
 def sync_variant_to_qb(self, variant_id: str):
     """Sync a ProductVariant to QuickBooks as an Inventory Item.
 

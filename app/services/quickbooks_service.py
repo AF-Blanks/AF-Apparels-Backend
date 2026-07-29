@@ -817,6 +817,58 @@ class QuickBooksService:
         resp = self._request("POST", "payment", json=payload)
         return resp.get("Payment", {})
 
+    def create_credit_memo(
+        self,
+        qb_customer_id: str,
+        doc_number: str,
+        line_items: list[dict],
+        shipping_addr: dict | None = None,
+    ) -> str:
+        """Create a QB Credit Memo (the accounting reversal for a return/RMA).
+
+        A CreditMemo on inventory items does three things automatically in QB:
+          1. Reverses revenue (reduces Sales of Product Income)
+          2. Restores inventory quantity (increases Inventory Asset)
+          3. Reverses COGS (so profit is corrected)
+
+        Idempotency is handled at the task level (rma.qb_credit_memo_id check).
+        line_items: list of {description, quantity, unit_price, amount, qb_item_id}.
+        """
+        lines = []
+        for item in line_items:
+            _qb_item_id = item.get("qb_item_id")
+            if not _qb_item_id:
+                logger.critical(
+                    "QB credit memo line missing qb_item_id — falling back to item '1' (Services). "
+                    "COGS/inventory reversal will be misclassified. description=%s",
+                    item.get("description"),
+                )
+            lines.append({
+                "Amount": float(item["amount"]),
+                "DetailType": "SalesItemLineDetail",
+                "Description": item["description"],
+                "SalesItemLineDetail": {
+                    "ItemRef": {"value": _qb_item_id or "1"},
+                    "Qty": item["quantity"],
+                    "UnitPrice": float(item["unit_price"]),
+                    "TaxCodeRef": {"value": "TAX"},
+                },
+            })
+
+        payload: dict[str, Any] = {
+            "CustomerRef": {"value": qb_customer_id},
+            "DocNumber": doc_number,
+            "Line": lines,
+            "TxnTaxDetail": {"TxnTaxCodeRef": {"value": "TAX"}},
+            "GlobalTaxCalculation": "TaxExcluded",
+        }
+        if shipping_addr:
+            payload["ShipAddr"] = shipping_addr
+
+        logger.info("QB create_credit_memo payload: %s", payload)
+        resp = self._request("POST", "creditmemo", json=payload)
+        return str(resp["CreditMemo"]["Id"])
+
     def void_invoice(self, invoice_id: str) -> bool:
         """Void a QB invoice by ID."""
         try:

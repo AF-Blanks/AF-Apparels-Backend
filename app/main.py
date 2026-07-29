@@ -539,6 +539,15 @@ async def _ensure_content_tables() -> None:
                 WHERE lower(name) = 'activewear'
                 AND NOT EXISTS (SELECT 1 FROM categories c2 WHERE c2.slug = 'work-wear')
             """))
+            # RMA: QB Accounting Credit Memo id (ledger reversal for returns) — idempotent
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='rma_requests' AND column_name='qb_credit_memo_id') THEN
+                        ALTER TABLE rma_requests ADD COLUMN qb_credit_memo_id VARCHAR(255);
+                    END IF;
+                END$$;
+            """))
             await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS marketing_campaigns (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

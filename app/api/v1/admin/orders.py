@@ -1455,6 +1455,7 @@ async def cancel_admin_order(
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
     if not order:
         raise NotFoundError(f"Order {order_id} not found")
+    _had_qb_invoice = bool(order.qb_invoice_id)
     order.status = "cancelled"
     if hasattr(order, "notes"):
         order.notes = f"Cancelled: {payload.reason}"
@@ -1465,6 +1466,15 @@ async def cancel_admin_order(
         _ce.delay(str(order.id), payload.reason or "")
     except Exception as _e:
         logger.warning("Cancelled email dispatch failed: %s", _e)
+
+    # If this order was already synced to QuickBooks as an invoice, void it so
+    # QB's revenue/P&L isn't inflated by a cancelled order.
+    if _had_qb_invoice:
+        try:
+            from app.tasks.quickbooks_tasks import void_order_invoice_in_qb
+            void_order_invoice_in_qb.delay(str(order.id))
+        except Exception as _e:
+            logger.warning("QB void-invoice dispatch failed: %s", _e)
 
     return {"message": "Order cancelled"}
 
@@ -1717,6 +1727,7 @@ async def update_rma(
         rma.admin_notes = payload.admin_notes
 
     should_notify = True
+    _dispatch_credit_memo = False
 
     if payload.status == "approved":
         order = (await db.execute(select(Order).where(Order.id == rma.order_id))).scalar_one_or_none()
@@ -1811,10 +1822,21 @@ async def update_rma(
             should_notify = False
         else:
             rma.status = "approved"
+            _dispatch_credit_memo = True
     else:
         rma.status = payload.status
 
     await db.commit()
+
+    # Create the QuickBooks Credit Memo (accounting reversal — reverses revenue,
+    # restores inventory, reverses COGS in QB). Separate from the QB Payments card
+    # refund already done above. Only when the approval actually went through.
+    if _dispatch_credit_memo:
+        try:
+            from app.tasks.quickbooks_tasks import sync_rma_credit_memo_to_qb
+            sync_rma_credit_memo_to_qb.delay(str(rma_id))
+        except Exception as _e:
+            logger.warning("QB credit-memo dispatch failed for RMA %s: %s", rma_id, _e)
 
     if should_notify:
         try:
