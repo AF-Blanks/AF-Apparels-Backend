@@ -26,6 +26,44 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _dispatch_qb_inventory_sync(variant_ids: list[str], *, countdown: int, context: str) -> None:
+    """Queue a SINGLE batched QB inventory-sync task for many variants.
+
+    This is the optimization: instead of one Celery task (and its 2 QB calls +
+    retry amplification) per variant, we queue ONE task for the whole batch.
+
+    Safety: if the batch task is not present in quickbooks_tasks.py yet, we fall
+    back to the original per-variant dispatch so inventory sync is NEVER silently
+    dropped. No existing behaviour is lost.
+    """
+    if not variant_ids:
+        return
+    try:
+        from app.tasks.quickbooks_tasks import sync_inventory_batch_to_qb as _batch
+        _batch.apply_async(args=[variant_ids], countdown=countdown)
+        logger.info(
+            "QB inventory batch sync queued for %d variants (%s)",
+            len(variant_ids), context,
+        )
+        return
+    except (ImportError, AttributeError):
+        logger.warning(
+            "sync_inventory_batch_to_qb not available; falling back to per-variant dispatch (%s)",
+            context,
+        )
+    except Exception as exc:
+        logger.warning("QB inventory batch sync dispatch failed (%s): %s", context, exc)
+        return
+
+    # Fallback — preserve prior behaviour rather than skipping the sync entirely.
+    try:
+        from app.tasks.quickbooks_tasks import sync_inventory_to_qb as _single
+        for _vid in variant_ids:
+            _single.apply_async(args=[_vid], countdown=countdown)
+    except Exception as exc:
+        logger.warning("QB inventory per-variant fallback dispatch failed (%s): %s", context, exc)
+
+
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
 def _mfr_dict(m: Manufacturer) -> dict:
@@ -448,15 +486,12 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
     except Exception as _e:
         logger.warning("Could not dispatch QB sync task: %s", _e)
 
-    # Dispatch QB inventory+cost sync for each received variant (countdown=5s so cost_per_item commit lands first)
-    if variants_received:
-        try:
-            from app.tasks.quickbooks_tasks import sync_inventory_to_qb
-            for vid in variants_received:
-                sync_inventory_to_qb.apply_async(args=[str(vid)], countdown=5)
-            logger.info("Dispatched sync_inventory_to_qb for %d variants", len(variants_received))
-        except Exception as _e:
-            logger.warning("Could not dispatch QB inventory sync tasks: %s", _e)
+    # Dispatch QB inventory+cost sync as ONE batched task for all received
+    # variants (countdown=5s so the cost_per_item commit lands first). A 50-variant
+    # receive now queues 1 task instead of 50 — same data synced, far fewer QB hits.
+    _dispatch_qb_inventory_sync(
+        [str(v) for v in variants_received], countdown=5, context=f"PO {po_id} receive"
+    )
 
     return {"success": True, "receiving_id": str(receiving.id)}
 
@@ -537,7 +572,10 @@ async def send_po_email(po_id: UUID, db: AsyncSession = Depends(get_db)):
     if not manufacturer or not manufacturer.email:
         raise HTTPException(status_code=400, detail="Manufacturer has no email address on file")
 
-    # Build line item cards (mobile-friendly)
+    # Build compact table rows — one line per variant so the PO stays short to
+    # print even with many colours/sizes (client asked for a variant table, not
+    # a tall card per item).
+    _td = 'padding:7px 10px;border-bottom:1px solid #eee;font-size:12px;'
     rows = ""
     for li in po.line_items:
         variant = li.variant
@@ -549,23 +587,15 @@ async def send_po_email(po_id: UUID, db: AsyncSession = Depends(get_db)):
         total = li.qty_ordered * float(li.unit_cost_expected)
 
         rows += (
-            f'<div style="background:#f9f9f9;border-radius:6px;padding:14px;margin-bottom:10px;border-left:3px solid #1a1a2e;">'
-            f'<div style="font-weight:bold;color:#1a1a2e;margin-bottom:8px;font-size:15px;">{product_name}</div>'
-            f'<table style="width:100%;border-collapse:collapse;">'
             f'<tr>'
-            f'<td style="color:#666;font-size:13px;padding:2px 0;width:50%">SKU: <span style="color:#333;">{sku}</span></td>'
-            f'<td style="color:#666;font-size:13px;padding:2px 0;width:50%">Color: <span style="color:#333;">{color}</span></td>'
+            f'<td style="{_td}color:#1a1a2e;font-weight:600">{product_name}</td>'
+            f'<td style="{_td}color:#666">{sku}</td>'
+            f'<td style="{_td}color:#666">{color}</td>'
+            f'<td style="{_td}color:#666;text-align:center">{size}</td>'
+            f'<td style="{_td}color:#666;text-align:center">{li.qty_ordered}</td>'
+            f'<td style="{_td}color:#666;text-align:right">${float(li.unit_cost_expected):.2f}</td>'
+            f'<td style="{_td}color:#1a1a2e;font-weight:700;text-align:right">${total:.2f}</td>'
             f'</tr>'
-            f'<tr>'
-            f'<td style="color:#666;font-size:13px;padding:2px 0;">Size: <span style="color:#333;">{size}</span></td>'
-            f'<td style="color:#666;font-size:13px;padding:2px 0;">Qty: <span style="color:#333;">{li.qty_ordered}</span></td>'
-            f'</tr>'
-            f'<tr>'
-            f'<td style="color:#666;font-size:13px;padding:2px 0;">Unit Cost: <span style="color:#333;">${float(li.unit_cost_expected):.2f}</span></td>'
-            f'<td style="color:#666;font-size:13px;padding:2px 0;">Total: <span style="font-weight:bold;color:#1a1a2e;">${total:.2f}</span></td>'
-            f'</tr>'
-            f'</table>'
-            f'</div>'
         )
 
     order_date_str = po.order_date.strftime("%B %d, %Y") if po.order_date else date.today().strftime("%B %d, %Y")
@@ -604,7 +634,20 @@ async def send_po_email(po_id: UUID, db: AsyncSession = Depends(get_db)):
     </table>
     <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
     <h3 style="color:#1a1a2e;margin-bottom:12px;">Order Items</h3>
-    {rows}
+    <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+      <thead>
+        <tr style="background:#1a1a2e;color:#ffffff;">
+          <th style="padding:8px 10px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.03em;">Product</th>
+          <th style="padding:8px 10px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.03em;">SKU</th>
+          <th style="padding:8px 10px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.03em;">Color</th>
+          <th style="padding:8px 10px;text-align:center;font-size:11px;text-transform:uppercase;letter-spacing:.03em;">Size</th>
+          <th style="padding:8px 10px;text-align:center;font-size:11px;text-transform:uppercase;letter-spacing:.03em;">Qty</th>
+          <th style="padding:8px 10px;text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:.03em;">Unit&nbsp;Cost</th>
+          <th style="padding:8px 10px;text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:.03em;">Total</th>
+        </tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>
     <div style="background:#1a1a2e;color:white;padding:14px 16px;border-radius:6px;margin-top:16px;">
       <table style="width:100%;border-collapse:collapse;">
         <tr>

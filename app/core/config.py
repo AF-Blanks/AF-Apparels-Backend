@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     EMAIL_FROM_ADDRESS: str = "noreply@karauxbaia.resend.app"
     EMAIL_FROM_NAME: str = "AF Apparels"
     ADMIN_NOTIFICATION_EMAIL: str = ""
+    # Business inboxes that receive a copy of every new-order alert
+    # (comma-separated, env-overridable). Customer still gets their own confirmation.
+    ORDER_ALERT_EMAILS: str = "info@afblanks.com,sales@afblanks.com,info.afapparel@gmail.com"
 
     @model_validator(mode="after")
     def _apply_resend_from_email(self) -> "Settings":

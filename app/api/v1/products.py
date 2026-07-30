@@ -91,9 +91,16 @@ async def get_product(
 async def download_product_images(
     product_id: uuid.UUID,
     request: Request,
+    color: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """Stream a ZIP of all product images (large size) from S3."""
+    """Stream a ZIP of product images (large size) from S3.
+
+    When ?color= is passed, only that colour's images are zipped (matched by
+    ProductImage.alt_text, the same field the gallery groups by). This powers
+    the per-colour "Download All" button — one reliable ZIP instead of many
+    browser-blocked individual downloads.
+    """
     import io
     import zipfile
 
@@ -115,6 +122,15 @@ async def download_product_images(
     if not product.images:
         raise HTTPException(status_code=404, detail="No images available for this product")
 
+    # Optional per-colour filter — matches the gallery's grouping (by alt_text).
+    images = list(product.images)
+    if color:
+        _c = color.strip().lower()
+        filtered = [im for im in images if (im.alt_text or "").strip().lower() == _c]
+        if filtered:
+            images = filtered
+        # if nothing matched (alt_text not set for this colour), fall back to all
+
     def _generate_zip():
         s3 = boto3.client(
             "s3",
@@ -124,7 +140,7 @@ async def download_product_images(
         )
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for i, img in enumerate(product.images):
+            for i, img in enumerate(images):
                 # Extract S3 key from URL
                 url = img.url_large
                 if url.startswith("https://"):
@@ -143,68 +159,16 @@ async def download_product_images(
 
     zip_bytes = _generate_zip()
     safe_name = product.slug.replace("/", "_")
+    if color:
+        safe_color = "".join(ch for ch in color if ch.isalnum() or ch in "-_").strip("-_") or "colour"
+        zip_name = f"{safe_name}-{safe_color}-images.zip"
+    else:
+        zip_name = f"{safe_name}-images.zip"
 
     return StreamingResponse(
         iter([zip_bytes]),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{safe_name}-images.zip"'},
-    )
-
-
-@router.get("/{product_id}/images/{image_id}/download")
-async def download_single_image(
-    product_id: uuid.UUID,
-    image_id: uuid.UUID,
-    filename: str = Query("image.jpg"),
-    db: AsyncSession = Depends(get_db),
-):
-    """Stream a single product image from S3 as a file download."""
-    import boto3
-    from fastapi.responses import StreamingResponse
-
-    from app.core.config import settings
-    from app.models.product import ProductImage
-
-    result = await db.execute(
-        select(ProductImage).where(
-            ProductImage.id == image_id,
-            ProductImage.product_id == product_id,
-        )
-    )
-    image = result.scalar_one_or_none()
-    if not image:
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    url = image.url_large or image.url_medium
-    if not url:
-        raise HTTPException(status_code=404, detail="Image URL not available")
-
-    # Extract S3 key from URL
-    if url.startswith("https://") and ".amazonaws.com/" in url:
-        key = url.split(".amazonaws.com/", 1)[-1]
-    else:
-        key = url.lstrip("/")
-
-    s3 = boto3.client(
-        "s3",
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-        region_name=settings.AWS_S3_REGION,
-    )
-    try:
-        obj = s3.get_object(Bucket=settings.AWS_S3_BUCKET, Key=key)
-        img_bytes = obj["Body"].read()
-    except Exception:
-        raise HTTPException(status_code=502, detail="Failed to fetch image from storage")
-
-    ext = key.rsplit(".", 1)[-1].lower() if "." in key else "jpg"
-    mime = "image/webp" if ext == "webp" else f"image/{ext}" if ext in ("png", "gif") else "image/jpeg"
-    safe_name = filename.replace('"', "")
-
-    return StreamingResponse(
-        iter([img_bytes]),
-        media_type=mime,
-        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
     )
 
 

@@ -454,9 +454,22 @@ class EmailService:
         )
 
     def send_admin_new_order_alert(self, order: "Order") -> bool:  # type: ignore[name-defined]
-        """Notify admin of a new order placement."""
+        """Notify the business inboxes of a new order placement.
+
+        Sends to every address in ORDER_ALERT_EMAILS (plus the legacy single
+        ADMIN_NOTIFICATION_EMAIL, if set), deduplicated. The customer still
+        receives their own confirmation separately.
+        """
         from app.core.config import settings as _s
-        if not _s.ADMIN_NOTIFICATION_EMAIL:
+        _raw = (_s.ORDER_ALERT_EMAILS or "")
+        if _s.ADMIN_NOTIFICATION_EMAIL:
+            _raw = f"{_raw},{_s.ADMIN_NOTIFICATION_EMAIL}"
+        recipients: list[str] = []
+        for _addr in _raw.split(","):
+            _addr = _addr.strip()
+            if _addr and _addr not in recipients:
+                recipients.append(_addr)
+        if not recipients:
             return False
         order_url = f"{_s.FRONTEND_URL}/admin/orders/{order.id}"
         is_guest = getattr(order, "is_guest_order", False)
@@ -487,11 +500,13 @@ class EmailService:
             f'font-weight:700;text-decoration:none;font-size:14px;display:inline-block">'
             f'View Order →</a></p>'
         )
-        return self._send_via_resend(
-            to_email=_s.ADMIN_NOTIFICATION_EMAIL,
-            subject=f"New Order {order.order_number} — ${float(order.total):.2f} | AF Apparels",
-            body_html=self._base_template(content_html),
-        )
+        _subject = f"New Order {order.order_number} — ${float(order.total):.2f} | AF Apparels"
+        _body = self._base_template(content_html)
+        sent_any = False
+        for _to in recipients:
+            if self._send_via_resend(to_email=_to, subject=_subject, body_html=_body):
+                sent_any = True
+        return sent_any
 
     def send_admin_low_stock_alert(
         self, product_name: str, sku: str, qty: int
