@@ -93,6 +93,10 @@ class Order(BaseModel):
         nullable=False,
     )
     qb_invoice_id: Mapped[str | None] = mapped_column(String(255))
+    # QB Accounting Payment record id (money-received entry linked to the invoice).
+    # Distinct from qb_payment_charge_id (the QB Payments card charge). Set once the
+    # payment is recorded so a task retry never books a duplicate payment.
+    qb_payment_id: Mapped[str | None] = mapped_column(String(255))
 
     # Payment method + ACH details (added after initial deployment — saved via raw SQL)
     payment_method: Mapped[str | None] = mapped_column(String(20), nullable=True)

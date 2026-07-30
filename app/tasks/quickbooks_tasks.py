@@ -432,6 +432,7 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
                     "created_at_date": order.created_at.strftime("%Y-%m-%d") if order.created_at else None,
                     "items": line_items,
                     "qb_invoice_id": order.qb_invoice_id,  # cached from prior successful run
+                    "qb_payment_id": getattr(order, "qb_payment_id", None),  # set once payment recorded
                     "shipping_addr": shipping_addr,
                 }
 
@@ -550,7 +551,14 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
             _pmt_method = order_data.get("payment_method") or ""
             _is_paid = order_data.get("payment_status") == "paid"
             _is_net30 = _pmt_method.lower() in ("net_30", "net30")
-            if _is_paid and (not _is_net30 or force_payment):
+            _already_paid_in_qb = bool(order_data.get("qb_payment_id"))
+            if _already_paid_in_qb:
+                logger.info(
+                    "sync_order_invoice_to_qb: QB payment already recorded (id=%s) for order=%s"
+                    " — skipping to avoid duplicate",
+                    order_data.get("qb_payment_id"), order_data["order_number"],
+                )
+            elif _is_paid and (not _is_net30 or force_payment):
                 logger.info(
                     "sync_order_invoice_to_qb: recording QB payment — order=%s invoice=%s"
                     " method=%s total=%.2f",
@@ -566,12 +574,22 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
                         order_data.get("created_at_date"),
                         qb_customer_id,  # skip GET /invoice — saves 1 Core API call
                     )
+                    _qb_payment_id = str(payment.get("Id") or "")
                     logger.info(
                         "QB payment created — invoice=%s order=%s payment_id=%s",
                         qb_invoice_id,
                         order_data["order_number"],
-                        payment.get("Id"),
+                        _qb_payment_id,
                     )
+                    # Persist so a retry never books a second payment for this order.
+                    if _qb_payment_id:
+                        from sqlalchemy import text as _sql_pay
+                        async with AsyncSessionLocal() as _psession:
+                            await _psession.execute(
+                                _sql_pay("UPDATE orders SET qb_payment_id=:pid WHERE id=:oid"),
+                                {"pid": _qb_payment_id, "oid": order_id},
+                            )
+                            await _psession.commit()
                 except Exception as _pay_exc:
                     logger.error(
                         "QB create_payment_for_invoice FAILED — order=%s invoice=%s"

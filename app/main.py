@@ -561,6 +561,16 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            # orders.qb_payment_id: makes the QB Accounting payment idempotent so a
+            # task retry can't book a duplicate payment. Idempotent.
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='qb_payment_id') THEN
+                        ALTER TABLE orders ADD COLUMN qb_payment_id VARCHAR(255);
+                    END IF;
+                END$$;
+            """))
             await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS marketing_campaigns (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

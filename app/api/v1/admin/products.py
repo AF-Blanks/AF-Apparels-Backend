@@ -425,9 +425,19 @@ async def update_variant(
 
     await db.commit()
 
+    # Keep QuickBooks in sync. If the item already exists in QB, sync_variant_to_qb
+    # is a no-op (it only creates) — so a price/cost/stock edit here would never
+    # reach QB, leaving future invoices on a stale price. Route already-synced
+    # variants through sync_inventory_to_qb (which updates UnitPrice/cost/qty)
+    # whenever a price/cost/stock-affecting field changed.
     try:
-        from app.tasks.quickbooks_tasks import sync_variant_to_qb
-        sync_variant_to_qb.delay(str(variant.id))
+        _price_fields = {"retail_price", "cost_per_item", "stock_quantity"}
+        if variant.qb_item_id and (_price_fields & set(payload.keys())):
+            from app.tasks.quickbooks_tasks import sync_inventory_to_qb
+            sync_inventory_to_qb.delay(str(variant.id))
+        else:
+            from app.tasks.quickbooks_tasks import sync_variant_to_qb
+            sync_variant_to_qb.delay(str(variant.id))
     except Exception as _exc:
         logger.warning("QB variant sync dispatch failed: %s", _exc)
 
