@@ -1109,7 +1109,7 @@ def sync_inventory_to_qb(self, variant_id: str, deferred_count: int = 0):
         raise self.retry(exc=exc, countdown=delay)
 
 
-@celery_app.task(bind=True, max_retries=3)
+@celery_app.task(bind=True, max_retries=5)
 def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
     """Create a QuickBooks Vendor Bill when a PO receiving is recorded.
 
@@ -1217,10 +1217,14 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
                 po.qb_synced = True
                 await session.commit()
 
+            # Record success in qb_sync_log so a missed/failed vendor-bill sync
+            # is visible in the admin QuickBooks dashboard instead of only in logs.
+            await _log_attempt("po_receipt", receiving_id, "success", None, qb_entity_id=qb_bill_id)
             return {"status": "success", "qb_bill_id": qb_bill_id}
 
         except Exception as exc:
             logger.exception("sync_po_receipt_to_qb error: %s", exc)
+            await _log_attempt("po_receipt", receiving_id, _failure_status(self), str(exc))
             raise
 
     try:
