@@ -79,6 +79,12 @@ class Settings(BaseSettings):
     QB_REFRESH_TOKEN: str = ""
     QB_SHIPPING_ITEM_ID: str = ""       # QB item ID for Shipping & Handling line
     QB_CONVENIENCE_FEE_ITEM_ID: str = ""  # QB item ID for 3% Credit Card Convenience Fee
+    # QB item ID for the "Sales Tax Collected" service item, mapped to the
+    # Sales Tax Payable *liability* account (id 30). Tax charged at checkout
+    # (ZipTax/manual) is posted here as an explicit line so QB's Automated Sales
+    # Tax never recalculates and the invoice total always equals the customer's
+    # charge. Default is this company's live item; override via env if it changes.
+    QB_TAX_ITEM_ID: str = "584"
 
     # ── Email (Resend) ────────────────────────────────────────────────────────
     RESEND_API_KEY: str = ""

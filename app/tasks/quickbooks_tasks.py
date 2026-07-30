@@ -405,6 +405,42 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
                         _conv_fee, _conv_item_id,
                     )
 
+                # Add sales tax as an EXPLICIT line item. order.tax_amount was
+                # already calculated at checkout (ZipTax / manual tax_rates) and is
+                # exactly what the customer was charged. QB's Automated Sales Tax is
+                # disabled in create_invoice (TaxCodeRef "NON" +
+                # GlobalTaxCalculation "NotApplicable") so QB never recalculates a
+                # different number — the invoice total stays byte-for-byte equal to
+                # the customer's charge. The tax item's account is Sales Tax Payable
+                # (a *liability*), so collected tax is booked as a liability and
+                # never touches the P&L / profit. Most wholesale customers are
+                # tax-exempt (tax_amount == 0) → no line is added at all.
+                _tax_amt = float(getattr(order, "tax_amount", None) or 0)
+                if _tax_amt > 0:
+                    _tax_item_id = settings.QB_TAX_ITEM_ID or None
+                    if not _tax_item_id:
+                        # NEVER fall back to item "1" (Services) — that would book
+                        # collected tax as INCOME and inflate revenue. Skip the line
+                        # and log loudly so it's caught instead.
+                        logger.critical(
+                            "QB invoice: tax_amount=%.2f but QB_TAX_ITEM_ID not set — "
+                            "tax line SKIPPED to avoid misclassifying tax as income. "
+                            "Set QB_TAX_ITEM_ID to the 'Sales Tax Collected' liability item.",
+                            _tax_amt,
+                        )
+                    else:
+                        line_items.append({
+                            "description": "Sales Tax",
+                            "quantity": 1,
+                            "unit_price": _tax_amt,
+                            "amount": _tax_amt,
+                            "qb_item_id": _tax_item_id,
+                        })
+                        logger.info(
+                            "QB invoice: tax_amount=%.2f added as line item (qb_item_id=%s)",
+                            _tax_amt, _tax_item_id,
+                        )
+
                 # Parse shipping address for QB AST (Automated Sales Tax)
                 import json as _json
                 _addr_raw: dict = {}

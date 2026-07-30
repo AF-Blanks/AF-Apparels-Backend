@@ -490,9 +490,12 @@ class QuickBooksService:
                 "ItemRef": {"value": _qb_item_id or "1"},
                 "Qty": item["quantity"],
                 "UnitPrice": float(item["unit_price"]),
-                # Mark line as taxable — QB Automated Sales Tax decides the actual
-                # jurisdiction-specific treatment (nexus, product/shipping taxability).
-                "TaxCodeRef": {"value": "TAX"},
+                # NON = non-taxable. QB's Automated Sales Tax is intentionally NOT
+                # used — we calculate tax ourselves at checkout (ZipTax/manual) and
+                # send the exact amount as its own "Sales Tax" line item (see
+                # quickbooks_tasks.py). Letting AST also calculate tax here would
+                # double-tax the invoice AND silently mismatch the customer's charge.
+                "TaxCodeRef": {"value": "NON"},
             }
             lines.append({
                 "Amount": float(item["amount"]),
@@ -505,9 +508,10 @@ class QuickBooksService:
             "CustomerRef": {"value": qb_customer_id},
             "DocNumber": order_number,
             "Line": lines,
-            # QB Automated Sales Tax — calculates tax based on ShipAddr
-            "TxnTaxDetail": {"TxnTaxCodeRef": {"value": "TAX"}},
-            "GlobalTaxCalculation": "TaxExcluded",
+            # AST disabled — tax comes in as its own line with the exact amount
+            # charged at checkout, so the invoice total always equals the customer's
+            # payment. NotApplicable tells QB not to compute any tax of its own.
+            "GlobalTaxCalculation": "NotApplicable",
         }
         if due_date:
             payload["DueDate"] = due_date
@@ -851,7 +855,12 @@ class QuickBooksService:
                     "ItemRef": {"value": _qb_item_id or "1"},
                     "Qty": item["quantity"],
                     "UnitPrice": float(item["unit_price"]),
-                    "TaxCodeRef": {"value": "TAX"},
+                    # NON — AST disabled, mirroring create_invoice. If tax was
+                    # charged on the original sale and is being refunded, it comes
+                    # in as its own explicit "Sales Tax" line (qb_item_id =
+                    # QB_TAX_ITEM_ID) so the credit reverses exactly what was
+                    # collected — never QB's own recalculation.
+                    "TaxCodeRef": {"value": "NON"},
                 },
             })
 
@@ -859,8 +868,9 @@ class QuickBooksService:
             "CustomerRef": {"value": qb_customer_id},
             "DocNumber": doc_number,
             "Line": lines,
-            "TxnTaxDetail": {"TxnTaxCodeRef": {"value": "TAX"}},
-            "GlobalTaxCalculation": "TaxExcluded",
+            # AST disabled — see create_invoice. Tax reversal (if any) is an
+            # explicit line, so the credit memo never books a tax QB invented.
+            "GlobalTaxCalculation": "NotApplicable",
         }
         if shipping_addr:
             payload["ShipAddr"] = shipping_addr
