@@ -114,6 +114,18 @@ async def get_analytics(
     )
     conversion_rate = round(paid_orders / total_orders_all * 100, 1) if total_orders_all else 0.0
 
+    # Total sales tax collected in the period (paid orders only). This is the
+    # exact amount the app sends to QuickBooks as the "Sales Tax Collected" line
+    # (single tax engine), so it equals QB's Sales Tax Payable — same number.
+    tax_collected_q = await db.execute(
+        select(func.coalesce(func.sum(Order.tax_amount), 0)).where(
+            Order.created_at >= cur_start_dt,
+            Order.created_at <= cur_end_dt,
+            Order.payment_status == "paid",
+        )
+    )
+    total_tax_collected = float(tax_collected_q.scalar() or 0)
+
     # ── Customer counts ───────────────────────────────────────────────────────
     # Total unique companies that ever ordered
     total_cust_q = await db.execute(
@@ -310,6 +322,7 @@ async def get_analytics(
             "orders_change_percent": _pct_change(cur_orders, prev_orders),
             "customers_change_percent": _pct_change(ordered_this_period, prev_customers),
             "conversion_rate": conversion_rate,
+            "total_tax_collected": round(total_tax_collected, 2),
         },
         "revenue_chart": revenue_chart,
         "order_status_breakdown": order_status_breakdown,
