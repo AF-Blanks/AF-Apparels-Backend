@@ -67,6 +67,7 @@ class VariantOut(BaseModel):
     compare_price: Decimal | None = None
     # msrp: Decimal | None = None  # deprecated in admin UI; kept in DB for guest pricing
     cost_per_item: Decimal | None = None
+    avg_cost: Decimal | None = None       # local weighted-avg from PO receipts (admin only)
     country_of_origin: str | None = None
     weight_grams: float | None = None
     effective_price: Decimal | None = None  # populated by pricing layer

@@ -434,6 +434,49 @@ async def update_variant(
     return {"id": str(variant.id), "sku": variant.sku}
 
 
+class UpdatePriceRequest(BaseModel):
+    retail_price: Decimal
+
+
+@router.post("/{product_id}/variants/{variant_id}/update-price")
+async def update_variant_price(
+    product_id: UUID,
+    variant_id: UUID,
+    payload: UpdatePriceRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Merchant-approved selling-price change.
+
+    Sets the variant's retail_price and pushes the new price to QuickBooks in
+    the background (rate-limited). Never called automatically — only when an
+    admin explicitly clicks "Update Price" in the pricing panel. Uses
+    sync_inventory_to_qb (which updates the QB item's UnitPrice) rather than
+    sync_variant_to_qb (which only creates and would skip an existing item).
+    """
+    variant = (await db.execute(
+        select(ProductVariant).where(
+            ProductVariant.id == variant_id,
+            ProductVariant.product_id == product_id,
+        )
+    )).scalar_one_or_none()
+    if not variant:
+        raise NotFoundError("Variant not found")
+    if payload.retail_price < 0:
+        raise HTTPException(status_code=422, detail="Price cannot be negative")
+
+    variant.retail_price = payload.retail_price
+    await db.commit()
+    await redis_delete_pattern("products:list:*")
+
+    try:
+        from app.tasks.quickbooks_tasks import sync_inventory_to_qb
+        sync_inventory_to_qb.delay(str(variant.id))
+    except Exception as _exc:
+        logger.warning("QB price sync dispatch failed: %s", _exc)
+
+    return {"id": str(variant.id), "retail_price": str(variant.retail_price)}
+
+
 async def _load_category(db: AsyncSession, category_id: UUID) -> Category | None:
     """Load category with children eagerly to avoid async lazy-load MissingGreenletError."""
     result = await db.execute(
@@ -590,6 +633,28 @@ async def get_admin_product(slug: str, db: AsyncSession = Depends(get_db)):
         variant.stock_quantity = sum(
             rec.quantity for rec in variant.inventory_records if rec.quantity > 0
         )
+
+    # Weighted-average cost per variant, computed locally from PO receipt history
+    # (SUM(qty*cost)/SUM(qty)) — matches QuickBooks' logic without any QB API call.
+    # Null when the variant has no receipts yet (frontend falls back to last cost).
+    from sqlalchemy import text as _pc_text
+    _variant_ids = [v.id for v in product.variants]
+    if _variant_ids:
+        _avg_rows = await db.execute(
+            _pc_text(
+                "SELECT li.product_variant_id AS vid, "
+                "       SUM(ri.qty_received * ri.unit_cost_actual) "
+                "         / NULLIF(SUM(ri.qty_received), 0) AS avg_cost "
+                "FROM po_receiving_items ri "
+                "JOIN po_line_items li ON li.id = ri.po_line_item_id "
+                "WHERE li.product_variant_id = ANY(:vids) "
+                "GROUP BY li.product_variant_id"
+            ),
+            {"vids": _variant_ids},
+        )
+        _avg_map = {row.vid: row.avg_cost for row in _avg_rows}
+        for variant in product.variants:
+            variant.avg_cost = _avg_map.get(variant.id)
 
     # Attach review stats
     from sqlalchemy import func as _func
