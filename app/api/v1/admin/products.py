@@ -443,6 +443,7 @@ async def update_variant_price(
     product_id: UUID,
     variant_id: UUID,
     payload: UpdatePriceRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """Merchant-approved selling-price change.
@@ -452,6 +453,7 @@ async def update_variant_price(
     admin explicitly clicks "Update Price" in the pricing panel. Uses
     sync_inventory_to_qb (which updates the QB item's UnitPrice) rather than
     sync_variant_to_qb (which only creates and would skip an existing item).
+    Records the old→new price in the audit log for accounting traceability.
     """
     variant = (await db.execute(
         select(ProductVariant).where(
@@ -464,7 +466,23 @@ async def update_variant_price(
     if payload.retail_price < 0:
         raise HTTPException(status_code=422, detail="Price cannot be negative")
 
+    old_price = str(variant.retail_price)
     variant.retail_price = payload.retail_price
+
+    # Audit trail: who changed the price, from what to what (immutable record).
+    import json as _json
+    from app.models.system import AuditLog
+    _admin_id = getattr(request.state, "user_id", None)
+    db.add(AuditLog(
+        admin_user_id=UUID(_admin_id) if _admin_id else None,
+        action="UPDATE",
+        entity_type="variant_price",
+        entity_id=str(variant_id),
+        old_values=_json.dumps({"retail_price": old_price, "sku": variant.sku}),
+        new_values=_json.dumps({"retail_price": str(payload.retail_price)}),
+        ip_address=getattr(getattr(request, "client", None), "host", None),
+    ))
+
     await db.commit()
     await redis_delete_pattern("products:list:*")
 

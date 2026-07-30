@@ -1198,6 +1198,35 @@ async def create_rma(
     if not company_id or not user_id:
         raise ForbiddenError("Company account required")
 
+    # ── Over-return prevention ────────────────────────────────────────────────
+    # A customer must never return more than they purchased — across ALL of this
+    # order's RMAs, not just this one. Sum the already-requested quantity per
+    # order-item (excluding rejected RMAs) and reject anything that would exceed
+    # the ordered quantity. Prevents double refunds / double restocks.
+    from app.core.exceptions import ValidationError as _ValidationError
+    from app.models.order import OrderItem as _OrderItem
+    from sqlalchemy import func as _rma_func
+    for item in payload.items:
+        if item.quantity <= 0:
+            raise _ValidationError("Return quantity must be at least 1.")
+        ordered_qty = (await db.execute(
+            select(_OrderItem.quantity).where(_OrderItem.id == item.order_item_id)
+        )).scalar_one_or_none()
+        if ordered_qty is None:
+            raise _ValidationError("One of the items is not part of this order.")
+        already_returned = int((await db.execute(
+            select(_rma_func.coalesce(_rma_func.sum(RMAItemModel.quantity), 0))
+            .join(RMARequest, RMARequest.id == RMAItemModel.rma_id)
+            .where(RMAItemModel.order_item_id == item.order_item_id)
+            .where(RMARequest.status != "rejected")
+        )).scalar() or 0)
+        if already_returned + item.quantity > ordered_qty:
+            remaining = max(0, ordered_qty - already_returned)
+            raise _ValidationError(
+                f"Cannot return {item.quantity} of this item — only {remaining} of {ordered_qty} "
+                f"remain returnable ({already_returned} already returned)."
+            )
+
     import random
     rma_number = f"RMA-{random.randint(100000, 999999)}"
 

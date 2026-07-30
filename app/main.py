@@ -548,6 +548,19 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            # qb_sync_log.entity_type: enum -> varchar so po_receipt/rma/etc. can be
+            # logged (the old enum only allowed company/order). Idempotent.
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='qb_sync_log' AND column_name='entity_type' AND data_type='USER-DEFINED'
+                    ) THEN
+                        ALTER TABLE qb_sync_log ALTER COLUMN entity_type TYPE VARCHAR(50) USING entity_type::text;
+                    END IF;
+                END$$;
+            """))
             await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS marketing_campaigns (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

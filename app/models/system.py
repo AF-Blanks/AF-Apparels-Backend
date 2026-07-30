@@ -49,9 +49,9 @@ class QBSyncLog(BaseModel):
 
     __tablename__ = "qb_sync_log"
 
-    entity_type: Mapped[str] = mapped_column(
-        Enum("company", "order", name="qb_entity_type"), nullable=False
-    )
+    # Plain string (not an enum) so new synced entity types — po_receipt, rma,
+    # etc. — can be logged without a schema change each time.
+    entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
     entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     # Status: pending | success | failed | retry
     status: Mapped[str] = mapped_column(

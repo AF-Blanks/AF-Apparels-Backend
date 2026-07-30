@@ -100,6 +100,9 @@ async def adjust_inventory(
     db: AsyncSession = Depends(get_db),
 ):
     svc = InventoryService(db)
+    # adjust_stock_with_log already pushes the corrected stock to QuickBooks
+    # (sync_qb=True by default), so a manual adjustment stays in lock-step with
+    # QB — no extra dispatch needed here.
     record = await svc.adjust_stock_with_log(
         variant_id=payload.variant_id,
         warehouse_id=payload.warehouse_id,
@@ -108,16 +111,6 @@ async def adjust_inventory(
         notes=payload.notes,
     )
     await db.commit()
-
-    # Push the corrected stock to QuickBooks so a manual adjustment (damage,
-    # loss, count correction) keeps QB's inventory in lock-step with the app.
-    # Without this the two drift apart (app says 98, QB still says 100).
-    try:
-        from app.tasks.quickbooks_tasks import sync_inventory_to_qb
-        sync_inventory_to_qb.delay(str(payload.variant_id))
-    except Exception as _e:
-        import logging
-        logging.getLogger(__name__).warning("QB inventory sync dispatch failed: %s", _e)
 
     return AdjustmentResult(
         variant_id=record.variant_id,
