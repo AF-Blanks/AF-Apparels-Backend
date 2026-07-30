@@ -26,6 +26,44 @@ router = APIRouter(prefix="/guest", tags=["guest"])
 logger = logging.getLogger(__name__)
 
 
+def _dispatch_qb_inventory_sync(variant_ids: list[str], *, countdown: int, context: str) -> None:
+    """Queue a SINGLE batched QB inventory-sync task for many variants.
+
+    This is the optimization: instead of one Celery task (and its 2 QB calls +
+    retry amplification) per variant, we queue ONE task for the whole batch.
+
+    Safety: if the batch task is not present in quickbooks_tasks.py yet, we fall
+    back to the original per-variant dispatch so inventory sync is NEVER silently
+    dropped. No existing behaviour is lost.
+    """
+    if not variant_ids:
+        return
+    try:
+        from app.tasks.quickbooks_tasks import sync_inventory_batch_to_qb as _batch
+        _batch.apply_async(args=[variant_ids], countdown=countdown)
+        logger.info(
+            "QB inventory batch sync queued for %d variants (%s)",
+            len(variant_ids), context,
+        )
+        return
+    except (ImportError, AttributeError):
+        logger.warning(
+            "sync_inventory_batch_to_qb not available; falling back to per-variant dispatch (%s)",
+            context,
+        )
+    except Exception as exc:
+        logger.warning("QB inventory batch sync dispatch failed (%s): %s", context, exc)
+        return
+
+    # Fallback — preserve prior behaviour rather than skipping the sync entirely.
+    try:
+        from app.tasks.quickbooks_tasks import sync_inventory_to_qb as _single
+        for _vid in variant_ids:
+            _single.apply_async(args=[_vid], countdown=countdown)
+    except Exception as exc:
+        logger.warning("QB inventory per-variant fallback dispatch failed (%s): %s", context, exc)
+
+
 async def _create_or_get_retail_user(
     email: str,
     first_name: str,
@@ -237,15 +275,13 @@ async def guest_checkout(
         # accepted the request — a declined card returns normally with
         # status="DECLINED", no exception. Without this check the order
         # still went through as "paid" with nothing actually collected.
-        # TEMPORARILY DISABLED for a client demo — MUST be re-enabled
-        # immediately after. While off, a declined card still creates a
-        # "paid" order with nothing collected (the exact bug this check
-        # exists to prevent).
-        # if qb_payment_status != "CAPTURED":
-        #     raise PaymentError(
-        #         f"Payment was not approved (status: {qb_payment_status}). "
-        #         "Please check your card details or try a different payment method."
-        #     )
+        # charge_card captures by default, so success returns "CAPTURED";
+        # anything else must abort before the order is created.
+        if qb_payment_status != "CAPTURED":
+            raise PaymentError(
+                f"Payment was not approved (status: {qb_payment_status}). "
+                "Please check your card details or try a different payment method."
+            )
         _payment_status = "paid"
 
     # 4. Generate order number — delegate to the single shared generator so
@@ -315,6 +351,7 @@ async def guest_checkout(
     # 6. Create OrderItem records + deduct inventory
     from sqlalchemy import update as _update
 
+    _variant_ids_to_sync: list[str] = []
     for item_data in order_items_data:
         db.add(OrderItem(order_id=order.id, **item_data))
 
@@ -336,12 +373,17 @@ async def guest_checkout(
                 )
                 qty_to_deduct -= deduct
 
-        # Sync updated stock to QB after each variant deduction
-        try:
-            from app.tasks.quickbooks_tasks import sync_inventory_to_qb as _siqb
-            _siqb.apply_async(args=[str(item_data["variant_id"])], countdown=15)
-        except Exception as _exc:
-            logger.warning("QB inventory sync dispatch failed: %s", _exc)
+        # Collect this variant for a single batched QB sync after the loop
+        # (dedup so a variant is never synced twice within one order).
+        _vid = str(item_data["variant_id"])
+        if _vid not in _variant_ids_to_sync:
+            _variant_ids_to_sync.append(_vid)
+
+    # Sync all updated stock to QB in ONE batched task instead of one task per
+    # variant. countdown=15 keeps the original buffer so the DB commit lands first.
+    _dispatch_qb_inventory_sync(
+        _variant_ids_to_sync, countdown=15, context=f"guest order {order.order_number}"
+    )
 
     # Bust product detail Redis cache so stock shows correctly for everyone
     try:
