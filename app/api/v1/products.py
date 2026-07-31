@@ -172,6 +172,58 @@ async def download_product_images(
     )
 
 
+@router.get("/{product_id}/download-image/{image_id}")
+async def download_single_product_image(
+    product_id: uuid.UUID,
+    image_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Stream ONE product image as an attachment so the browser force-downloads it
+    (instead of opening the image in a new tab, which is what a direct cross-origin
+    link does)."""
+    import boto3
+    from fastapi.responses import StreamingResponse
+
+    from app.core.config import settings
+    from app.models.product import Product, ProductImage
+
+    img = (await db.execute(
+        select(ProductImage).where(ProductImage.id == image_id, ProductImage.product_id == product_id)
+    )).scalar_one_or_none()
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    url = img.url_large or getattr(img, "url_medium", None) or ""
+    if not url:
+        raise HTTPException(status_code=404, detail="Image has no downloadable file")
+    key = url.split(".amazonaws.com/", 1)[-1] if url.startswith("https://") else url.lstrip("/")
+
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_S3_REGION,
+    )
+    try:
+        obj = s3.get_object(Bucket=settings.AWS_S3_BUCKET, Key=key)
+        img_bytes = obj["Body"].read()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Could not fetch image from storage")
+
+    slug = (await db.execute(select(Product.slug).where(Product.id == product_id))).scalar_one_or_none() or "product"
+    ext = key.rsplit(".", 1)[-1].lower() if "." in key else "jpg"
+    color = (img.alt_text or "image").strip()
+    safe_color = "".join(ch for ch in color if ch.isalnum() or ch in "-_").strip("-_") or "image"
+    filename = f"{slug}-{safe_color}.{ext}"
+    media_type = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
+
+    return StreamingResponse(
+        iter([img_bytes]),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/{product_id}/download-flyer")
 async def download_product_flyer(
     product_id: uuid.UUID,
