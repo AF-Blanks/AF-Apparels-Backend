@@ -949,3 +949,76 @@ def send_marketing_email(self, user_id: str, to_email: str, first_name: str, sub
     except Exception as exc:
         delay = 60 * (2 ** self.request.retries)
         raise self.retry(exc=exc, countdown=delay)
+
+
+# ─── Customer password setup (bulk "Set your password" invite) ────────────────
+
+def _password_setup_html(first_name: str, setup_url: str) -> str:
+    """Branded 'Set Your Password' email for imported/existing customers."""
+    return (
+        '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\','
+        'Helvetica,Arial,sans-serif;max-width:600px;margin:0 auto;background:#ffffff">'
+        '<div style="background:#1B3A5C;padding:26px 32px;text-align:center;'
+        'border-bottom:3px solid #E8242A">'
+        '<span style="font-size:26px;font-weight:900;color:#fff;letter-spacing:.02em">AF APPARELS</span>'
+        '</div>'
+        '<div style="padding:34px 32px;background:#fff;color:#2A2830">'
+        f'<h2 style="margin:0 0 14px;color:#1B3A5C;font-size:22px">Welcome, {first_name}!</h2>'
+        '<p style="margin:0 0 14px;font-size:15px;line-height:1.6;color:#374151">'
+        'Your AF Apparels wholesale account is ready. To start placing orders, '
+        'just set your password using the secure button below.</p>'
+        '<p style="margin:28px 0;text-align:center">'
+        f'<a href="{setup_url}" style="background:#E8242A;color:#fff;padding:14px 34px;'
+        'border-radius:8px;text-decoration:none;font-weight:800;font-size:15px;'
+        'display:inline-block">Set Your Password &rarr;</a></p>'
+        '<p style="margin:0 0 8px;font-size:13px;color:#6b7280;line-height:1.6">'
+        'This link is valid for 14 days. If the button doesn&rsquo;t work, copy and '
+        'paste this address into your browser:</p>'
+        f'<p style="margin:0 0 20px;font-size:12px;color:#1B3A5C;word-break:break-all">{setup_url}</p>'
+        '<div style="border-top:1px solid #e5e7eb;margin-top:24px;padding-top:18px">'
+        '<p style="color:#9ca3af;font-size:12px;margin:0 0 4px">'
+        'Didn&rsquo;t expect this? You can safely ignore this email.</p>'
+        '<p style="color:#9ca3af;font-size:12px;margin:0">Questions? Call '
+        '<a href="tel:2142727213" style="color:#1B3A5C;font-weight:700">+1\xa0(214)\xa0272-7213</a> '
+        'or <a href="mailto:info@afblanks.com" style="color:#1B3A5C">info@afblanks.com</a></p>'
+        '</div></div></div>'
+    )
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_password_setup_email(self, user_id: str, to_email: str, first_name: str) -> dict:
+    """Generate a long-lived (14-day) password-set token for ONE customer and
+    email them a branded 'Set Your Password' link.
+
+    Queued one task per recipient (not a synchronous loop) so Celery's own worker
+    concurrency paces outbound Resend calls — no burst/rate spike.
+    """
+    try:
+        async def _send():
+            import secrets
+            from datetime import datetime, timedelta, timezone
+            from sqlalchemy import text as _t
+            from app.core.config import settings as _s
+            from app.services.email_service import EmailService
+
+            async with AsyncSessionLocal() as db:
+                token = secrets.token_urlsafe(32)
+                expires = datetime.now(timezone.utc) + timedelta(days=14)
+                # Reuse the password-reset token flow (same /reset-password page)
+                await db.execute(
+                    _t("UPDATE users SET password_reset_token=:tok, password_reset_expires=:exp "
+                       "WHERE id = CAST(:uid AS UUID)"),
+                    {"tok": token, "exp": expires, "uid": user_id},
+                )
+                await db.commit()
+                setup_url = f"{_s.FRONTEND_URL}/reset-password?token={token}"
+                ok = EmailService(db).send_raw(
+                    to_email=to_email,
+                    subject="Set Your Password — AF Apparels",
+                    body_html=_password_setup_html(first_name or "there", setup_url),
+                )
+                return {"status": "sent" if ok else "failed", "user_id": user_id}
+        return _run(_send())
+    except Exception as exc:
+        delay = 60 * (2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)

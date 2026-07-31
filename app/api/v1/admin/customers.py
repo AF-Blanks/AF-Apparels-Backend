@@ -503,3 +503,42 @@ async def get_customer_stats(company_id: UUID, db: AsyncSession = Depends(get_db
         "total_spent": float(row.total_spent or 0),
         "last_order_date": row.last_order_date,
     }
+
+
+# ─── Bulk "Set Your Password" invite to all active customers ──────────────────
+
+def _password_setup_recipients():
+    """Active customer users (wholesale company members) with a login email."""
+    return (
+        select(User.id, User.email, User.first_name)
+        .join(CompanyUser, CompanyUser.user_id == User.id)
+        .join(Company, Company.id == CompanyUser.company_id)
+        .where(User.is_active.is_(True), CompanyUser.is_active.is_(True), Company.status == "active")
+        .distinct()
+    )
+
+
+@router.get("/customers/password-setup-count")
+async def password_setup_count(db: AsyncSession = Depends(get_db)) -> dict:
+    """How many customers would receive the 'Set Your Password' email."""
+    result = await db.execute(select(func.count()).select_from(_password_setup_recipients().subquery()))
+    return {"count": result.scalar_one()}
+
+
+@router.post("/customers/send-password-setup")
+async def send_password_setup_to_all(db: AsyncSession = Depends(get_db)) -> dict:
+    """Queue a branded 'Set Your Password' email to EVERY active customer.
+
+    Does NOT send synchronously — one Celery task per recipient, so outbound
+    email is paced by the worker (no burst / rate spike). Each email carries a
+    unique 14-day token to the existing /reset-password page.
+    """
+    from app.tasks.email_tasks import send_password_setup_email
+
+    rows = (await db.execute(_password_setup_recipients())).all()
+    recipients = [r for r in rows if r[1]]  # must have an email
+    if not recipients:
+        raise HTTPException(status_code=422, detail="No active customers with an email to send to")
+    for user_id, email, first_name in recipients:
+        send_password_setup_email.delay(str(user_id), email, first_name or "there")
+    return {"queued": len(recipients)}
