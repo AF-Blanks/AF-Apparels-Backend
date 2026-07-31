@@ -293,15 +293,14 @@ async def _confirm_checkout_inner(
         # declined/errored charge must never result in an order: without
         # this check, a declined card still produced a fully "paid" order
         # (confirmed, inventory deducted, invoice+payment synced to QB) with
-        # no money actually collected.
-        # DISABLED during testing (dummy 4111 cards don't return CAPTURED).
-        # MUST be re-enabled before accepting REAL payments — while off, a
-        # declined card still creates a "paid" order with nothing collected.
-        # if qb_payment_status != "CAPTURED":
-        #     raise PaymentError(
-        #         f"Payment was not approved (status: {qb_payment_status}). "
-        #         "Please check your card details or try a different payment method."
-        #     )
+        # no money actually collected. charge_card/charge_saved_card capture by
+        # default, so a successful charge returns status "CAPTURED"; any other
+        # status (DECLINED, etc.) aborts here before an order is created.
+        if qb_payment_status != "CAPTURED":
+            raise PaymentError(
+                f"Payment was not approved (status: {qb_payment_status}). "
+                "Please check your card details or try a different payment method."
+            )
 
     # ── Create order record ───────────────────────────────────────────────────
     order_svc = OrderService(db)
