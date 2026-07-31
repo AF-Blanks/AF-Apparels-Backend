@@ -181,6 +181,7 @@ async def create_company(
 # skipped, never overwritten.
 
 _SHOPIFY_HEADER_ALIASES: dict[str, list[str]] = {
+    "customer_id": ["customer id", "id"],
     "email": ["email"],
     "first_name": ["first name", "firstname"],
     "last_name": ["last name", "lastname"],
@@ -239,7 +240,15 @@ async def import_companies_csv(
     if "email" not in cols:
         raise HTTPException(status_code=400, detail="CSV is missing an Email column")
 
-    created, skipped_duplicate, skipped_no_email, errors = 0, 0, 0, []
+    import hashlib
+    from sqlalchemy import text as _sql_text
+
+    # Discount-group customer tags (case-insensitive → exact spelling), so a CSV
+    # tag "tier-3" assigns the "Tier-3" discount group.
+    _grp_rows = (await db.execute(_sql_text("SELECT customer_tag FROM discount_groups WHERE customer_tag IS NOT NULL"))).all()
+    group_tag_map = {(r[0] or "").strip().lower(): (r[0] or "").strip() for r in _grp_rows if (r[0] or "").strip()}
+
+    created, updated, skipped_no_email, errors = 0, 0, 0, []
 
     for i, row in enumerate(reader, start=2):  # start=2: row 1 is the header
         def get(field: str) -> str:
@@ -256,19 +265,49 @@ async def import_companies_csv(
             return ""
 
         email = get("email").lower()
+        # No-email rows: create anyway with a deterministic placeholder email
+        # (unique per Shopify Customer ID, so re-imports match instead of
+        # duplicating). .invalid never resolves, so no mail can ever reach it.
         if not email:
-            skipped_no_email += 1
-            continue
+            cid = get("customer_id") or hashlib.md5(
+                f"{get('first_name')}|{get('last_name')}|{get('phone')}|{get('company')}".encode()
+            ).hexdigest()[:12]
+            if not cid:
+                skipped_no_email += 1
+                continue
+            email = f"import-{cid}@afblanks-noemail.invalid"
 
-        existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
-        if existing:
-            skipped_duplicate += 1
-            continue
+        # Discount-group tags (tier / Stephen-5 / RAJ-6) from the CSV Tags column
+        matched_tags: list[str] = []
+        for t in (get("tags") or "").split(","):
+            t = t.strip()
+            key = t.lower()
+            if t and key in group_tag_map and group_tag_map[key] not in matched_tags:
+                matched_tags.append(group_tag_map[key])
+        tax_exempt = get("tax_exempt").lower() in ("yes", "true", "1")
 
         try:
-            # SAVEPOINT per row: if this row fails for any reason (bad data,
-            # constraint violation), roll back just this row instead of
-            # poisoning the whole import so every later row also fails.
+            existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+            if existing:
+                # EXISTING customer — never touch their profile (name/address/
+                # contact). Only (re)assign the discount-group tier + tax-exempt
+                # from the CSV, which is the whole point of the run.
+                async with db.begin_nested():
+                    cu = (await db.execute(
+                        select(CompanyUser).where(CompanyUser.user_id == existing.id)
+                    )).scalars().first()
+                    if cu:
+                        company = (await db.execute(
+                            select(Company).where(Company.id == cu.company_id)
+                        )).scalar_one_or_none()
+                        if company:
+                            if matched_tags:            # only set when CSV has a tier tag
+                                company.tags = matched_tags
+                            company.tax_exempt = tax_exempt
+                updated += 1
+                continue
+
+            # SAVEPOINT per row: a bad row rolls back only itself.
             async with db.begin_nested():
                 first_name = get("first_name") or "Customer"
                 last_name = get("last_name")
@@ -279,8 +318,6 @@ async def import_companies_csv(
                     notes_parts.append(f"Shopify total spent: ${get('total_spent')}")
                 if get("total_orders"):
                     notes_parts.append(f"Shopify total orders: {get('total_orders')}")
-                if get("accepts_marketing"):
-                    notes_parts.append(f"Shopify marketing consent: {get('accepts_marketing')}")
                 if get("tags"):
                     notes_parts.append(f"Shopify tags: {get('tags')}")
                 if get("note"):
@@ -289,7 +326,7 @@ async def import_companies_csv(
                 company = Company(
                     name=company_name,
                     phone=get("phone") or None,
-                    company_email=email,
+                    company_email=email if not email.endswith("@afblanks-noemail.invalid") else None,
                     address_line1=get("address1") or None,
                     address_line2=get("address2") or None,
                     city=get("city") or None,
@@ -297,7 +334,8 @@ async def import_companies_csv(
                     postal_code=get("zip") or None,
                     country=get("country") or "US",
                     status="active",
-                    tax_exempt=get("tax_exempt").lower() in ("yes", "true", "1"),
+                    tax_exempt=tax_exempt,
+                    tags=matched_tags or None,
                     admin_notes="\n".join(notes_parts),
                 )
                 db.add(company)
@@ -325,7 +363,8 @@ async def import_companies_csv(
     await db.commit()
     return {
         "created": created,
-        "skipped_duplicate": skipped_duplicate,
+        "updated": updated,
+        "skipped_duplicate": 0,  # existing are now updated, not skipped
         "skipped_no_email": skipped_no_email,
         "errors": errors,
     }
