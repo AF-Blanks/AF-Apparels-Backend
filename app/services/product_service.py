@@ -56,7 +56,6 @@ class ProductService:
         # No listing cache here — the catalog is small enough that querying the DB
         # directly every time is cheap, and it avoids an entire class of staleness
         # bugs (guest vs. authenticated cache keys drifting out of sync, etc.).
-
         query = (
             select(Product)
             .options(
@@ -100,24 +99,18 @@ class ProductService:
             g = params.gender.lower().replace("'", "").replace(" ", "")
             if g in ("mens", "men", "male"):
                 query = query.where(
-                    or_(
-                        Product.gender.op("~*")("(^|,)mens(,|$)"),
-                        Product.gender.op("~*")("(^|,)unisex(,|$)"),
-                    )
+                    or_(Product.gender == "mens", Product.gender == "unisex")
                 )
             elif g in ("womens", "women", "female"):
                 query = query.where(
-                    or_(
-                        Product.gender.op("~*")("(^|,)womens(,|$)"),
-                        Product.gender.op("~*")("(^|,)unisex(,|$)"),
-                    )
+                    or_(Product.gender == "womens", Product.gender == "unisex")
                 )
             elif g == "unisex":
-                query = query.where(Product.gender.op("~*")("(^|,)unisex(,|$)"))
+                query = query.where(Product.gender == "unisex")
             elif g in ("youth", "kids", "children"):
-                query = query.where(Product.gender.op("~*")("(^|,)youth(,|$)"))
+                query = query.where(Product.gender == "youth")
             else:
-                query = query.where(Product.gender.op("~*")(f"(^|,){g}(,|$)"))
+                query = query.where(func.lower(Product.gender) == g)
 
         if params.fabric:
             query = query.where(Product.fabric.ilike(f"%{params.fabric}%"))
@@ -343,9 +336,11 @@ class ProductService:
                     variant.effective_price = pricing_svc.calculate_effective_price(
                         variant.retail_price, discount_percent
                     )
-                # Use real inventory; 0 in stock_map means no records → treat as unlimited (9999)
+                # Use real inventory. No inventory record for a variant now means
+                # 0 (out of stock), NOT unlimited — otherwise a variant that was
+                # never stocked shows falsely "In Stock".
                 qty = stock_map.get(variant.id)
-                variant.stock_quantity = qty if qty is not None else 9999
+                variant.stock_quantity = qty if qty is not None else 0
 
         return products
 
