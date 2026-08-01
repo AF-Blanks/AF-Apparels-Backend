@@ -443,6 +443,7 @@ def send_order_shipped_email(self, order_id: str, tracking_number: str = "") -> 
                             "order_number": order.order_number,
                             "order_total": f"${float(order.total):.2f}",
                             "tracking_number": tracking,
+                            "tracking_url": order.tracking_url or "",
                             "carrier": carrier,
                             "shipped_date": shipped_date,
                             "delivery_address": delivery_address,

@@ -47,9 +47,14 @@
 <p style="color:#374151;font-size:14px;margin:0 0 2px;">Warm regards,</p>
 <p style="color:#1c3557;font-size:14px;font-weight:700;margin:0 0 28px;">The AF Apparels Wholesale Team</p>
 
+{% if tracking_url %}
+<p style="text-align:center;margin:0 0 12px;">
+  <a href="{{ tracking_url }}" style="display:inline-block;background:#1c3557;color:#ffffff;padding:13px 36px;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:.3px;">Track Your Shipment &rarr;</a>
+</p>
+{% endif %}
 {% if order_url %}
 <p style="text-align:center;margin:0;">
-  <a href="{{ order_url }}" style="display:inline-block;background:#E8242A;color:#ffffff;padding:13px 36px;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:.3px;">Track Your Order &rarr;</a>
+  <a href="{{ order_url }}" style="display:inline-block;background:#E8242A;color:#ffffff;padding:13px 36px;border-radius:6px;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:.3px;">View Order Details &rarr;</a>
 </p>
 {% endif %}
 {% endblock %}

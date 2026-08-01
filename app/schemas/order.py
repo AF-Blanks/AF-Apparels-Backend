@@ -254,6 +254,7 @@ class SendInvoicePayload(BaseModel):
 class OrderStatusUpdate(BaseModel):
     status: str
     tracking_number: str | None = None
+    tracking_url: str | None = None
     courier: str | None = None
     courier_service: str | None = None
     shipping_cost: Decimal | None = None

@@ -882,6 +882,8 @@ async def update_order_status(
 
     if payload.tracking_number is not None:
         order.tracking_number = payload.tracking_number
+    if payload.tracking_url is not None:
+        order.tracking_url = payload.tracking_url
     if payload.courier is not None:
         order.courier = payload.courier
     if payload.courier_service is not None:
