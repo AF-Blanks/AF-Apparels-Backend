@@ -140,17 +140,38 @@ async def sales_report(
     gross_revenue = float(totals["total_revenue"] or 0)
     net_revenue = max(0.0, gross_revenue - float(refund_total))
 
+    # Fully-returned orders (approved refunds covering the whole product
+    # subtotal) shouldn't count as sales orders — same reasoning as netting
+    # revenue. Partial returns still count (the customer kept part of the order).
+    fully_returned_q = (
+        select(Order.id)
+        .join(RMARequest, RMARequest.order_id == Order.id)
+        .where(
+            Order.created_at.between(start, end),
+            Order.status.notin_(["cancelled", "refunded"]),
+            RMARequest.status == "approved",
+            RMARequest.refund_status == "refunded",
+        )
+        .group_by(Order.id, Order.subtotal)
+        .having(func.coalesce(func.sum(RMARequest.refund_amount), 0) >= Order.subtotal)
+    )
+    fully_returned_count = len((await db.execute(fully_returned_q)).all())
+    gross_orders = int(totals["total_orders"] or 0)
+    net_orders = max(0, gross_orders - fully_returned_count)
+    net_aov = (net_revenue / net_orders) if net_orders else 0.0
+
     return {
         "period": period,
         "group_by": group_by,
         "date_from": start.date().isoformat(),
         "date_to": end.date().isoformat(),
         "summary": {
-            "total_orders": totals["total_orders"] or 0,
+            "total_orders": net_orders,
+            "gross_orders": gross_orders,
             "total_revenue": net_revenue,
             "gross_revenue": round(gross_revenue, 2),
             "total_refunds": round(float(refund_total), 2),
-            "avg_order_value": round(float(totals["avg_order_value"] or 0), 2),
+            "avg_order_value": round(net_aov, 2),
         },
         "period_data": [
             {

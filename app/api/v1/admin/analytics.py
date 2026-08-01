@@ -117,6 +117,27 @@ async def get_analytics(
 
     cur_revenue = max(0.0, cur_revenue - await _period_refunds(cur_start_dt, cur_end_dt))
     prev_revenue = max(0.0, prev_revenue - await _period_refunds(prev_start_dt, prev_end_dt))
+
+    # Net orders: drop fully-returned orders (refund covers the whole subtotal)
+    # from the count, same as revenue. Partial returns still count.
+    async def _fully_returned(s_dt, e_dt) -> int:
+        q = (
+            select(Order.id)
+            .join(RMARequest, RMARequest.order_id == Order.id)
+            .where(
+                Order.created_at >= s_dt,
+                Order.created_at <= e_dt,
+                Order.status.in_(ACTIVE_STATUSES),
+                RMARequest.status == "approved",
+                RMARequest.refund_status == "refunded",
+            )
+            .group_by(Order.id, Order.subtotal)
+            .having(func.coalesce(func.sum(RMARequest.refund_amount), 0) >= Order.subtotal)
+        )
+        return len((await db.execute(q)).all())
+
+    cur_orders = max(0, cur_orders - await _fully_returned(cur_start_dt, cur_end_dt))
+    prev_orders = max(0, prev_orders - await _fully_returned(prev_start_dt, prev_end_dt))
     aov = cur_revenue / cur_orders if cur_orders else 0
 
     # Paid orders for conversion rate
