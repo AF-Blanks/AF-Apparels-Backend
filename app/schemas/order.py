@@ -128,6 +128,10 @@ class OrderListItem(BaseModel):
     total: Decimal
     item_count: int
     created_at: datetime
+    # "returned" | "refunded" when an approved RMA exists for this order,
+    # else None. Surfaces the return on the order row (status stays the
+    # fulfillment state, e.g. "delivered").
+    return_status: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -156,6 +160,8 @@ class AdminOrderListItem(BaseModel):
     guest_name: str | None = None
     # Timeline entries for customer activity feed
     timeline: list[dict] = []
+    # "returned" | "refunded" when an approved RMA exists for this order.
+    return_status: str | None = None
 
     model_config = {"from_attributes": True}
 

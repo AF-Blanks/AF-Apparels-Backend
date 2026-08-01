@@ -42,6 +42,13 @@ async def list_orders(
     else:
         raise ForbiddenError("Company account required")
 
+    # Surface any approved return/refund on each row (status itself stays the
+    # fulfillment state, e.g. "delivered").
+    from app.services.order_service import get_return_status_map
+    ret_map = await get_return_status_map(db, [o.id for o in orders])
+    for o in orders:
+        o.return_status = ret_map.get(o.id)
+
     return PaginatedResponse(
         items=orders,
         total=total,

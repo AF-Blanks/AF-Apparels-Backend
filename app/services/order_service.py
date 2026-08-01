@@ -20,6 +20,31 @@ from app.schemas.order import AddressIn, CheckoutConfirmRequest, OrderListItem, 
 
 logger = logging.getLogger(__name__)
 
+
+async def get_return_status_map(db: AsyncSession, order_ids: list) -> dict:
+    """Map order_id -> "refunded" | "returned" for orders with an approved RMA.
+
+    Lets order rows show a return badge without changing the order's own
+    status (which stays the fulfillment state, e.g. "delivered"). "refunded"
+    wins over "returned" when a refund actually went back to the card.
+    """
+    if not order_ids:
+        return {}
+    from app.models.rma import RMARequest
+
+    rows = (await db.execute(
+        select(RMARequest.order_id, RMARequest.refund_status).where(
+            RMARequest.order_id.in_(order_ids),
+            RMARequest.status == "approved",
+        )
+    )).all()
+    result: dict = {}
+    for oid, refund_status in rows:
+        label = "refunded" if refund_status == "refunded" else "returned"
+        if result.get(oid) != "refunded":
+            result[oid] = label
+    return result
+
 _ORDER_COUNTER_KEY = "order:counter"
 
 

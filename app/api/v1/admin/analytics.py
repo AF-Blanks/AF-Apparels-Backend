@@ -95,6 +95,28 @@ async def get_analytics(
     cur_orders = int(cur_row.total_orders or 0)
     prev_revenue = float(prev_row.total_revenue or 0)
     prev_orders = int(prev_row.total_orders or 0)
+
+    # Net out refunds (approved RMAs refunded to card) so revenue is NET sales,
+    # matching QuickBooks after a credit memo. Subtract per period on the basis
+    # of the order's own created_at so current/previous stay comparable.
+    from app.models.rma import RMARequest
+
+    async def _period_refunds(s_dt, e_dt) -> float:
+        val = (await db.execute(
+            select(func.coalesce(func.sum(RMARequest.refund_amount), 0))
+            .select_from(RMARequest)
+            .join(Order, RMARequest.order_id == Order.id)
+            .where(
+                Order.created_at >= s_dt,
+                Order.created_at <= e_dt,
+                RMARequest.status == "approved",
+                RMARequest.refund_status == "refunded",
+            )
+        )).scalar() or 0
+        return float(val)
+
+    cur_revenue = max(0.0, cur_revenue - await _period_refunds(cur_start_dt, cur_end_dt))
+    prev_revenue = max(0.0, prev_revenue - await _period_refunds(prev_start_dt, prev_end_dt))
     aov = cur_revenue / cur_orders if cur_orders else 0
 
     # Paid orders for conversion rate

@@ -377,6 +377,9 @@ async def list_admin_orders(
     )
     rows = result.all()
 
+    from app.services.order_service import get_return_status_map
+    ret_map = await get_return_status_map(db, [row[0].id for row in rows])
+
     items = []
     for row in rows:
         order, company_name = row
@@ -384,6 +387,7 @@ async def list_admin_orders(
             select(func.count(OrderItem.id)).where(OrderItem.order_id == order.id)
         )).scalar_one()
         items.append(AdminOrderListItem(
+            return_status=ret_map.get(order.id),
             id=order.id,
             order_number=order.order_number,
             company_name=company_name,
@@ -1779,6 +1783,23 @@ async def update_rma(
             # via QB Payments; admin handles any repayment outside this flow.
             rma.refund_status = "not_applicable"
             rma.refund_amount = refund_amount
+
+        # Mirror a successful card refund on the company's statement so the
+        # return is visible there too. A "refund" line is informational — it
+        # does NOT change the account balance (the money went back to the card,
+        # not to store credit), matching how the statement endpoint treats it.
+        if rma.refund_status == "refunded" and order.company_id and refund_amount > 0:
+            from app.models.statement import StatementTransaction as _StmtTxn
+            from datetime import date as _stmt_date
+            db.add(_StmtTxn(
+                company_id=order.company_id,
+                transaction_date=_stmt_date.today().isoformat(),
+                description=f"Refund — Return {rma_number}",
+                transaction_type="refund",
+                amount=refund_amount,
+                reference_number=rma.qb_refund_id or rma_number,
+                order_id=order.id,
+            ))
 
         # Commit the refund outcome durably before attempting restock — a
         # restock failure below must not roll back a refund that already

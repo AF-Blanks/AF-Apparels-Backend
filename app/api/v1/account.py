@@ -1457,6 +1457,11 @@ async def list_statements(
         for txn in transactions:
             if txn.transaction_type == "charge":
                 running_balance += float(txn.amount)
+            elif txn.transaction_type == "refund":
+                # Card refund — money went back to the customer's card, not to
+                # store credit. Informational on the statement; it doesn't move
+                # the account balance (the matching charge/payment already did).
+                pass
             else:
                 running_balance -= float(txn.amount)
             items.append({
@@ -1514,13 +1519,15 @@ async def list_statements(
                 })
 
     total_charges = sum(i["amount"] for i in items if i["type"] == "charge")
-    total_payments = sum(i["amount"] for i in items if i["type"] != "charge")
+    total_payments = sum(i["amount"] for i in items if i["type"] in ("payment", "credit"))
+    total_refunds = sum(i["amount"] for i in items if i["type"] == "refund")
 
     return {
         "items": items,
         "summary": {
             "total_charges": round(total_charges, 2),
             "total_payments": round(total_payments, 2),
+            "total_refunds": round(total_refunds, 2),
             "current_balance": round(total_charges - total_payments, 2),
         },
     }
@@ -1657,6 +1664,11 @@ async def download_statement_pdf(
             running += float(txn.amount)
             charge_col = f"${float(txn.amount):,.2f}"
             credit_col = ""
+        elif txn.transaction_type == "refund":
+            # Card refund — shown in the credits column but balance-neutral
+            # (money returned to the card, not store credit).
+            charge_col = ""
+            credit_col = f"${float(txn.amount):,.2f}"
         else:
             running -= float(txn.amount)
             charge_col = ""
@@ -1689,20 +1701,25 @@ async def download_statement_pdf(
 
     story.append(Spacer(1, 20))
     total_charges = sum(float(t.amount) for t in transactions if t.transaction_type == "charge")
-    total_payments = sum(float(t.amount) for t in transactions if t.transaction_type in ("payment", "credit", "refund"))
+    total_payments = sum(float(t.amount) for t in transactions if t.transaction_type in ("payment", "credit"))
+    total_refunds = sum(float(t.amount) for t in transactions if t.transaction_type == "refund")
     balance = total_charges - total_payments
 
+    _summary_rows = [
+        ["", "Total Charges:", f"${total_charges:,.2f}"],
+        ["", "Total Payments:", f"${total_payments:,.2f}"],
+    ]
+    if total_refunds > 0:
+        _summary_rows.append(["", "Total Refunds:", f"${total_refunds:,.2f}"])
+    _summary_rows.append(["", "Current Balance:", f"${balance:,.2f}"])
     summary = Table(
-        [
-            ["", "Total Charges:", f"${total_charges:,.2f}"],
-            ["", "Total Payments:", f"${total_payments:,.2f}"],
-            ["", "Current Balance:", f"${balance:,.2f}"],
-        ],
+        _summary_rows,
         colWidths=[3.5 * inch, 1.5 * inch, 1.0 * inch],
     )
+    _bal_row = len(_summary_rows) - 1  # "Current Balance" is always the last row
     summary.setStyle(TableStyle([
-        ("FONTNAME", (1, 2), (2, 2), "Helvetica-Bold"),
-        ("LINEABOVE", (1, 2), (2, 2), 1, colors.black),
+        ("FONTNAME", (1, _bal_row), (2, _bal_row), "Helvetica-Bold"),
+        ("LINEABOVE", (1, _bal_row), (2, _bal_row), 1, colors.black),
         ("ALIGN", (2, 0), (2, -1), "RIGHT"),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
     ]))
@@ -2055,13 +2072,22 @@ async def list_qb_invoices(
     for o in rows:
         total = float(o.total or 0)
         paid = float(o.amount_paid or 0)
-        balance = max(0.0, total - paid)
-        if balance <= 0:
+        pay_status = (o.payment_status or "").lower()
+        # amount_paid isn't reliably populated on card-captured orders (the
+        # capture sets payment_status="paid" but not always amount_paid), so
+        # trust payment_status as the source of truth for the settled/refunded
+        # state. amount_paid is only used to tell a genuine partial from open.
+        if pay_status in ("paid", "refunded"):
+            balance = 0.0
             inv_status = "paid"
-        elif paid > 0:
-            inv_status = "partial"
         else:
-            inv_status = "open"
+            balance = max(0.0, total - paid)
+            if balance <= 0 and paid > 0:
+                inv_status = "paid"
+            elif paid > 0:
+                inv_status = "partial"
+            else:
+                inv_status = "open"
         result.append({
             "id": str(o.id),
             "doc_number": o.qb_invoice_id or o.order_number,

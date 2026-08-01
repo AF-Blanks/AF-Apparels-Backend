@@ -122,6 +122,24 @@ async def sales_report(
     )
     totals = (await db.execute(total_q)).mappings().one()
 
+    # Net out refunds issued (approved RMAs that refunded to the card) on orders
+    # in this period, so "Total Sales" reflects NET sales — the same figure
+    # QuickBooks shows once a credit memo reverses the invoice. Money given back
+    # is not revenue.
+    from app.models.rma import RMARequest
+    refund_total = (await db.execute(
+        select(func.coalesce(func.sum(RMARequest.refund_amount), 0))
+        .select_from(RMARequest)
+        .join(Order, RMARequest.order_id == Order.id)
+        .where(
+            Order.created_at.between(start, end),
+            RMARequest.status == "approved",
+            RMARequest.refund_status == "refunded",
+        )
+    )).scalar() or 0
+    gross_revenue = float(totals["total_revenue"] or 0)
+    net_revenue = max(0.0, gross_revenue - float(refund_total))
+
     return {
         "period": period,
         "group_by": group_by,
@@ -129,7 +147,9 @@ async def sales_report(
         "date_to": end.date().isoformat(),
         "summary": {
             "total_orders": totals["total_orders"] or 0,
-            "total_revenue": float(totals["total_revenue"] or 0),
+            "total_revenue": net_revenue,
+            "gross_revenue": round(gross_revenue, 2),
+            "total_refunds": round(float(refund_total), 2),
             "avg_order_value": round(float(totals["avg_order_value"] or 0), 2),
         },
         "period_data": [
@@ -325,6 +345,8 @@ async def customer_report(
         ],
     }
 
+
+# ── Variant Sales Report ──────────────────────────────────────────────────────
 
 @router.get("/reports/variant-sales")
 async def variant_sales_report(
