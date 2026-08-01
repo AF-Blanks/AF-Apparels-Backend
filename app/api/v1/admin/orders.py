@@ -1844,6 +1844,30 @@ async def update_rma(
         else:
             rma.status = "approved"
             _dispatch_credit_memo = True
+
+            # Log the return on the order's timeline so the order history shows
+            # what happened (approval + refund + restock), not just fulfillment.
+            import json as _json_rma
+            _refund_txt = (
+                f"refunded ${refund_amount:.2f} to card"
+                if rma.refund_status == "refunded"
+                else "refund handled manually (no card charge)"
+            )
+            _rma_events = list(order.timeline or [])
+            _rma_events.append({
+                "status": "returned",
+                "message": (
+                    f"Return {rma_number} approved — {_refund_txt}"
+                    + ("; items restocked" if restock_ok else "")
+                ),
+                "created_by": "Admin",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            from sqlalchemy import text as _rma_t
+            await db.execute(
+                _rma_t("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
+                {"tl": _json_rma.dumps(_rma_events), "oid": str(order.id)},
+            )
     else:
         rma.status = payload.status
 
