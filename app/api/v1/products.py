@@ -325,34 +325,44 @@ async def email_product_flyer(
     if not flyer:
         raise HTTPException(status_code=404, detail="No flyer available for this product")
 
-    reply_to_line = f'<p style="font-size:12px;color:#7A7880">Reply to: {from_email}</p>' if from_email else ""
-    message_block = f'<p style="margin:0 0 20px;color:#374151;font-size:14px;line-height:1.7;white-space:pre-line">{message}</p>' if message else ""
+    reply_to_line = (
+        f'<p style="font-size:13px;color:#9ca3af;margin:0 0 20px">'
+        f'Sent by <strong style="color:#6b7280">{from_email}</strong> — reply to reach them directly.</p>'
+        if from_email else ""
+    )
+    message_block = (
+        f'<div style="background:#f9fafb;border-left:3px solid #1B3A5C;padding:14px 18px;'
+        f'border-radius:6px;margin:0 0 24px">'
+        f'<p style="margin:0;color:#374151;font-size:14px;line-height:1.7;white-space:pre-line">{message}</p>'
+        f'</div>'
+        if message else ""
+    )
+    _img = getattr(product, "image_url", None)
+    image_block = (
+        f'<img src="{_img}" alt="{product.name}" '
+        f'style="width:100%;max-width:340px;height:auto;border-radius:10px;'
+        f'border:1px solid #e5e7eb;display:block;margin:0 auto 24px" />'
+        if _img else ""
+    )
 
-    body_html = f"""
-    <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
-      <div style="background:#080808;padding:24px;text-align:center">
-        <span style="font-size:36px;font-weight:900;color:#1A5CFF">A</span>
-        <span style="font-size:36px;font-weight:900;color:#E8242A">F</span>
-        <span style="color:#fff;font-size:14px;margin-left:8px;letter-spacing:.1em">APPARELS</span>
-      </div>
-      <div style="padding:32px;background:#fff">
-        <h2 style="font-family:sans-serif;color:#2A2830;margin:0 0 8px">Product Flyer — {product.name}</h2>
-        {reply_to_line}
-        <hr style="border:none;border-top:1px solid #E2E0DA;margin:16px 0">
-        {message_block}
-        <p style="margin:0 0 20px;color:#374151;font-size:14px">
-          Please find the product flyer for <strong>{product.name}</strong> below:
-        </p>
-        <p style="margin:24px 0">
-          <a href="{flyer.url}"
-             style="background:#1A5CFF;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:700;display:inline-block">
-            View / Download Flyer (PDF)
-          </a>
-        </p>
-        <p style="color:#7A7880;font-size:12px;margin:24px 0 0">AF Apparels Wholesale · af-apparel.com</p>
-      </div>
-    </div>
-    """
+    content_html = (
+        '<p style="font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;'
+        'color:#E8242A;margin:0 0 6px">Product Flyer</p>'
+        f'<h1 style="font-size:24px;color:#1B3A5C;margin:0 0 20px;font-weight:800;line-height:1.25">{product.name}</h1>'
+        f'{reply_to_line}'
+        f'{message_block}'
+        f'{image_block}'
+        '<p style="margin:0 0 24px;color:#374151;font-size:15px;line-height:1.6">'
+        f'Here is the product flyer for <strong>{product.name}</strong> — tap below to view or '
+        'download the full PDF with all colors, sizes, and pricing.'
+        '</p>'
+        '<p style="margin:0 0 8px">'
+        f'<a href="{flyer.url}" style="background:#1B3A5C;color:#ffffff;padding:14px 32px;'
+        'border-radius:8px;text-decoration:none;font-weight:700;display:inline-block;font-size:15px">'
+        'View / Download Flyer (PDF) &rarr;</a></p>'
+    )
+
+    body_html = EmailService._base_template(content_html)
 
     svc = EmailService(db)
     for recipient in to_emails:
