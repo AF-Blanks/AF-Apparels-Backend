@@ -340,8 +340,8 @@ class EmailService:
             amount_row = (
                 f'<tr><td style="font-size:12px;color:#6b7280;padding:5px 0">Order Total</td>'
                 f'<td style="font-size:13px;color:#374151;text-align:right">${total_val:.2f}</td></tr>'
-                f'<tr><td style="font-size:12px;color:#059669;padding:5px 0">Amount Paid</td>'
-                f'<td style="font-size:13px;color:#059669;font-weight:600;text-align:right">&#8722;${amount_paid_val:.2f}</td></tr>'
+                f'<tr><td style="font-size:12px;color:#1B3A5C;padding:5px 0">Amount Paid</td>'
+                f'<td style="font-size:13px;color:#1B3A5C;font-weight:600;text-align:right">&#8722;${amount_paid_val:.2f}</td></tr>'
                 f'<tr style="border-top:1px solid #e5e7eb">'
                 f'<td style="font-size:12px;color:#6b7280;font-weight:700;padding:10px 0 5px">Balance Due</td>'
                 f'<td style="font-size:17px;font-weight:800;color:#E8242A;text-align:right;padding-top:10px">'
@@ -489,7 +489,7 @@ class EmailService:
             f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Customer</td>'
             f'<td style="font-size:13px;color:#374151;text-align:right">{customer}</td></tr>'
             f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Total</td>'
-            f'<td style="font-size:16px;font-weight:800;color:#059669;text-align:right">'
+            f'<td style="font-size:16px;font-weight:800;color:#1B3A5C;text-align:right">'
             f'${float(order.total):.2f}</td></tr>'
             f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Payment</td>'
             f'<td style="font-size:13px;color:#374151;text-align:right">'
@@ -546,15 +546,15 @@ class EmailService:
         """Notify applicant their account has been approved."""
         from app.core.config import settings as _s
         content_html = (
-            f'<h2 style="color:#059669;font-size:22px;font-weight:800;margin:0 0 8px">'
+            f'<h2 style="color:#1B3A5C;font-size:22px;font-weight:800;margin:0 0 8px">'
             f'Application Approved! ✅</h2>'
             f'<p style="color:#374151;margin:0 0 20px">Hi {first_name},</p>'
             f'<p style="color:#374151;margin:0 0 16px">'
             f'Great news — your application for <b>{company_name}</b> has been '
-            f'<b style="color:#059669">approved</b>. Your account is now active and you can '
+            f'<b style="color:#1B3A5C">approved</b>. Your account is now active and you can '
             f'start placing orders.</p>'
             f'<p style="margin:0"><a href="{_s.FRONTEND_URL}/login" '
-            f'style="background:#059669;color:#fff;padding:12px 28px;border-radius:6px;'
+            f'style="background:#1B3A5C;color:#fff;padding:12px 28px;border-radius:6px;'
             f'font-weight:700;text-decoration:none;font-size:14px;display:inline-block">'
             f'Log In to Your Account →</a></p>'
         )
