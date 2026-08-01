@@ -43,6 +43,9 @@ class CreateCompanyRequest(BaseModel):
     shipping_tier_id: uuid.UUID | None = None
     admin_notes: str | None = None
     tax_exempt: bool = False
+    # Discount-group customer tag(s) — e.g. ["Tier-3"] — drives per-variant
+    # tier pricing (separate from the flat-% pricing_tier).
+    tags: list[str] = []
 
 router = APIRouter()
 
@@ -127,6 +130,7 @@ async def create_company(
         shipping_tier_id=payload.shipping_tier_id,
         admin_notes=payload.admin_notes,
         tax_exempt=payload.tax_exempt,
+        tags=(payload.tags or None),
     )
     db.add(company)
     await db.flush()
