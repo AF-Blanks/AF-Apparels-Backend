@@ -46,6 +46,9 @@ class CreateCompanyRequest(BaseModel):
     # Discount-group customer tag(s) — e.g. ["Tier-3"] — drives per-variant
     # tier pricing (separate from the flat-% pricing_tier).
     tags: list[str] = []
+    # When true, a password-setup email is sent to the contact so the new
+    # customer can set their own password and log in right away.
+    send_setup_email: bool = False
 
 router = APIRouter()
 
@@ -170,10 +173,27 @@ async def create_company(
         db.add(membership)
 
     await db.commit()
+
+    # Optionally send the new customer a "set your password" email so they can
+    # log in right away (only when we actually created their login account).
+    setup_email_sent = False
+    if payload.send_setup_email and user_created and payload.contact_email:
+        try:
+            from app.tasks.email_tasks import send_password_setup_email
+            send_password_setup_email.delay(
+                str(user.id),
+                payload.contact_email,
+                payload.contact_first_name or "there",
+            )
+            setup_email_sent = True
+        except Exception as _e:
+            logger.warning("Add-customer setup-email dispatch failed: %s", _e)
+
     return {
         "message": "Company created",
         "company_id": str(company.id),
         "user_created": user_created,
+        "setup_email_sent": setup_email_sent,
     }
 
 
