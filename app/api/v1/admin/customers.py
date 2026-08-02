@@ -394,67 +394,6 @@ async def import_companies_csv(
     }
 
 
-def _company_less_users_query():
-    """Wholesale customer USERS that have no active company membership.
-
-    Excludes admins and retail/guest users, so backfilling never turns a
-    one-time guest into a wholesale account.
-    """
-    linked = select(CompanyUser.user_id).where(CompanyUser.is_active == True)  # noqa: E712
-    return select(User).where(
-        User.is_admin == False,  # noqa: E712
-        User.account_type == "wholesale",
-        User.id.not_in(linked),
-    )
-
-
-@router.get("/companies/company-less-users")
-async def company_less_users_preview(db: AsyncSession = Depends(get_db)) -> dict:
-    """PREVIEW ONLY (no changes) — how many wholesale users have no company yet,
-    plus a few sample names, so the admin can review before backfilling."""
-    q = _company_less_users_query()
-    count = (await db.execute(
-        select(func.count()).select_from(q.subquery())
-    )).scalar_one()
-    sample_rows = (await db.execute(
-        select(User.first_name, User.last_name, User.email)
-        .where(User.id.in_(select(q.subquery().c.id)))
-        .limit(10)
-    )).all()
-    sample = [
-        (f"{(f or '').strip()} {(l or '').strip()}".strip() or e)
-        for f, l, e in sample_rows
-    ]
-    return {"count": count, "sample": sample}
-
-
-@router.post("/companies/backfill-companies")
-async def backfill_companies(db: AsyncSession = Depends(get_db)) -> dict:
-    """Create a wholesale company for each wholesale customer user that has none.
-    Idempotent — once a user has a company they are skipped on re-run. Admins and
-    retail/guest users are never touched."""
-    orphans = (await db.execute(_company_less_users_query())).scalars().all()
-    created = 0
-    for user in orphans:
-        company_name = (
-            f"{(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip()
-            or user.email
-        )
-        company = Company(
-            name=company_name,
-            company_email=user.email,
-            phone=getattr(user, "phone", None),
-            status="active",
-            admin_notes="Auto-created: customer login had no company (backfilled).",
-        )
-        db.add(company)
-        await db.flush()
-        db.add(CompanyUser(company_id=company.id, user_id=user.id, role="owner", is_active=True))
-        created += 1
-    await db.commit()
-    return {"created": created}
-
-
 @router.get("/companies/export-csv")
 async def export_companies_csv(
     q: str | None = None,
