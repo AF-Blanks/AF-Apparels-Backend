@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 _jinja_env = Environment(loader=BaseLoader(), autoescape=True)
 
 _TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "templates", "emails")
+
+# Brand logo for all outbound emails. Hosted on S3 (the same reliable image host
+# as product photos) because email clients / Gmail's image proxy could not load
+# the Next.js public asset off the storefront domain — that URL returned HTML,
+# not an image, so the logo showed broken in inboxes. LOGO_URL env still wins.
+_EMAIL_LOGO_URL = "https://af-apparels-image-storage.s3.amazonaws.com/branding/af-apparels-logo.png"
 _file_jinja_env = Environment(loader=FileSystemLoader(_TEMPLATES_DIR), autoescape=True)
 
 
@@ -71,7 +77,7 @@ class EmailService:
 
     def _file_template_vars(self, extra: dict) -> dict:
         """Merge logo_url + frontend_url into a variables dict."""
-        logo_url = getattr(settings, "LOGO_URL", None) or f"{settings.FRONTEND_URL}/Af-apparel%20logo.png"
+        logo_url = getattr(settings, "LOGO_URL", None) or _EMAIL_LOGO_URL
         return {"logo_url": logo_url, "frontend_url": settings.FRONTEND_URL, **extra}
 
     def send_from_file(
@@ -202,7 +208,7 @@ class EmailService:
             f'<p style="color:#9ca3af;font-size:12px;margin:4px 0 0">{footer_note}</p>'
             if footer_note else ""
         )
-        logo_url = _cfg.LOGO_URL or f"{_cfg.FRONTEND_URL}/Af-apparel%20logo.png"
+        logo_url = _cfg.LOGO_URL or _EMAIL_LOGO_URL
         if logo_url:
             logo_html = (
                 f'<img src="{logo_url}" alt="AF Apparels" '
