@@ -2,7 +2,7 @@
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
@@ -26,7 +26,34 @@ class CompanyService:
         # Build base filter
         filters = []
         if q:
-            filters.append(Company.name.ilike(f"%{q}%"))
+            like = f"%{q}%"
+            # Match the company name OR the company email/phone OR the contact
+            # (owner) user's name/email — so searching a person's name (e.g. "Brad")
+            # finds their company even when the company name differs (e.g.
+            # "Martin Marketing Specialties"). Previously only Company.name was
+            # searched, so people whose company name didn't contain the term
+            # appeared to be "missing" from Customers.
+            owner_match = (
+                select(CompanyUser.company_id)
+                .join(User, CompanyUser.user_id == User.id)
+                .where(
+                    CompanyUser.company_id == Company.id,
+                    or_(
+                        User.first_name.ilike(like),
+                        User.last_name.ilike(like),
+                        func.concat(User.first_name, " ", User.last_name).ilike(like),
+                        User.email.ilike(like),
+                    ),
+                )
+            )
+            filters.append(
+                or_(
+                    Company.name.ilike(like),
+                    Company.company_email.ilike(like),
+                    Company.phone.ilike(like),
+                    owner_match.exists(),
+                )
+            )
         if status:
             filters.append(Company.status == status)
 
