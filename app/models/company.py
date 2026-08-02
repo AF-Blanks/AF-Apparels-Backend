@@ -88,6 +88,18 @@ class Company(BaseModel):
     # Net 30 payment terms — when True, wholesale customer can place orders and pay within 30 days
     net30_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
 
+    # ── Per-customer shipping options (config layer; checkout wiring is Phase 2) ──
+    # Each option can be toggled on/off per customer. Pallet rates + the free-
+    # shipping minimum default to platform values but are overridable per customer.
+    ship_courier_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default="true")
+    ship_pickup_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default="true")
+    ship_pallet_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
+    ship_free_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
+    ship_free_min: Mapped[float] = mapped_column(Numeric(10, 2), default=500, nullable=False, server_default="500")
+    ship_pallet_dallas: Mapped[float] = mapped_column(Numeric(10, 2), default=60, nullable=False, server_default="60")
+    ship_pallet_houston: Mapped[float] = mapped_column(Numeric(10, 2), default=125, nullable=False, server_default="125")
+    ship_pallet_other: Mapped[float] = mapped_column(Numeric(10, 2), default=275, nullable=False, server_default="275")
+
     # ── Relationships ─────────────────────────────────────────────────────────
     users: Mapped[list["CompanyUser"]] = relationship(
         "CompanyUser", back_populates="company", cascade="all, delete-orphan"

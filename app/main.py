@@ -250,6 +250,36 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            # Per-customer shipping option columns on companies (idempotent)
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='companies' AND column_name='ship_courier_enabled') THEN
+                        ALTER TABLE companies ADD COLUMN ship_courier_enabled BOOLEAN NOT NULL DEFAULT true;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='companies' AND column_name='ship_pickup_enabled') THEN
+                        ALTER TABLE companies ADD COLUMN ship_pickup_enabled BOOLEAN NOT NULL DEFAULT true;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='companies' AND column_name='ship_pallet_enabled') THEN
+                        ALTER TABLE companies ADD COLUMN ship_pallet_enabled BOOLEAN NOT NULL DEFAULT false;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='companies' AND column_name='ship_free_enabled') THEN
+                        ALTER TABLE companies ADD COLUMN ship_free_enabled BOOLEAN NOT NULL DEFAULT false;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='companies' AND column_name='ship_free_min') THEN
+                        ALTER TABLE companies ADD COLUMN ship_free_min NUMERIC(10,2) NOT NULL DEFAULT 500;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='companies' AND column_name='ship_pallet_dallas') THEN
+                        ALTER TABLE companies ADD COLUMN ship_pallet_dallas NUMERIC(10,2) NOT NULL DEFAULT 60;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='companies' AND column_name='ship_pallet_houston') THEN
+                        ALTER TABLE companies ADD COLUMN ship_pallet_houston NUMERIC(10,2) NOT NULL DEFAULT 125;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='companies' AND column_name='ship_pallet_other') THEN
+                        ALTER TABLE companies ADD COLUMN ship_pallet_other NUMERIC(10,2) NOT NULL DEFAULT 275;
+                    END IF;
+                END$$;
+            """))
             # Add payment_method + ACH columns to orders if missing (idempotent)
             await conn.execute(text("""
                 DO $$

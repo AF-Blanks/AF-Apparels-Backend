@@ -519,6 +519,63 @@ async def toggle_net30(
     return {"net30_enabled": company.net30_enabled, "company_id": str(company.id)}
 
 
+class _ShippingConfigRequest(BaseModel):
+    ship_courier_enabled: bool = True
+    ship_pickup_enabled: bool = True
+    ship_pallet_enabled: bool = False
+    ship_free_enabled: bool = False
+    ship_free_min: float = 500
+    ship_pallet_dallas: float = 60
+    ship_pallet_houston: float = 125
+    ship_pallet_other: float = 275
+
+
+def _shipping_config_dict(company) -> dict:
+    return {
+        "ship_courier_enabled": company.ship_courier_enabled,
+        "ship_pickup_enabled": company.ship_pickup_enabled,
+        "ship_pallet_enabled": company.ship_pallet_enabled,
+        "ship_free_enabled": company.ship_free_enabled,
+        "ship_free_min": float(company.ship_free_min or 0),
+        "ship_pallet_dallas": float(company.ship_pallet_dallas or 0),
+        "ship_pallet_houston": float(company.ship_pallet_houston or 0),
+        "ship_pallet_other": float(company.ship_pallet_other or 0),
+    }
+
+
+@router.get("/companies/{company_id}/shipping-config", status_code=status.HTTP_200_OK)
+async def get_shipping_config(company_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """Per-customer shipping options (config only — checkout wiring is Phase 2)."""
+    from sqlalchemy import select as _sel
+    company = (await db.execute(_sel(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if not company:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Company not found")
+    return _shipping_config_dict(company)
+
+
+@router.patch("/companies/{company_id}/shipping-config", status_code=status.HTTP_200_OK)
+async def update_shipping_config(
+    company_id: UUID, payload: _ShippingConfigRequest, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Save a customer's 4 shipping-option toggles + pallet rates + free-ship min."""
+    from sqlalchemy import select as _sel
+    company = (await db.execute(_sel(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if not company:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Company not found")
+    company.ship_courier_enabled = payload.ship_courier_enabled
+    company.ship_pickup_enabled = payload.ship_pickup_enabled
+    company.ship_pallet_enabled = payload.ship_pallet_enabled
+    company.ship_free_enabled = payload.ship_free_enabled
+    company.ship_free_min = payload.ship_free_min
+    company.ship_pallet_dallas = payload.ship_pallet_dallas
+    company.ship_pallet_houston = payload.ship_pallet_houston
+    company.ship_pallet_other = payload.ship_pallet_other
+    await db.commit()
+    return _shipping_config_dict(company)
+
+
 @router.post("/companies/{company_id}/suspend", status_code=status.HTTP_200_OK)
 async def suspend_company(
     company_id: UUID, payload: SuspendRequest, db: AsyncSession = Depends(get_db)
