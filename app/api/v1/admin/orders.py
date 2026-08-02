@@ -771,8 +771,18 @@ async def update_admin_order(
         raise NotFoundError(f"Order {order_id} not found")
 
     old_status = order.status
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    _fields_set = payload.model_dump(exclude_unset=True)
+    for field, value in _fields_set.items():
         setattr(order, field, value)
+
+    # Draft orders: when shipping or tax is edited, recompute the grand total
+    # (subtotal + shipping + tax) so the invoice/total stays correct.
+    if "shipping_cost" in _fields_set or "tax_amount" in _fields_set:
+        order.total = (
+            float(order.subtotal or 0)
+            + float(order.shipping_cost or 0)
+            + float(order.tax_amount or 0)
+        )
 
     if payload.status and payload.status != old_status:
         entry = {

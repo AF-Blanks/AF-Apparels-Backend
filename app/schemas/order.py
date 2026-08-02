@@ -228,6 +228,8 @@ class OrderUpdateRequest(BaseModel):
     courier_service: str | None = None
     notes: str | None = None
     payment_terms: str | None = None
+    shipping_cost: float | None = None   # draft orders: manual shipping entry
+    tax_amount: float | None = None      # draft orders: auto-computed tax from company address
 
 
 class ShippingAddressUpdate(BaseModel):
