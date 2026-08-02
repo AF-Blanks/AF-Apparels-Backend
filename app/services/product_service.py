@@ -27,7 +27,7 @@ class ProductService:
     # ------------------------------------------------------------------
 
     async def get_category_tree(self) -> list[Category]:
-        cached = await redis_get("categories:tree")
+        cached = await redis_get("categories:tree:v2")
         if cached:
             return json.loads(cached)  # returned as plain dicts for response
 
@@ -36,10 +36,22 @@ class ProductService:
         )
         all_cats = result.scalars().all()
 
+        # Active-product count per category (via ProductCategory) so the
+        # collections list shows a real "N products" instead of 0 everywhere.
+        count_rows = (await self.db.execute(
+            select(ProductCategory.category_id, func.count(func.distinct(ProductCategory.product_id)))
+            .join(Product, Product.id == ProductCategory.product_id)
+            .where(Product.status == "active")
+            .group_by(ProductCategory.category_id)
+        )).all()
+        counts = {row[0]: int(row[1]) for row in count_rows}
+        for c in all_cats:
+            c.product_count = counts.get(c.id, 0)
+
         # Only top-level categories; children are already eagerly loaded via selectinload
         root = [c for c in all_cats if c.parent_id is None]
 
-        await redis_set("categories:tree", json.dumps([_cat_to_dict(c) for c in root]), expire=_CATEGORY_TTL)
+        await redis_set("categories:tree:v2", json.dumps([_cat_to_dict(c) for c in root]), expire=_CATEGORY_TTL)
         return root
 
     # ------------------------------------------------------------------
@@ -560,5 +572,6 @@ def _cat_to_dict(cat: Category) -> dict:
         "is_active": getattr(cat, "is_active", True),
         "sort_order": getattr(cat, "sort_order", 0),
         "image_url": getattr(cat, "image_url", None),  # ✅ yeh add karo
+        "product_count": getattr(cat, "product_count", 0),
         "children": [_cat_to_dict(c) for c in getattr(cat, "children", [])],
     }

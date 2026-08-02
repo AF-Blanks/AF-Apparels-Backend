@@ -19,6 +19,7 @@ class CategoryOut(BaseModel):
     sort_order: int = 0
     is_active: bool = True
     image_url: str | None = None
+    product_count: int = 0
     children: list["CategoryOut"] = []
 
     model_config = {"from_attributes": True}

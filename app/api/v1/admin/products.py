@@ -543,7 +543,7 @@ async def create_category(
     )
     db.add(cat)
     await db.commit()
-    await redis_delete("categories:tree")
+    await redis_delete("categories:tree:v2")
     return await _load_category(db, cat.id)
 
 
@@ -560,7 +560,7 @@ async def update_category(
         if field in payload:
             setattr(cat, field, payload[field])
     await db.commit()
-    await redis_delete("categories:tree")
+    await redis_delete("categories:tree:v2")
     return await _load_category(db, category_id)
 
 
@@ -572,7 +572,7 @@ async def delete_category(category_id: UUID, db: AsyncSession = Depends(get_db))
         raise NotFoundError(f"Category not found: {category_id}")
     await db.delete(cat)
     await db.commit()
-    await redis_delete("categories:tree")
+    await redis_delete("categories:tree:v2")
 
 
 @router.post("/bulk-action")
