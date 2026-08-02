@@ -218,6 +218,39 @@ async def _confirm_checkout_inner(
         if payload.shipping_method == "will_call":
             base_shipping = Decimal("0.00")
             expedited_surcharge = Decimal("0.00")
+        elif payload.shipping_method == "free":
+            # Per-customer free shipping — server-verify the cart actually
+            # qualifies before honoring $0 (blocks a tampered "free" selection).
+            from sqlalchemy import select as _sel_ship
+            from app.models.company import Company as _Company_ship
+            _co_ship = (await db.execute(
+                _sel_ship(_Company_ship).where(_Company_ship.id == company_id)
+            )).scalar_one_or_none()
+            if (not _co_ship or not _co_ship.ship_free_enabled
+                    or cart.subtotal < Decimal(str(_co_ship.ship_free_min or 0))):
+                raise ValidationError("Free shipping is not available for this order.")
+            base_shipping = Decimal("0.00")
+            expedited_surcharge = Decimal("0.00")
+        elif payload.shipping_method == "pallet":
+            # Pallet flat rate — server-verify it is enabled for this company and
+            # the amount is one of its configured rates (Dallas/Houston/Other).
+            # Never trust an arbitrary client value for the charge.
+            from sqlalchemy import select as _sel_ship
+            from app.models.company import Company as _Company_ship
+            _co_ship = (await db.execute(
+                _sel_ship(_Company_ship).where(_Company_ship.id == company_id)
+            )).scalar_one_or_none()
+            _valid_pallet = {
+                Decimal(str(_co_ship.ship_pallet_dallas or 0)),
+                Decimal(str(_co_ship.ship_pallet_houston or 0)),
+                Decimal(str(_co_ship.ship_pallet_other or 0)),
+            } if _co_ship else set()
+            _pallet_cost = Decimal(str(payload.shipping_cost or 0))
+            if (not _co_ship or not _co_ship.ship_pallet_enabled
+                    or _pallet_cost not in _valid_pallet):
+                raise ValidationError("Pallet shipping is not available for this order.")
+            base_shipping = _pallet_cost
+            expedited_surcharge = Decimal("0.00")
         else:
             base_shipping = Decimal(str(payload.shipping_cost)) if payload.shipping_cost else cart.validation.estimated_shipping
             expedited_surcharge = Decimal("45.00") if payload.shipping_method == "expedited" else Decimal("0")

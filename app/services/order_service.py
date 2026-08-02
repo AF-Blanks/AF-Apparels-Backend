@@ -184,7 +184,10 @@ class OrderService:
         shipping_method = confirm.shipping_method or "standard"
         shipping_cost = Decimal("0")
 
-        if shipping_method == "will_call":
+        if shipping_method in ("will_call", "free"):
+            # will_call = free pickup; "free" = per-customer free shipping.
+            # Both are $0. The charge path (checkout.py) has already
+            # server-verified that "free" qualifies before this point.
             shipping_cost = Decimal("0.00")
         else:
             from app.models.discount_group import DiscountGroup as _DiscountGroup

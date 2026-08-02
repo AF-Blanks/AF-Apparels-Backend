@@ -178,3 +178,105 @@ async def get_shipping_type(request: Request):
             return {"shipping_type": setting.value, "shipping_amount": 0}
 
     return {"shipping_type": "flat", "shipping_amount": 0}
+
+
+class ShippingOptionsRequest(BaseModel):
+    city: str = ""
+    state: str = ""
+
+
+# Pallet capacities (pieces per full pallet)
+_TSHIRT_PER_PALLET = 2592  # 36 boxes x 72
+_OTHER_PER_PALLET = 864    # 24 boxes x 36 (hoodies / sweatshirts / bulkier)
+
+
+@router.post("/options")
+async def get_shipping_options(
+    request: Request,
+    payload: ShippingOptionsRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-customer shipping options (Phase 2 brain).
+
+    Returns which of the 4 options are available for the authenticated wholesale
+    customer + their computed costs, from the company's shipping-config toggles,
+    the cart's pallet fraction, and the destination. Guests/retail (no company)
+    get the default courier + pickup and no per-customer options.
+    """
+    from decimal import Decimal
+    from app.models.company import Company
+    from app.models.order import CartItem
+    from app.models.product import Product, ProductVariant
+
+    _default = {
+        "courier_enabled": True, "pickup_enabled": True,
+        "pallet": {"enabled": False, "qualifies": False, "cost": 0.0, "region": "Other", "pallets": 0.0},
+        "free": {"enabled": False, "qualifies": False, "min": 0.0, "subtotal": 0.0},
+    }
+
+    company_id = getattr(request.state, "company_id", None)
+    if not company_id:
+        return _default
+    company = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if not company:
+        return _default
+
+    # Pallet pieces — classify each cart line as t-shirt vs everything-else.
+    rows = (await db.execute(
+        select(Product.product_type, CartItem.quantity)
+        .select_from(CartItem)
+        .join(ProductVariant, ProductVariant.id == CartItem.variant_id)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(CartItem.company_id == company_id)
+    )).all()
+    tshirt_pcs = 0
+    other_pcs = 0
+    for product_type, qty in rows:
+        q = int(qty or 0)
+        pt = (product_type or "").lower()
+        if ("t-shirt" in pt) or ("t shirt" in pt) or ("tee" in pt):
+            tshirt_pcs += q
+        else:
+            other_pcs += q
+    pallet_fraction = (tshirt_pcs / _TSHIRT_PER_PALLET) + (other_pcs / _OTHER_PER_PALLET)
+
+    # Tier-priced subtotal for the free-shipping threshold.
+    subtotal = 0.0
+    try:
+        from app.services.cart_service import CartService
+        discount_percent = getattr(request.state, "tier_discount_percent", Decimal("0"))
+        group_id = getattr(request.state, "discount_group_id", None)
+        cart = await CartService(db).get_cart_with_pricing(
+            company_id, discount_percent, str(group_id) if group_id else None
+        )
+        subtotal = float(cart.subtotal or 0)
+    except Exception as exc:
+        logger.warning("shipping/options: subtotal fetch failed: %s", exc)
+
+    city = (payload.city or "").strip().lower()
+    if "dallas" in city:
+        pallet_rate = float(company.ship_pallet_dallas or 0); region = "Dallas"
+    elif "houston" in city:
+        pallet_rate = float(company.ship_pallet_houston or 0); region = "Houston"
+    else:
+        pallet_rate = float(company.ship_pallet_other or 0); region = "Other"
+
+    free_min = float(company.ship_free_min or 0)
+
+    return {
+        "courier_enabled": bool(company.ship_courier_enabled),
+        "pickup_enabled": bool(company.ship_pickup_enabled),
+        "pallet": {
+            "enabled": bool(company.ship_pallet_enabled),
+            "qualifies": pallet_fraction >= 1.0,
+            "cost": round(pallet_rate, 2),
+            "region": region,
+            "pallets": round(pallet_fraction, 2),
+        },
+        "free": {
+            "enabled": bool(company.ship_free_enabled),
+            "qualifies": subtotal >= free_min,
+            "min": round(free_min, 2),
+            "subtotal": round(subtotal, 2),
+        },
+    }
