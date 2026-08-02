@@ -127,6 +127,7 @@ class GuestCheckoutRequest(BaseModel):
     ach_account_last4: str | None = None
     ach_account_type: str | None = None
     order_notes: str | None = None
+    discount_code: str | None = None
     tax_amount: Decimal | None = None
     tax_rate: float | None = None
     tax_region: str | None = None
@@ -248,7 +249,22 @@ async def guest_checkout(
     if tax_amount_val < 0:
         raise ValidationError("Invalid tax amount")
     convenience_fee = Decimal("0.00")  # Guest/retail orders never incur a convenience fee
-    total = subtotal + shipping_cost + tax_amount_val + convenience_fee
+
+    # Discount code — validated server-side (never trust a client-supplied
+    # amount). A guest can only use "all customers" codes; wholesale-only codes
+    # are rejected. The discount reduces the amount actually charged.
+    coupon_discount = Decimal("0")
+    if payload.discount_code:
+        from app.api.v1.discounts import validate_discount_code, compute_discount_amount
+        _dc, _dc_err = await validate_discount_code(
+            payload.discount_code, float(subtotal), None, "guest", db
+        )
+        if _dc_err:
+            raise ValidationError(f"Discount code: {_dc_err}")
+        coupon_discount = Decimal(str(compute_discount_amount(_dc, float(subtotal))))
+
+    net_subtotal = max(Decimal("0"), subtotal - coupon_discount)
+    total = net_subtotal + shipping_cost + tax_amount_val + convenience_fee
 
     # 3. Charge card via QB Payments (skip for ACH — collected manually)
     if payload.payment_method == "ach":
