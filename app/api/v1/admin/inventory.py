@@ -119,6 +119,83 @@ async def adjust_inventory(
     )
 
 
+from pydantic import BaseModel as _BM  # noqa: E402
+import logging as _logging  # noqa: E402
+_bulk_logger = _logging.getLogger(__name__)
+
+
+class _BulkAdjustItem(_BM):
+    variant_id: UUID
+    quantity: int
+
+
+class _BulkAdjustRequest(_BM):
+    warehouse_id: UUID
+    mode: str = "set"  # "set" = set to absolute qty; "add" = add to current
+    items: list[_BulkAdjustItem]
+
+
+@router.post("/inventory/bulk-adjust", response_model=dict)
+async def bulk_adjust_inventory(
+    payload: _BulkAdjustRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk set/add stock for many variants in one warehouse.
+
+    Each variant is adjusted WITHOUT a per-variant QuickBooks push
+    (sync_qb=False); a SINGLE batched QB inventory sync is fired at the end for
+    all touched variants. So a bulk restock can never cause a per-variant QB
+    API storm — it stays under the same 250/min rate limiter as one call.
+    """
+    from sqlalchemy import select as _select
+    from app.models.inventory import InventoryRecord as _IR
+
+    svc = InventoryService(db)
+    mode = (payload.mode or "set").lower()
+
+    current: dict = {}
+    if mode == "set":
+        vids = [i.variant_id for i in payload.items]
+        if vids:
+            rows = (await db.execute(
+                _select(_IR.variant_id, _IR.quantity).where(
+                    _IR.warehouse_id == payload.warehouse_id,
+                    _IR.variant_id.in_(vids),
+                )
+            )).all()
+            current = {r[0]: int(r[1]) for r in rows}
+
+    adjusted: list[str] = []
+    for item in payload.items:
+        if mode == "set":
+            delta = int(item.quantity) - int(current.get(item.variant_id, 0))
+        else:
+            delta = int(item.quantity)
+        if delta == 0:
+            continue
+        await svc.adjust_stock_with_log(
+            variant_id=item.variant_id,
+            warehouse_id=payload.warehouse_id,
+            quantity_delta=delta,
+            reason="bulk_restock",
+            notes=f"Bulk restock ({mode})",
+            sync_qb=False,   # batch-synced below — never a per-variant QB storm
+        )
+        adjusted.append(str(item.variant_id))
+
+    await db.commit()
+
+    if adjusted:
+        try:
+            from app.tasks.quickbooks_tasks import sync_inventory_batch_to_qb
+            sync_inventory_batch_to_qb.apply_async(args=[adjusted], countdown=15)
+            _bulk_logger.info("Bulk restock: 1 batched QB sync queued for %d variants", len(adjusted))
+        except Exception as exc:
+            _bulk_logger.warning("Bulk restock QB batch sync dispatch failed: %s", exc)
+
+    return {"adjusted": len(adjusted)}
+
+
 @router.patch("/inventory/threshold")
 async def update_low_stock_threshold(
     payload: dict = Body(...),
