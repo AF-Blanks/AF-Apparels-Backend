@@ -115,7 +115,8 @@ async def get_analytics(
         )).scalar() or 0
         return float(val)
 
-    cur_revenue = max(0.0, cur_revenue - await _period_refunds(cur_start_dt, cur_end_dt))
+    cur_refunds = await _period_refunds(cur_start_dt, cur_end_dt)
+    cur_revenue = max(0.0, cur_revenue - cur_refunds)
     prev_revenue = max(0.0, prev_revenue - await _period_refunds(prev_start_dt, prev_end_dt))
 
     # Net orders: drop fully-returned orders (refund covers the whole subtotal)
@@ -366,6 +367,7 @@ async def get_analytics(
             "customers_change_percent": _pct_change(ordered_this_period, prev_customers),
             "conversion_rate": conversion_rate,
             "total_tax_collected": round(total_tax_collected, 2),
+            "total_refunds": round(cur_refunds, 2),
         },
         "revenue_chart": revenue_chart,
         "order_status_breakdown": order_status_breakdown,
