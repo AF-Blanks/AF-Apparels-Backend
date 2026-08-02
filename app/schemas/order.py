@@ -230,6 +230,7 @@ class OrderUpdateRequest(BaseModel):
     payment_terms: str | None = None
     shipping_cost: float | None = None   # draft orders: manual shipping entry
     tax_amount: float | None = None      # draft orders: auto-computed tax from company address
+    shipping_method: str | None = None   # draft orders: standard | will_call | pallet | free
 
 
 class ShippingAddressUpdate(BaseModel):
