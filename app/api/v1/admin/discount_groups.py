@@ -130,6 +130,85 @@ async def delete_discount_group(group_id: UUID, db: AsyncSession = Depends(get_d
     await db.commit()
 
 
+# ── Group shipping (bulk-apply the 4 per-customer options to the whole group) ──
+
+_GROUP_SHIP_DEFAULTS = {
+    "ship_courier_enabled": True, "ship_pickup_enabled": True,
+    "ship_pallet_enabled": False, "ship_free_enabled": False,
+    "ship_free_min": 500.0, "ship_pallet_dallas": 60.0,
+    "ship_pallet_houston": 125.0, "ship_pallet_other": 275.0,
+}
+
+
+class _GroupShippingApply(BaseModel):
+    ship_courier_enabled: bool = True
+    ship_pickup_enabled: bool = True
+    ship_pallet_enabled: bool = False
+    ship_free_enabled: bool = False
+    ship_free_min: float = 500
+    ship_pallet_dallas: float = 60
+    ship_pallet_houston: float = 125
+    ship_pallet_other: float = 275
+
+
+async def _group_members(db: AsyncSession, group: DiscountGroup):
+    """Companies tagged with this group's customer_tag."""
+    from app.models.company import Company
+    if not group.customer_tag:
+        return []
+    return (await db.execute(
+        select(Company).where(Company.tags.contains([group.customer_tag]))
+    )).scalars().all()
+
+
+@router.get("/discount-groups/{group_id}/shipping")
+async def get_group_shipping(group_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """Representative shipping config for the group (from its first member) + how
+    many customers are in it, so the modal shows the group's current shipping."""
+    g = await db.get(DiscountGroup, group_id)
+    out = {**_GROUP_SHIP_DEFAULTS, "member_count": 0}
+    if not g:
+        return out
+    members = await _group_members(db, g)
+    out["member_count"] = len(members)
+    if members:
+        c = members[0]
+        out.update({
+            "ship_courier_enabled": c.ship_courier_enabled,
+            "ship_pickup_enabled": c.ship_pickup_enabled,
+            "ship_pallet_enabled": c.ship_pallet_enabled,
+            "ship_free_enabled": c.ship_free_enabled,
+            "ship_free_min": float(c.ship_free_min or 0),
+            "ship_pallet_dallas": float(c.ship_pallet_dallas or 0),
+            "ship_pallet_houston": float(c.ship_pallet_houston or 0),
+            "ship_pallet_other": float(c.ship_pallet_other or 0),
+        })
+    return out
+
+
+@router.post("/discount-groups/{group_id}/apply-shipping")
+async def apply_group_shipping(
+    group_id: UUID, body: _GroupShippingApply, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Bulk-apply these 4 shipping options to EVERY customer in this group (all
+    companies tagged with the group's customer_tag)."""
+    g = await db.get(DiscountGroup, group_id)
+    if not g or not g.customer_tag:
+        raise HTTPException(status_code=404, detail="Group or its customer tag not found")
+    members = await _group_members(db, g)
+    for c in members:
+        c.ship_courier_enabled = body.ship_courier_enabled
+        c.ship_pickup_enabled = body.ship_pickup_enabled
+        c.ship_pallet_enabled = body.ship_pallet_enabled
+        c.ship_free_enabled = body.ship_free_enabled
+        c.ship_free_min = body.ship_free_min
+        c.ship_pallet_dallas = body.ship_pallet_dallas
+        c.ship_pallet_houston = body.ship_pallet_houston
+        c.ship_pallet_other = body.ship_pallet_other
+    await db.commit()
+    return {"applied": len(members)}
+
+
 # ── Variant Pricing Overrides ─────────────────────────────────────────────────
 
 @router.get("/variant-pricing")
