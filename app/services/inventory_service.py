@@ -223,62 +223,88 @@ class InventoryService:
         return record
 
     async def bulk_import_csv(self, csv_content: str, adjusted_by: UUID | None = None) -> dict:
-        """Import inventory levels from CSV: sku, warehouse_code, quantity."""
+        """Import inventory levels from a CSV — sets each variant's stock to the
+        given quantity (absolute overwrite). Tolerant of column names:
+        SKU from `sku` / `Product/Service`; quantity from `quantity` /
+        `Quantity on hand`. `warehouse_code` is optional — falls back to the
+        first active warehouse. Returns the touched variant IDs so the caller can
+        batch-sync them to QuickBooks (never a per-row QB storm)."""
         reader = csv.DictReader(io.StringIO(csv_content))
         imported = skipped = 0
         errors: list[str] = []
+        adjusted_ids: list[str] = []
+
+        # Default warehouse for rows that don't specify one
+        default_wh = (await self.db.execute(
+            select(Warehouse).where(Warehouse.is_active == True).limit(1)  # noqa: E712
+        )).scalar_one_or_none()
+
+        def _cell(row: dict, *names: str) -> str:
+            lower = {(k or "").strip().lower(): v for k, v in row.items()}
+            for n in names:
+                v = lower.get(n.strip().lower())
+                if v is not None and str(v).strip() != "":
+                    return str(v).strip()
+            return ""
 
         for i, row in enumerate(reader, start=2):
             try:
-                sku = row.get("sku", "").strip()
-                warehouse_code = row.get("warehouse_code", "").strip()
-                quantity = int(row.get("quantity", 0))
+                sku = _cell(row, "sku", "product/service", "product", "item")
+                qty_raw = _cell(row, "quantity", "quantity on hand", "qty", "physical count")
+                warehouse_code = _cell(row, "warehouse_code", "warehouse")
 
-                # Lookup variant
-                variant_result = await self.db.execute(
+                if not sku:
+                    errors.append(f"Row {i}: no SKU")
+                    skipped += 1
+                    continue
+                try:
+                    quantity = max(0, int(round(float(qty_raw.replace(",", ""))))) if qty_raw else 0
+                except ValueError:
+                    errors.append(f"Row {i}: invalid quantity '{qty_raw}'")
+                    skipped += 1
+                    continue
+
+                variant = (await self.db.execute(
                     select(ProductVariant).where(ProductVariant.sku == sku)
-                )
-                variant = variant_result.scalar_one_or_none()
+                )).scalar_one_or_none()
                 if not variant:
                     errors.append(f"Row {i}: SKU '{sku}' not found")
                     skipped += 1
                     continue
 
-                # Lookup warehouse
-                wh_result = await self.db.execute(
-                    select(Warehouse).where(Warehouse.code == warehouse_code)
-                )
-                warehouse = wh_result.scalar_one_or_none()
+                warehouse = default_wh
+                if warehouse_code:
+                    warehouse = (await self.db.execute(
+                        select(Warehouse).where(Warehouse.code == warehouse_code)
+                    )).scalar_one_or_none() or default_wh
                 if not warehouse:
-                    errors.append(f"Row {i}: Warehouse code '{warehouse_code}' not found")
+                    errors.append(f"Row {i}: no warehouse found (create one first)")
                     skipped += 1
                     continue
 
-                # Set absolute quantity (reason = migration)
-                existing_result = await self.db.execute(
+                existing = (await self.db.execute(
                     select(InventoryRecord).where(
                         InventoryRecord.variant_id == variant.id,
                         InventoryRecord.warehouse_id == warehouse.id,
                     )
-                )
-                existing = existing_result.scalar_one_or_none()
-                if existing:
-                    delta = quantity - existing.quantity
-                else:
-                    delta = quantity
+                )).scalar_one_or_none()
+                delta = quantity - existing.quantity if existing else quantity
 
-                await self.adjust_stock_with_log(
-                    variant_id=variant.id,
-                    warehouse_id=warehouse.id,
-                    quantity_delta=delta,
-                    reason="migration",
-                    sync_qb=False,
-                    adjusted_by=adjusted_by,
-                )
+                if delta != 0:
+                    await self.adjust_stock_with_log(
+                        variant_id=variant.id,
+                        warehouse_id=warehouse.id,
+                        quantity_delta=delta,
+                        reason="migration",
+                        sync_qb=False,  # batch-synced by the caller — never a per-row storm
+                        adjusted_by=adjusted_by,
+                    )
+                    if str(variant.id) not in adjusted_ids:
+                        adjusted_ids.append(str(variant.id))
                 imported += 1
             except Exception as exc:
                 errors.append(f"Row {i}: {exc}")
                 skipped += 1
 
         await self.db.flush()
-        return {"imported": imported, "skipped": skipped, "errors": errors}
+        return {"imported": imported, "skipped": skipped, "errors": errors, "variant_ids": adjusted_ids}

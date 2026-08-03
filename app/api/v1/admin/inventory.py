@@ -245,6 +245,26 @@ async def import_inventory_csv(
     svc = InventoryService(db)
     result = await svc.bulk_import_csv(content.decode("utf-8"))
     await db.commit()
+
+    # Batch-sync every touched variant to QuickBooks — chunked + staggered so an
+    # 850-row import never causes a per-variant QB storm (calls stay under the
+    # global 250/min rate limiter).
+    variant_ids = result.pop("variant_ids", [])
+    if variant_ids:
+        try:
+            from app.tasks.quickbooks_tasks import sync_inventory_batch_to_qb
+            _CHUNK = 150
+            for _n, _i in enumerate(range(0, len(variant_ids), _CHUNK)):
+                sync_inventory_batch_to_qb.apply_async(
+                    args=[variant_ids[_i:_i + _CHUNK]], countdown=20 + _n * 30
+                )
+            _bulk_logger.info(
+                "Inventory import: queued %d variants for QB sync in %d chunk(s)",
+                len(variant_ids), (len(variant_ids) + _CHUNK - 1) // _CHUNK,
+            )
+        except Exception as _exc:
+            _bulk_logger.warning("Inventory import QB sync dispatch failed: %s", _exc)
+
     return BulkImportResult(**result)
 
 
