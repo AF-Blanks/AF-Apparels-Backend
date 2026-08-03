@@ -253,6 +253,7 @@ async def get_shipping_options(
     except Exception as exc:
         logger.warning("shipping/options: subtotal fetch failed: %s", exc)
 
+    import math
     city = (payload.city or "").strip().lower()
     if "dallas" in city:
         pallet_rate = float(company.ship_pallet_dallas or 0); region = "Dallas"
@@ -260,6 +261,10 @@ async def get_shipping_options(
         pallet_rate = float(company.ship_pallet_houston or 0); region = "Houston"
     else:
         pallet_rate = float(company.ship_pallet_other or 0); region = "Other"
+
+    # Whole pallets (round UP) — a partial pallet still takes a full pallet slot,
+    # so 1.16 pallets = 2 pallets. Cost = per-pallet rate × number of pallets.
+    pallet_count = math.ceil(pallet_fraction) if pallet_fraction > 0 else 0
 
     free_min = float(company.ship_free_min or 0)
 
@@ -269,9 +274,10 @@ async def get_shipping_options(
         "pallet": {
             "enabled": bool(company.ship_pallet_enabled),
             "qualifies": pallet_fraction >= 1.0,
-            "cost": round(pallet_rate, 2),
+            "cost": round(pallet_rate * pallet_count, 2),
+            "rate": round(pallet_rate, 2),
             "region": region,
-            "pallets": round(pallet_fraction, 2),
+            "pallets": pallet_count,
         },
         "free": {
             "enabled": bool(company.ship_free_enabled),

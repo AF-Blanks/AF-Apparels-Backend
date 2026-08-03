@@ -240,14 +240,15 @@ async def _confirm_checkout_inner(
             _co_ship = (await db.execute(
                 _sel_ship(_Company_ship).where(_Company_ship.id == company_id)
             )).scalar_one_or_none()
-            _valid_pallet = {
+            _pallet_cost = Decimal(str(payload.shipping_cost or 0))
+            _rates = [
                 Decimal(str(_co_ship.ship_pallet_dallas or 0)),
                 Decimal(str(_co_ship.ship_pallet_houston or 0)),
                 Decimal(str(_co_ship.ship_pallet_other or 0)),
-            } if _co_ship else set()
-            _pallet_cost = Decimal(str(payload.shipping_cost or 0))
-            if (not _co_ship or not _co_ship.ship_pallet_enabled
-                    or _pallet_cost not in _valid_pallet):
+            ] if _co_ship else []
+            # Valid = a whole multiple of one configured rate (N pallets × rate).
+            _valid = any(r > 0 and _pallet_cost >= r and (_pallet_cost % r == 0) for r in _rates)
+            if (not _co_ship or not _co_ship.ship_pallet_enabled or not _valid):
                 raise ValidationError("Pallet shipping is not available for this order.")
             base_shipping = _pallet_cost
             expedited_surcharge = Decimal("0.00")
