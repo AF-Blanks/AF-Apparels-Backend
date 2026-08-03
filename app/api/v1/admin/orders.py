@@ -771,6 +771,7 @@ async def update_admin_order(
         raise NotFoundError(f"Order {order_id} not found")
 
     old_status = order.status
+    _had_qb_invoice = bool(order.qb_invoice_id)
     _fields_set = payload.model_dump(exclude_unset=True)
     for field, value in _fields_set.items():
         setattr(order, field, value)
@@ -825,6 +826,16 @@ async def update_admin_order(
                 _task.delay(str(order.id))
         except Exception as _e:
             logger.warning("Status email dispatch failed: %s", _e)
+
+        # Cancelling here must keep QuickBooks consistent: if this order was
+        # already synced as an invoice, void it so QB revenue isn't inflated by a
+        # cancelled order (same behaviour as the dedicated cancel endpoint).
+        if payload.status == "cancelled" and _had_qb_invoice:
+            try:
+                from app.tasks.quickbooks_tasks import void_order_invoice_in_qb
+                void_order_invoice_in_qb.delay(str(order.id))
+            except Exception as _e:
+                logger.warning("QB void-invoice on status-cancel dispatch failed: %s", _e)
 
     return {"message": "Order updated"}
 
@@ -888,6 +899,7 @@ async def update_order_status(
         raise HTTPException(status_code=404, detail="Order not found")
 
     old_status = order.status
+    _had_qb_invoice = bool(order.qb_invoice_id)
     order.status = payload.status
 
     if payload.tracking_number is not None:
@@ -943,6 +955,15 @@ async def update_order_status(
                 _task.delay(str(order.id))
         except Exception as _e:
             logger.warning("Status email dispatch failed: %s", _e)
+
+        # Void the QB invoice on cancel so QB revenue stays consistent (matches
+        # the dedicated cancel endpoint). Idempotent + skipped if never synced.
+        if payload.status == "cancelled" and _had_qb_invoice:
+            try:
+                from app.tasks.quickbooks_tasks import void_order_invoice_in_qb
+                void_order_invoice_in_qb.delay(str(order.id))
+            except Exception as _e:
+                logger.warning("QB void-invoice on status-cancel dispatch failed: %s", _e)
 
     return {"success": True, "status": order.status}
 
