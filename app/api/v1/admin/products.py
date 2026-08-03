@@ -58,12 +58,26 @@ async def list_admin_products(
         .selectinload(Category.children),
     )
     if q:
-        query = query.where(
-            or_(
-                Product.name.ilike(f"%{q}%"),
-                Product.product_code.ilike(f"%{q}%"),
+        # Intelligent multi-token search: split "1001 black xl" into tokens and
+        # require EVERY token to match somewhere — product name/code OR any of the
+        # product's variants (color/size/sku). So the more the admin types, the
+        # tighter the result: "1001" → all 1001 variants, "1001 black" → only the
+        # 1001 blacks, "1001 black xl" → the single 1001 black XL.
+        for _tok in (t for t in q.split() if t.strip()):
+            _like = f"%{_tok.strip()}%"
+            query = query.where(
+                or_(
+                    Product.name.ilike(_like),
+                    Product.product_code.ilike(_like),
+                    Product.variants.any(
+                        or_(
+                            ProductVariant.color.ilike(_like),
+                            ProductVariant.size.ilike(_like),
+                            ProductVariant.sku.ilike(_like),
+                        )
+                    ),
+                )
             )
-        )
     if status:
         query = query.where(Product.status == status)
     query = query.order_by(Product.sort_order.asc(), Product.created_at.desc())

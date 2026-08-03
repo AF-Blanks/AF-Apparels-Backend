@@ -1495,6 +1495,56 @@ async def cancel_admin_order(
     return {"message": "Order cancelled"}
 
 
+@router.delete("/orders/{order_id}", response_model=dict)
+async def delete_admin_order(order_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """Permanently delete an order — its line items and comments go with it.
+
+    Used to clear out junk drafts / test orders so they stop showing up
+    everywhere (orders list, drafts, customer lifetime value). If the order was
+    already synced to QuickBooks as an invoice, that invoice is voided first so
+    QB revenue stays consistent. Blocked if a return (RMA) is linked, because the
+    RMA references the order — resolve the RMA first.
+    """
+    from sqlalchemy import delete as _sqldelete
+    from app.models.order import OrderComment
+
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # A return/RMA points at this order with a RESTRICT foreign key — deleting the
+    # order would fail at the DB. Surface a clear message instead of a 500.
+    rma = (await db.execute(
+        select(RMARequest.id).where(RMARequest.order_id == order_id).limit(1)
+    )).first()
+    if rma:
+        raise HTTPException(
+            status_code=422,
+            detail="This order has a return (RMA) linked — delete or resolve the RMA first.",
+        )
+
+    _order_no = order.order_number
+    _had_qb_invoice = bool(order.qb_invoice_id)
+
+    # Void the QB invoice first (if any) so a deleted order never inflates QB revenue.
+    if _had_qb_invoice:
+        try:
+            from app.tasks.quickbooks_tasks import void_order_invoice_in_qb
+            void_order_invoice_in_qb.delay(str(order.id))
+        except Exception as _e:
+            logger.warning("QB void-invoice on delete dispatch failed: %s", _e)
+
+    # Remove children explicitly (avoids async lazy-load of ORM cascade), then the
+    # order. Other references (discounts, statements, abandoned carts) are SET NULL.
+    await db.execute(_sqldelete(OrderComment).where(OrderComment.order_id == order_id))
+    await db.execute(_sqldelete(OrderItem).where(OrderItem.order_id == order_id))
+    await db.execute(_sqldelete(Order).where(Order.id == order_id))
+    await db.commit()
+
+    logger.info("Order %s (%s) permanently deleted by admin", order_id, _order_no)
+    return {"message": f"Order {_order_no} deleted"}
+
+
 @router.post("/orders/{order_id}/resend-invoice", response_model=dict)
 async def resend_invoice_email(order_id: UUID, db: AsyncSession = Depends(get_db)):
     """Generate and email the invoice PDF to the customer (or admin in dev)."""
