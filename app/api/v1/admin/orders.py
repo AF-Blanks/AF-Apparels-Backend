@@ -669,6 +669,41 @@ async def verify_ach_payment(order_id: UUID, db: AsyncSession = Depends(get_db))
     return {"status": "verified", "order_id": str(order_id)}
 
 
+async def _company_unit_price(variant, order, db) -> float:
+    """Price a variant for THIS order's company — the exact tier / discount-group
+    price the customer sees when logged in (VariantLevelPricingOverride >
+    product-level VariantPricingOverride > tier discount), NOT the regular retail
+    price. Falls back to retail for guest / company-less orders."""
+    from decimal import Decimal
+    discount_percent = Decimal("0")
+    group_id = None
+    if getattr(order, "company_id", None):
+        company = (await db.execute(
+            select(Company).where(Company.id == order.company_id)
+        )).scalar_one_or_none()
+        if company:
+            if company.pricing_tier_id:
+                from app.models.pricing import PricingTier
+                dp = (await db.execute(
+                    select(PricingTier.discount_percent).where(PricingTier.id == company.pricing_tier_id)
+                )).scalar_one_or_none()
+                if dp is not None:
+                    discount_percent = dp
+            if company.tags:
+                from app.models.discount_group import DiscountGroup
+                gid = (await db.execute(
+                    select(DiscountGroup.id).where(
+                        DiscountGroup.customer_tag.in_(company.tags),
+                        DiscountGroup.status == "enabled",
+                    ).limit(1)
+                )).scalar_one_or_none()
+                if gid:
+                    group_id = str(gid)
+    from app.services.order_service import OrderService
+    price = await OrderService(db)._snapshot_price(variant, discount_percent, group_id)
+    return float(price)
+
+
 @router.post("/orders/{order_id}/items", status_code=201)
 async def add_order_item(
     order_id: UUID,
@@ -697,8 +732,11 @@ async def add_order_item(
     if not variant:
         raise HTTPException(status_code=404, detail="Product variant not found")
 
-    # Use provided unit_price or fall back to variant retail price
-    unit_price = float(payload.get("unit_price") or variant.retail_price or 0)
+    # Price for THIS order's company (tier / discount-group), NOT the regular
+    # retail price the admin catalog shows — the customer's price is authoritative
+    # so a discount-group company gets its discounted pricing on admin-built orders
+    # too. (No manual-override UI today; the sent unit_price is intentionally ignored.)
+    unit_price = await _company_unit_price(variant, order, db)
     line_total = unit_price * quantity
 
     # Fetch product info for denormalized fields
@@ -729,7 +767,14 @@ async def add_order_item(
         pass
 
     await db.commit()
-    return {"message": "Item added", "item_id": str(item.id), "subtotal": float(order.subtotal), "total": float(order.total)}
+    return {
+        "message": "Item added",
+        "item_id": str(item.id),
+        "unit_price": unit_price,
+        "line_total": line_total,
+        "subtotal": float(order.subtotal),
+        "total": float(order.total),
+    }
 
 
 @router.delete("/orders/{order_id}/items/{item_id}", status_code=200)
