@@ -994,6 +994,12 @@ def send_password_setup_email(self, user_id: str, to_email: str, first_name: str
     Queued one task per recipient (not a synchronous loop) so Celery's own worker
     concurrency paces outbound Resend calls — no burst/rate spike.
     """
+    # Never email the import placeholder addresses. Customers imported without a
+    # real email get import-<id>@afblanks-noemail.invalid; sending there only
+    # bounces and hurts sender reputation. Skip cleanly (also guards any batch
+    # already queued before this check existed).
+    if not to_email or to_email.strip().lower().endswith("@afblanks-noemail.invalid"):
+        return {"status": "skipped", "reason": "placeholder email", "email": to_email}
     try:
         async def _send():
             import secrets

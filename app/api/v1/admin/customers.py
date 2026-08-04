@@ -638,7 +638,15 @@ def _password_setup_recipients():
         select(User.id, User.email, User.first_name)
         .join(CompanyUser, CompanyUser.user_id == User.id)
         .join(Company, Company.id == CompanyUser.company_id)
-        .where(User.hashed_password.is_(None), CompanyUser.is_active.is_(True), Company.status == "active")
+        .where(
+            User.hashed_password.is_(None),
+            CompanyUser.is_active.is_(True),
+            Company.status == "active",
+            User.email.isnot(None),
+            # Skip import placeholders (customers imported without a real email) —
+            # they'd only bounce and hurt sender reputation.
+            User.email.notlike("%@afblanks-noemail.invalid"),
+        )
         .distinct()
     )
 
