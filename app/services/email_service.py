@@ -164,9 +164,18 @@ class EmailService:
         if settings.APP_ENV in ("development", "test") and settings.ADMIN_NOTIFICATION_EMAIL:
             recipient = settings.ADMIN_NOTIFICATION_EMAIL
 
+        # Support comma-separated recipients everywhere: any caller that passes a
+        # list like ADMIN_NOTIFICATION_EMAIL="a@x.com,b@x.com,c@x.com" (admin
+        # notifications: new order, wholesale application, low stock, QB failure…)
+        # is delivered to every address, not one malformed "a,b,c" recipient.
+        to_list = [e.strip() for e in str(recipient or "").split(",") if e.strip()]
+        if not to_list:
+            logger.warning("No valid recipient for email '%s' — skipping", subject)
+            return False
+
         params: resend.Emails.SendParams = {
             "from": from_addr,
-            "to": [recipient],
+            "to": to_list,
             "subject": subject,
             "html": body_html,
         }
