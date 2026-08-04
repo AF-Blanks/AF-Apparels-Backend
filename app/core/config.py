@@ -90,7 +90,10 @@ class Settings(BaseSettings):
     RESEND_API_KEY: str = ""
     SENDGRID_API_KEY: str = ""  # kept for backward compat, unused
     RESEND_FROM_EMAIL: str = ""
-    EMAIL_FROM_ADDRESS: str = "noreply@karauxbaia.resend.app"
+    # Send from the verified afblanks.com domain so mail reaches every customer.
+    # (The old test domain only allowed sending to the account owner → 403 for
+    # everyone else.) RESEND_FROM_EMAIL still overrides this if set in the env.
+    EMAIL_FROM_ADDRESS: str = "noreply@afblanks.com"
     EMAIL_FROM_NAME: str = "AF Apparels"
     ADMIN_NOTIFICATION_EMAIL: str = ""
     # Business inboxes that receive a copy of every new-order alert
