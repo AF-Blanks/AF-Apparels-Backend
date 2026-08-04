@@ -395,6 +395,10 @@ async def guest_checkout(
         if _vid not in _variant_ids_to_sync:
             _variant_ids_to_sync.append(_vid)
 
+    # Stock is now out of inventory for this order — mark it so a later
+    # cancel/delete returns exactly this stock to the shelf.
+    order.inventory_deducted = True
+
     # Sync all updated stock to QB in ONE batched task instead of one task per
     # variant. countdown=15 keeps the original buffer so the DB commit lands first.
     _dispatch_qb_inventory_sync(

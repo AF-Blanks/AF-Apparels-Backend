@@ -250,6 +250,26 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            # Track whether an order currently holds stock out of inventory, so a
+            # cancel/delete restocks exactly once and drafts (which never deduct)
+            # never restock. Backfill runs only when the column is first created:
+            # real, not-yet-shipped orders are marked deducted so cancelling them
+            # correctly returns stock; shipped/delivered goods have left, drafts
+            # never deducted. (idempotent)
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='orders' AND column_name='inventory_deducted'
+                    ) THEN
+                        ALTER TABLE orders ADD COLUMN inventory_deducted BOOLEAN NOT NULL DEFAULT false;
+                        UPDATE orders SET inventory_deducted = true
+                        WHERE order_number NOT LIKE 'DRAFT-%'
+                          AND status IN ('pending','confirmed','processing','ready_for_pickup');
+                    END IF;
+                END$$;
+            """))
             # Per-customer shipping option columns on companies (idempotent)
             await conn.execute(text("""
                 DO $$

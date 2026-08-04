@@ -394,6 +394,10 @@ class OrderService:
             except Exception as _exc:
                 logger.warning("QB inventory sync dispatch failed for variant %s: %s", variant_id, _exc)
 
+        # Stock is now out of inventory for this order — mark it so a later
+        # cancel/delete returns exactly this stock to the shelf.
+        order.inventory_deducted = True
+
         # 9.6. Invalidate product detail cache so stock shows immediately
         try:
             from app.core.redis import redis_delete_pattern as _rdp

@@ -116,6 +116,9 @@ class Order(BaseModel):
 
     # Admin edits + fees (columns added post-deploy — use raw SQL fallback in service)
     items_edited: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=False)
+    # True while this order's stock is deducted from inventory; flipped off when a
+    # cancel/delete restocks it, so a return-to-stock happens exactly once.
+    inventory_deducted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     convenience_fee: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True, default=0.0)
     # Multi-box labels: JSON array of {box_number, tracking_number, tracking_url, label_url, carrier, service}
     all_labels: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

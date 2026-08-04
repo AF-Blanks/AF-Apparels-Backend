@@ -799,6 +799,12 @@ async def update_admin_order(
             {"tl": _json.dumps(current), "oid": str(order_id)},
         )
 
+    # Cancelling before the goods shipped returns the stock to inventory (once).
+    if payload.status == "cancelled" and old_status != "cancelled":
+        await _restock_order_inventory(
+            order, db, "returned", f"Order {order.order_number} cancelled — stock returned"
+        )
+
     await db.commit()
 
     if payload.status and payload.status != old_status:
@@ -927,6 +933,12 @@ async def update_order_status(
         _text("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
         {"tl": _json.dumps(current), "oid": str(order_id)},
     )
+
+    # Cancelling before the goods shipped returns the stock to inventory (once).
+    if payload.status == "cancelled" and old_status != "cancelled":
+        await _restock_order_inventory(
+            order, db, "returned", f"Order {order.order_number} cancelled — stock returned"
+        )
 
     await db.commit()
 
@@ -1555,6 +1567,14 @@ async def delete_admin_order(order_id: UUID, db: AsyncSession = Depends(get_db))
         except Exception as _e:
             logger.warning("QB void-invoice on delete dispatch failed: %s", _e)
 
+    # If this order still holds stock out of inventory (real order, not yet
+    # returned), put it back before the items are gone — deleting an order whose
+    # goods never shipped shouldn't silently lose that stock. Draft/never-deducted
+    # orders are skipped by the flag.
+    await _restock_order_inventory(
+        order, db, "returned", f"Order {_order_no} deleted — stock returned"
+    )
+
     # Remove children explicitly (avoids async lazy-load of ORM cascade), then the
     # order. Other references (discounts, statements, abandoned carts) are SET NULL.
     await db.execute(_sqldelete(OrderComment).where(OrderComment.order_id == order_id))
@@ -1787,6 +1807,57 @@ async def _resolve_warehouse_for_variant(variant_id: UUID, db: AsyncSession) -> 
 
     wh = (await db.execute(select(Warehouse.id).limit(1))).scalar_one_or_none()
     return wh
+
+
+async def _restock_order_inventory(order: Order, db: AsyncSession, reason: str, note: str) -> None:
+    """Return an order's stock to the shelf when its goods never left — i.e. it
+    was cancelled/deleted before shipping. Runs exactly once: guarded by
+    ``order.inventory_deducted`` (drafts, already-restocked, and never-deducted
+    orders are skipped), and flips the flag off after. Storm-safe: no per-variant
+    QuickBooks push — a single batched sync is queued at the end.
+
+    Caller must NOT have committed the delete yet; this reads the order's items.
+    """
+    if not getattr(order, "inventory_deducted", False):
+        return
+
+    items = (await db.execute(
+        select(OrderItem).where(OrderItem.order_id == order.id)
+    )).scalars().all()
+
+    from app.services.inventory_service import InventoryService
+    inv = InventoryService(db)
+    restocked_ids: list[str] = []
+    for it in items:
+        if not it.variant_id or int(it.quantity or 0) <= 0:
+            continue
+        warehouse_id = await _resolve_warehouse_for_variant(it.variant_id, db)
+        if not warehouse_id:
+            continue
+        await inv.adjust_stock_with_log(
+            variant_id=it.variant_id,
+            warehouse_id=warehouse_id,
+            quantity_delta=int(it.quantity),
+            reason=reason,
+            notes=note,
+            sync_qb=False,  # batched below — never a per-variant QB storm
+        )
+        if str(it.variant_id) not in restocked_ids:
+            restocked_ids.append(str(it.variant_id))
+
+    # Stock is back — don't let a second cancel/delete restock it again.
+    order.inventory_deducted = False
+
+    if restocked_ids:
+        try:
+            from app.tasks.quickbooks_tasks import sync_inventory_batch_to_qb
+            sync_inventory_batch_to_qb.apply_async(args=[restocked_ids], countdown=20)
+            logger.info("Order %s restocked %d variant(s) — 1 batched QB sync queued",
+                        order.order_number, len(restocked_ids))
+        except Exception as _e:
+            logger.warning("Restock QB batch sync dispatch failed: %s", _e)
+
+
 
 
 @router.patch("/rma/{rma_id}", response_model=dict)
