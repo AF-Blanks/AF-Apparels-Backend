@@ -337,6 +337,7 @@ class EmailService:
         _terms_display = {
             'net_30': ('Net 30 — due within 30 days', 30),
             'net_15': ('Net 15 — due within 15 days', 15),
+            'net_7': ('Net 7 — due within 7 days', 7),
             'due_on_receipt': ('Due on Receipt', 0),
         }
         terms_label, days = _terms_display.get(terms, _terms_display['net_30'])

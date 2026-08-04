@@ -181,21 +181,24 @@ async def _confirm_checkout_inner(
     has_stripe = bool(payload.payment_intent_id)
     has_ach    = payload.payment_method == "ach"
     has_net30  = payload.payment_method == "net_30"  # wholesale invoice/NET 30 — no upfront charge
-    if not has_qb and not has_stripe and not has_ach and not has_net30:
+    has_net7   = payload.payment_method == "net_7"   # wholesale invoice/NET 7 — no upfront charge
+    if not has_qb and not has_stripe and not has_ach and not has_net30 and not has_net7:
         raise ValidationError(
             "Payment required: supply qb_token, saved_card_id, payment_intent_id, "
-            "payment_method=ach, or payment_method=net_30"
+            "payment_method=ach, payment_method=net_30, or payment_method=net_7"
         )
 
-    # Validate Net 30 is explicitly enabled for this company
-    if has_net30:
+    # Validate the requested credit term is actually enabled for this company.
+    if has_net30 or has_net7:
         from sqlalchemy import select as _sel
         from app.models.company import Company as _Company
         _company = (await db.execute(
             _sel(_Company).where(_Company.id == company_id)
         )).scalar_one_or_none()
-        if not _company or not getattr(_company, "net30_enabled", False):
-            raise ValidationError("Net 30 payment terms are not available for your account. Contact AF Apparels to request Net 30.")
+        _term_field = "net30_enabled" if has_net30 else "net7_enabled"
+        _term_name = "Net 30" if has_net30 else "Net 7"
+        if not _company or not getattr(_company, _term_field, False):
+            raise ValidationError(f"{_term_name} payment terms are not available for your account. Contact AF Apparels to request it.")
 
     discount_percent = getattr(request.state, "tier_discount_percent", Decimal("0"))
     group_id = getattr(request.state, "discount_group_id", None)

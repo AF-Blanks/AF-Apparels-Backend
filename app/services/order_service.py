@@ -269,10 +269,13 @@ class OrderService:
         # Determine payment_status based on payment method:
         # Net 30 = unpaid (pay later via invoice), all other methods (card/ach/bank) = paid immediately.
         _pm = getattr(confirm, "payment_method", None) or ""
-        if _pm == "net_30":
+        if _pm in ("net_30", "net_7"):
             _payment_status = "unpaid"
         else:
             _payment_status = "paid"
+        # Invoice due-date terms follow the credit method chosen (Net 7 → 7 days,
+        # Net 30 → 30 days). Other methods keep the default terms.
+        _payment_terms = _pm if _pm in ("net_30", "net_7") else "net_30"
 
         order = Order(
             company_id=company_id,
@@ -280,6 +283,7 @@ class OrderService:
             order_number=order_number,
             status="pending",
             payment_status=_payment_status,
+            payment_terms=_payment_terms,
             po_number=confirm.po_number,
             notes=confirm.order_notes,
             stripe_payment_intent_id=confirm.payment_intent_id,

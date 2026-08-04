@@ -460,10 +460,13 @@ async def delete_ach_method(request: Request, db: AsyncSession = Depends(get_db)
 async def get_net30_status(request: Request, db: AsyncSession = Depends(get_db)):
     company_id = getattr(request.state, "company_id", None)
     if not company_id:
-        return {"net30_enabled": False}
+        return {"net30_enabled": False, "net7_enabled": False}
     from app.models.company import Company
     company = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
-    return {"net30_enabled": bool(company and getattr(company, "net30_enabled", False))}
+    return {
+        "net30_enabled": bool(company and getattr(company, "net30_enabled", False)),
+        "net7_enabled": bool(company and getattr(company, "net7_enabled", False)),
+    }
 
 
 # ---------------------------------------------------------------------------

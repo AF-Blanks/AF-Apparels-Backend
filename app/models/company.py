@@ -85,8 +85,10 @@ class Company(BaseModel):
     # Tax exemption flag — when True, no tax is charged or shown at checkout
     tax_exempt: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
 
-    # Net 30 payment terms — when True, wholesale customer can place orders and pay within 30 days
+    # Credit terms — Net 30 / Net 7 are mutually exclusive (toggle endpoints keep
+    # at most one True). When set, the customer can place orders and pay later.
     net30_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
+    net7_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
 
     # ── Per-customer shipping options (config layer; checkout wiring is Phase 2) ──
     # Each option can be toggled on/off per customer. Pallet rates + the free-

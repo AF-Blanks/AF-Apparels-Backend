@@ -401,7 +401,7 @@ class PDFService:
 
         invoice_date = now.strftime("%B %d, %Y")
         terms_value = getattr(order, 'payment_terms', None) or 'net_30'
-        _days_map = {'net_30': 30, 'net_15': 15, 'due_on_receipt': 0}
+        _days_map = {'net_30': 30, 'net_15': 15, 'net_7': 7, 'due_on_receipt': 0}
         due_date = (now + timedelta(days=_days_map.get(terms_value, 30))).strftime("%B %d, %Y")
 
         extra = [

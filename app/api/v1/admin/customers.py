@@ -501,22 +501,47 @@ class _Net30Request(BaseModel):
     net30_enabled: bool
 
 
+class _Net7Request(BaseModel):
+    net7_enabled: bool
+
+
+async def _get_active_company_for_credit(company_id: UUID, db: AsyncSession, term_label: str):
+    from fastapi import HTTPException
+    from sqlalchemy import select as _sel
+    company = (await db.execute(_sel(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    if company.status != "active":
+        raise HTTPException(status_code=400, detail=f"{term_label} can only be enabled for active (approved) wholesale companies")
+    return company
+
+
 @router.patch("/companies/{company_id}/net30", status_code=status.HTTP_200_OK)
 async def toggle_net30(
     company_id: UUID, payload: _Net30Request, db: AsyncSession = Depends(get_db)
 ) -> dict:
-    """Enable or disable Net 30 payment terms for a wholesale company."""
-    from sqlalchemy import select as _sel
-    company = (await db.execute(_sel(Company).where(Company.id == company_id))).scalar_one_or_none()
-    if not company:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Company not found")
-    if company.status != "active":
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="Net 30 can only be enabled for active (approved) wholesale companies")
+    """Enable/disable Net 30. Net 30 and Net 7 are mutually exclusive, so enabling
+    Net 30 turns Net 7 off."""
+    company = await _get_active_company_for_credit(company_id, db, "Net 30")
     company.net30_enabled = payload.net30_enabled
+    if payload.net30_enabled:
+        company.net7_enabled = False
     await db.commit()
-    return {"net30_enabled": company.net30_enabled, "company_id": str(company.id)}
+    return {"net30_enabled": company.net30_enabled, "net7_enabled": company.net7_enabled, "company_id": str(company.id)}
+
+
+@router.patch("/companies/{company_id}/net7", status_code=status.HTTP_200_OK)
+async def toggle_net7(
+    company_id: UUID, payload: _Net7Request, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Enable/disable Net 7. Mutually exclusive with Net 30 — enabling Net 7 turns
+    Net 30 off."""
+    company = await _get_active_company_for_credit(company_id, db, "Net 7")
+    company.net7_enabled = payload.net7_enabled
+    if payload.net7_enabled:
+        company.net30_enabled = False
+    await db.commit()
+    return {"net7_enabled": company.net7_enabled, "net30_enabled": company.net30_enabled, "company_id": str(company.id)}
 
 
 class _ShippingConfigRequest(BaseModel):

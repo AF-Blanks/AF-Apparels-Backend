@@ -270,6 +270,19 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            # Net 7 / Net 30 credit terms on companies (mutually exclusive — the
+            # toggle endpoints ensure only one is ever true). (idempotent)
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='companies' AND column_name='net30_enabled') THEN
+                        ALTER TABLE companies ADD COLUMN net30_enabled BOOLEAN NOT NULL DEFAULT false;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='companies' AND column_name='net7_enabled') THEN
+                        ALTER TABLE companies ADD COLUMN net7_enabled BOOLEAN NOT NULL DEFAULT false;
+                    END IF;
+                END$$;
+            """))
             # Per-customer shipping option columns on companies (idempotent)
             await conn.execute(text("""
                 DO $$

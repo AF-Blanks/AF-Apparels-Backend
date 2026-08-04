@@ -68,6 +68,7 @@ class CompanyDetail(BaseModel):
     discount_percent: Decimal | None = None
     tax_exempt: bool = False
     net30_enabled: bool = False
+    net7_enabled: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -92,6 +93,7 @@ class CompanyUpdate(BaseModel):
     tags: list[str] | None = None
     tax_exempt: bool | None = None
     net30_enabled: bool | None = None
+    net7_enabled: bool | None = None
     # Editable customer information (admin correcting company details). Only the
     # fields actually sent are applied (exclude_unset), so this never wipes others.
     name: str | None = None
