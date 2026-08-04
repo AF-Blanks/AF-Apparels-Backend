@@ -92,6 +92,23 @@ class CompanyUpdate(BaseModel):
     tags: list[str] | None = None
     tax_exempt: bool | None = None
     net30_enabled: bool | None = None
+    # Editable customer information (admin correcting company details). Only the
+    # fields actually sent are applied (exclude_unset), so this never wipes others.
+    name: str | None = None
+    phone: str | None = None
+    fax: str | None = None
+    website: str | None = None
+    company_email: str | None = None
+    business_type: str | None = None
+    secondary_business: str | None = None
+    tax_id: str | None = None
+    estimated_annual_volume: str | None = None
+    address_line1: str | None = None
+    address_line2: str | None = None
+    city: str | None = None
+    state_province: str | None = None
+    postal_code: str | None = None
+    country: str | None = None
 
 
 class SuspendRequest(BaseModel):
