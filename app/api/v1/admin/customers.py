@@ -628,12 +628,17 @@ async def get_customer_stats(company_id: UUID, db: AsyncSession = Depends(get_db
 # ─── Bulk "Set Your Password" invite to all active customers ──────────────────
 
 def _password_setup_recipients():
-    """Active customer users (wholesale company members) with a login email."""
+    """Customer users (wholesale company members) who still NEED to set a password.
+
+    Targets users with no password yet (hashed_password IS NULL) — which is exactly
+    the imported / newly-added customers who can't log in until they set one. The
+    old filter required is_active=True, which excluded imported users (created
+    inactive) — the very people the setup email is for."""
     return (
         select(User.id, User.email, User.first_name)
         .join(CompanyUser, CompanyUser.user_id == User.id)
         .join(Company, Company.id == CompanyUser.company_id)
-        .where(User.is_active.is_(True), CompanyUser.is_active.is_(True), Company.status == "active")
+        .where(User.hashed_password.is_(None), CompanyUser.is_active.is_(True), Company.status == "active")
         .distinct()
     )
 

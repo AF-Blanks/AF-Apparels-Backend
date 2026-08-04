@@ -304,6 +304,13 @@ class AuthService:
         if user.password_reset_expires < datetime.now(UTC):
             raise ValidationError("Reset token has expired")
 
+        # Completing initial setup (an imported / newly-added customer who had no
+        # password yet) also activates the account, so they can log in the moment
+        # they finish. A normal reset by an already-active user is unaffected, and
+        # a user an admin deliberately deactivated (who already has a password) is
+        # NOT silently reactivated.
+        if user.hashed_password is None and not user.is_active:
+            user.is_active = True
         user.hashed_password = hash_password(new_password)
         user.password_reset_token = None
         user.password_reset_expires = None
