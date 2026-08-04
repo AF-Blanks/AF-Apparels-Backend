@@ -28,7 +28,7 @@ from app.schemas.wholesale import WholesaleApplicationOut
 router = APIRouter()
 
 REFRESH_COOKIE_NAME = "refresh_token"
-REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60  # 7 days
+REFRESH_COOKIE_MAX_AGE = 30 * 24 * 60 * 60  # 30 days — matches the refresh token lifetime
 
 
 @router.post("/register-wholesale", response_model=WholesaleApplicationOut, status_code=201)

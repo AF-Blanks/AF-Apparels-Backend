@@ -38,6 +38,21 @@ class Settings(BaseSettings):
             return None
         return v
 
+    @model_validator(mode="after")
+    def _cookie_defaults_for_prod(self) -> "Settings":
+        """Production/staging run cross-domain (afblanks.com / Vercel frontend +
+        Railway backend). A SameSite=lax refresh cookie is NOT sent on the
+        cross-site POST to /api/v1/refresh, so the silent token refresh fails and
+        users get logged out the moment their access token expires (feels like
+        "logged out on any inactivity"). Force SameSite=None + Secure there so the
+        refresh cookie is delivered and the session renews seamlessly. Local dev
+        (development/test over http) keeps lax/insecure so the cookie still works.
+        """
+        if self.APP_ENV in ("production", "staging"):
+            self.COOKIE_SAMESITE = "none"
+            self.COOKIE_SECURE = True
+        return self
+
     # ── Database ──────────────────────────────────────────────────────────────
     DATABASE_URL: str  # asyncpg URL
     DATABASE_URL_SYNC: str = ""  # psycopg2 URL — auto-derived from DATABASE_URL if not set
@@ -61,8 +76,9 @@ class Settings(BaseSettings):
     # ── JWT ───────────────────────────────────────────────────────────────────
     JWT_SECRET_KEY: str = "dev-jwt-secret-key-change-in-production"
     JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
-    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 30  # 30 days — long-lived so a
+    # temporary refresh hiccup never logs the user out mid-session
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 30
 
     # ── Stripe ────────────────────────────────────────────────────────────────
     STRIPE_SECRET_KEY: str = ""
