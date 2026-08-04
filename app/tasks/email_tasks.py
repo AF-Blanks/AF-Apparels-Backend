@@ -1029,3 +1029,38 @@ def send_password_setup_email(self, user_id: str, to_email: str, first_name: str
     except Exception as exc:
         delay = 60 * (2 ** self.request.retries)
         raise self.retry(exc=exc, countdown=delay)
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_admin_customer_notice(self, subject: str, lines: list) -> dict:
+    """Notify the business admin inboxes (ADMIN_NOTIFICATION_EMAIL — comma-separated,
+    all get it) of a customer activity (new customer created, password reset sent…)
+    so the team can track what happened across the app."""
+    try:
+        async def _send():
+            from app.core.config import settings as _s
+            from app.services.email_service import EmailService
+            if not _s.ADMIN_NOTIFICATION_EMAIL:
+                return {"status": "skipped", "reason": "no admin email configured"}
+            rows = "".join(
+                f'<tr><td style="padding:4px 14px 4px 0;color:#6b7280;font-size:13px">{k}</td>'
+                f'<td style="padding:4px 0;color:#1B3A5C;font-size:13px;font-weight:700">{v}</td></tr>'
+                for k, v in (lines or [])
+            )
+            html = (
+                '<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;padding:24px">'
+                f'<h2 style="color:#1B3A5C;font-size:18px;font-weight:800;margin:0 0 6px">{subject}</h2>'
+                '<p style="color:#6b7280;font-size:12px;margin:0 0 16px">AF Apparels — admin activity notification</p>'
+                '<div style="background:#F9F8F4;border-radius:8px;padding:14px 18px">'
+                f'<table style="width:100%;border-collapse:collapse">{rows}</table></div>'
+                '</div>'
+            )
+            async with AsyncSessionLocal() as db:
+                ok = EmailService(db).send_raw(
+                    to_email=_s.ADMIN_NOTIFICATION_EMAIL, subject=subject, body_html=html,
+                )
+                return {"status": "sent" if ok else "failed"}
+        return _run(_send())
+    except Exception as exc:
+        delay = 60 * (2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)

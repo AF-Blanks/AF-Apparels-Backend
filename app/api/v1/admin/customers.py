@@ -174,10 +174,11 @@ async def create_company(
 
     await db.commit()
 
-    # Optionally send the new customer a "set your password" email so they can
-    # log in right away (only when we actually created their login account).
+    # Always send the new customer a "set your password" email so they can log in
+    # right away (whenever we created their login account with a real email).
     setup_email_sent = False
-    if payload.send_setup_email and user_created and payload.contact_email:
+    _is_real_email = bool(payload.contact_email) and not str(payload.contact_email).lower().endswith("@afblanks-noemail.invalid")
+    if user_created and _is_real_email:
         try:
             from app.tasks.email_tasks import send_password_setup_email
             send_password_setup_email.delay(
@@ -188,6 +189,21 @@ async def create_company(
             setup_email_sent = True
         except Exception as _e:
             logger.warning("Add-customer setup-email dispatch failed: %s", _e)
+
+    # Notify the business admin inboxes so the team can track new customers.
+    try:
+        from app.tasks.email_tasks import send_admin_customer_notice
+        send_admin_customer_notice.delay(
+            "New customer created",
+            [
+                ["Company", company.name],
+                ["Contact", f"{payload.contact_first_name or ''} {payload.contact_last_name or ''}".strip() or "—"],
+                ["Email", payload.contact_email or "—"],
+                ["Setup email", "sent to customer" if setup_email_sent else "not sent (no login email)"],
+            ],
+        )
+    except Exception as _e:
+        logger.warning("Add-customer admin notice dispatch failed: %s", _e)
 
     return {
         "message": "Company created",
@@ -706,3 +722,40 @@ async def send_password_setup_to_all(db: AsyncSession = Depends(get_db)) -> dict
             countdown=_i // 2,
         )
     return {"queued": len(recipients)}
+
+
+@router.post("/customers/{company_id}/send-password-reset", status_code=status.HTTP_200_OK)
+async def send_customer_password_reset(company_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """Send a 'Set / Reset Your Password' email to just THIS company's login user,
+    and notify the admin inboxes. Powers the per-customer reset button."""
+    from sqlalchemy import select as _sel
+    from fastapi import HTTPException
+
+    company = (await db.execute(_sel(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    # The company's active login user (there is normally one owner). Prefer owner.
+    user = (await db.execute(
+        _sel(User)
+        .join(CompanyUser, CompanyUser.user_id == User.id)
+        .where(CompanyUser.company_id == company_id, CompanyUser.is_active.is_(True))
+        .order_by((CompanyUser.role == "owner").desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    if not user or not user.email:
+        raise HTTPException(status_code=422, detail="This customer has no login user with an email yet.")
+    if str(user.email).lower().endswith("@afblanks-noemail.invalid"):
+        raise HTTPException(status_code=422, detail="This customer was imported without a real email — add a real email first.")
+
+    from app.tasks.email_tasks import send_password_setup_email, send_admin_customer_notice
+    send_password_setup_email.delay(str(user.id), user.email, user.first_name or "there")
+    try:
+        send_admin_customer_notice.delay(
+            "Password reset sent",
+            [["Company", company.name], ["Sent to", user.email]],
+        )
+    except Exception as _e:
+        logger.warning("Password-reset admin notice dispatch failed: %s", _e)
+
+    return {"sent": True, "email": user.email}
