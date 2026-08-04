@@ -97,14 +97,16 @@ async def sales_report(
     prod_q = (
         select(
             OrderItem.product_name,
-            OrderItem.sku,
             func.sum(OrderItem.quantity).label("units_sold"),
             func.sum(OrderItem.line_total).label("revenue"),
+            func.count(func.distinct(OrderItem.sku)).label("variant_count"),
         )
         .join(Order, Order.id == OrderItem.order_id)
         .where(Order.created_at.between(start, end))
         .where(Order.status.notin_(["cancelled", "refunded"]))
-        .group_by(OrderItem.product_name, OrderItem.sku)
+        # Aggregate per PRODUCT (all its variants) so the ranking is 20 products,
+        # not 20 individual size/colour rows — accurate, nothing dropped.
+        .group_by(OrderItem.product_name)
         .order_by(func.sum(OrderItem.line_total).desc())
         .limit(20)
     )
@@ -192,7 +194,7 @@ async def sales_report(
         "top_products": [
             {
                 "product_name": r["product_name"],
-                "sku": r["sku"],
+                "variant_count": int(r["variant_count"] or 0),
                 "units_sold": r["units_sold"],
                 "revenue": float(r["revenue"] or 0),
             }
