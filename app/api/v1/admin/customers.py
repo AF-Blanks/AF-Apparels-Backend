@@ -664,6 +664,12 @@ async def send_password_setup_to_all(db: AsyncSession = Depends(get_db)) -> dict
     recipients = [r for r in rows if r[1]]  # must have an email
     if not recipients:
         raise HTTPException(status_code=422, detail="No active customers with an email to send to")
-    for user_id, email, first_name in recipients:
-        send_password_setup_email.delay(str(user_id), email, first_name or "there")
+    # Pace the batch at ~2 emails/sec (Resend's API rate limit) by staggering the
+    # task ETAs. A large blast (1000s of customers) then goes out steadily without
+    # tripping the rate limit and dropping messages — 2/sec clears ~1,400 in ~12 min.
+    for _i, (user_id, email, first_name) in enumerate(recipients):
+        send_password_setup_email.apply_async(
+            args=[str(user_id), email, first_name or "there"],
+            countdown=_i // 2,
+        )
     return {"queued": len(recipients)}
