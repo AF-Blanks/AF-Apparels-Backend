@@ -777,6 +777,97 @@ async def add_order_item(
     }
 
 
+@router.post("/orders/{order_id}/price-variants", status_code=200)
+async def price_order_variants(
+    order_id: UUID, payload: dict, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Return the order-company's price for a set of variants (one color's size
+    run), so the admin add-grid shows the customer's price — not the catalog price."""
+    from uuid import UUID as _UUID
+    from app.models.product import ProductVariant
+
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    prices: dict[str, float] = {}
+    for vid in (payload.get("variant_ids") or []):
+        try:
+            variant = (await db.execute(
+                select(ProductVariant).where(ProductVariant.id == _UUID(str(vid)))
+            )).scalar_one_or_none()
+        except Exception:
+            variant = None
+        if variant:
+            prices[str(vid)] = await _company_unit_price(variant, order, db)
+    return {"prices": prices}
+
+
+@router.post("/orders/{order_id}/items/bulk", status_code=201)
+async def add_order_items_bulk(
+    order_id: UUID, payload: dict, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Add several variants (a whole size run) to an order in one shot, each priced
+    for the order's company. Body: {"items": [{"variant_id": ..., "quantity": n}]}."""
+    from uuid import UUID as _UUID
+    from app.models.product import Product, ProductVariant
+
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.status in ("delivered", "cancelled", "refunded"):
+        raise HTTPException(status_code=422, detail="Cannot add items to a completed or cancelled order")
+
+    created: list = []  # (item, product_name, variant, qty, unit_price, line_total)
+    added_subtotal = 0.0
+    for entry in (payload.get("items") or []):
+        vid = entry.get("variant_id")
+        qty = int(entry.get("quantity") or 0)
+        if not vid or qty < 1:
+            continue
+        try:
+            variant = (await db.execute(
+                select(ProductVariant).where(ProductVariant.id == _UUID(str(vid)))
+            )).scalar_one_or_none()
+        except Exception:
+            variant = None
+        if not variant:
+            continue
+        unit_price = await _company_unit_price(variant, order, db)
+        line_total = unit_price * qty
+        product = (await db.execute(
+            select(Product).where(Product.id == variant.product_id)
+        )).scalar_one_or_none()
+        item = OrderItem(
+            order_id=order_id, variant_id=variant.id, quantity=qty,
+            unit_price=unit_price, line_total=line_total,
+            product_name=product.name if product else "Unknown",
+            sku=variant.sku or "", color=variant.color, size=variant.size,
+        )
+        db.add(item)
+        created.append((item, product.name if product else "Unknown", variant, qty, unit_price, line_total))
+        added_subtotal += line_total
+
+    if not created:
+        raise HTTPException(status_code=422, detail="No valid items to add")
+
+    await db.flush()  # assign item ids before the session is committed/expired
+    resp_items = [{
+        "item_id": str(it.id), "variant_id": str(var.id), "product_name": pname,
+        "sku": var.sku or "", "color": var.color, "size": var.size,
+        "quantity": qty, "unit_price": up, "line_total": lt,
+    } for (it, pname, var, qty, up, lt) in created]
+
+    order.subtotal = float(order.subtotal or 0) + added_subtotal
+    order.total = float(order.subtotal) + float(order.shipping_cost or 0) + float(order.tax_amount or 0)
+    try:
+        order.items_edited = True
+    except Exception:
+        pass
+    await db.commit()
+    return {"items": resp_items, "subtotal": float(order.subtotal), "total": float(order.total)}
+
+
 @router.delete("/orders/{order_id}/items/{item_id}", status_code=200)
 async def remove_order_item(
     order_id: UUID,
