@@ -123,6 +123,20 @@ class Settings(BaseSettings):
         return self
     FRONTEND_URL: str = "https://afblanks.com"  # live domain — all email links (reset, order, RMA…) use this
 
+    @model_validator(mode="after")
+    def _force_live_frontend_url(self) -> "Settings":
+        """EVERY email link (reset password, order, invoice, RMA…) is built from
+        FRONTEND_URL. If it's ever left pointing at an old Vercel preview domain
+        (or is blank/localhost) in production, customers get emails whose links go
+        to a *different* domain than the sender — which hurts deliverability and is
+        exactly what Resend flagged. Force it to the live domain in prod/staging so
+        this can never recur, regardless of what the Railway env var says."""
+        url = (self.FRONTEND_URL or "").strip().lower()
+        if self.APP_ENV in ("production", "staging"):
+            if (not url) or ("vercel.app" in url) or ("localhost" in url) or ("127.0.0.1" in url):
+                self.FRONTEND_URL = "https://afblanks.com"
+        return self
+
     # ── AWS S3 ────────────────────────────────────────────────────────────────
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
