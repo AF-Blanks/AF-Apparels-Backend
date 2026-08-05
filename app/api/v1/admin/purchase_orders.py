@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -277,6 +277,48 @@ async def create_po(data: POCreate, db: AsyncSession = Depends(get_db)):
             unit_cost_expected=item_data.unit_cost_expected,
         )
         db.add(line_item)
+        total_expected += item_data.qty_ordered * item_data.unit_cost_expected
+
+    po.total_expected = total_expected
+    await db.commit()
+    await db.refresh(po)
+    return {"id": str(po.id), "po_number": po.po_number}
+
+
+@router.put("/{po_id}")
+async def update_po(po_id: UUID, data: POCreate, db: AsyncSession = Depends(get_db)):
+    """Edit a purchase order that hasn't been received or synced yet — change the
+    manufacturer / delivery date / notes and add, remove, or adjust line items so a
+    draft can be built up over several sittings. Locked once any stock has been
+    received or the PO is pushed to QuickBooks, to keep those figures in sync."""
+    po = (await db.execute(select(PurchaseOrder).where(PurchaseOrder.id == po_id))).scalar_one_or_none()
+    if not po:
+        raise HTTPException(status_code=404, detail="PO not found")
+    if po.qb_synced or float(po.total_received or 0) > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="This PO can no longer be edited — items have already been received or it's synced to QuickBooks.",
+        )
+
+    # Header fields
+    po.manufacturer_id = UUID(data.manufacturer_id)
+    po.expected_delivery = data.expected_delivery
+    po.notes = data.notes
+
+    # Replace all line items with the submitted set (add / remove / adjust in one go)
+    await db.execute(delete(POLineItem).where(POLineItem.po_id == po_id))
+    total_expected = 0.0
+    for item_data in data.line_items:
+        db.add(POLineItem(
+            po_id=po.id,
+            product_variant_id=UUID(item_data.product_variant_id) if item_data.product_variant_id else None,
+            new_product_name=item_data.new_product_name,
+            new_product_sku=item_data.new_product_sku,
+            new_product_size=item_data.new_product_size,
+            new_product_color=item_data.new_product_color,
+            qty_ordered=item_data.qty_ordered,
+            unit_cost_expected=item_data.unit_cost_expected,
+        ))
         total_expected += item_data.qty_ordered * item_data.unit_cost_expected
 
     po.total_expected = total_expected
