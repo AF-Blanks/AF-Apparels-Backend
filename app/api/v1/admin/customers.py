@@ -655,6 +655,11 @@ async def get_customer_stats(company_id: UUID, db: AsyncSession = Depends(get_db
         select(
             func.count(Order.id).label("total_orders"),
             func.coalesce(func.sum(Order.total), 0).label("total_spent"),
+            # What the customer has actually paid so far…
+            func.coalesce(func.sum(func.coalesce(Order.amount_paid, 0)), 0).label("total_paid"),
+            # …and what they still owe (sum of each order's unpaid balance, never
+            # negative). This is the accounts-receivable for this customer.
+            func.coalesce(func.sum(func.greatest(Order.total - func.coalesce(Order.amount_paid, 0), 0)), 0).label("outstanding"),
             func.max(Order.created_at).label("last_order_date"),
         ).where(Order.company_id == company_id, Order.status.not_in(["cancelled", "refunded"]))
     )
@@ -662,8 +667,37 @@ async def get_customer_stats(company_id: UUID, db: AsyncSession = Depends(get_db
     return {
         "total_orders": row.total_orders or 0,
         "total_spent": float(row.total_spent or 0),
+        "total_paid": float(row.total_paid or 0),
+        "outstanding_balance": float(row.outstanding or 0),
         "last_order_date": row.last_order_date,
     }
+
+
+@router.get("/companies/{company_id}/qb-balance")
+async def get_customer_qb_balance(company_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """Pull this customer's live open balance (accounts receivable) straight from
+    QuickBooks — for when a payment was recorded directly in QB and the app's own
+    figure may be stale. One on-demand call (behind the global rate limiter), not
+    automatic, so it never causes a QB API storm."""
+    from sqlalchemy import select as _sel
+    from fastapi import HTTPException
+
+    company = (await db.execute(_sel(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    qb_id = getattr(company, "qb_customer_id", None)
+    if not qb_id:
+        return {"synced": False, "reason": "This customer isn't linked to QuickBooks yet."}
+    try:
+        import asyncio
+        from app.services.quickbooks_service import QuickBooksService
+        svc = await QuickBooksService().initialize()
+        data = await asyncio.to_thread(svc._request, "GET", f"customer/{qb_id}?minorversion=65")
+        balance = float((data.get("Customer") or {}).get("Balance", 0) or 0)
+        return {"synced": True, "qb_balance": balance}
+    except Exception as _e:
+        logger.warning("QB balance fetch failed for company %s: %s", company_id, _e)
+        return {"synced": False, "reason": "Couldn't reach QuickBooks right now — try again shortly."}
 
 
 # ─── Bulk "Set Your Password" invite to all active customers ──────────────────
