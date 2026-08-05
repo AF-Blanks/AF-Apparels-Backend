@@ -700,6 +700,63 @@ async def get_customer_qb_balance(company_id: UUID, db: AsyncSession = Depends(g
         return {"synced": False, "reason": "Couldn't reach QuickBooks right now — try again shortly."}
 
 
+class _CustomerEmailRequest(BaseModel):
+    subject: str
+    body_html: str
+
+
+@router.get("/companies/{company_id}/email-recipients")
+async def get_customer_email_recipients(company_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """The real, sendable email address(es) on file for this one customer — so the
+    admin can see exactly who a one-off email would go to (fake placeholder
+    @afblanks-noemail.invalid addresses are excluded)."""
+    rows = (await db.execute(
+        select(User.email)
+        .join(CompanyUser, CompanyUser.user_id == User.id)
+        .where(CompanyUser.company_id == company_id, User.is_active.is_(True))
+        .distinct()
+    )).all()
+    emails = [e for (e,) in rows if e and not e.lower().endswith("@afblanks-noemail.invalid")]
+    return {"emails": emails}
+
+
+@router.post("/companies/{company_id}/send-email")
+async def send_customer_email(
+    company_id: UUID,
+    payload: _CustomerEmailRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Send a one-off, admin-composed email to a SINGLE specific customer (unlike
+    the marketing broadcast which goes to everyone). Recipient address(es) are
+    resolved server-side from the company's active users, so there's no typo and
+    we never hit the fake @afblanks-noemail.invalid placeholders."""
+    subject = (payload.subject or "").strip()
+    body_html = (payload.body_html or "").strip()
+    if not subject:
+        raise HTTPException(status_code=422, detail="Subject is required.")
+    if not body_html:
+        raise HTTPException(status_code=422, detail="Message body is required.")
+
+    rows = (await db.execute(
+        select(User.id, User.email, User.first_name)
+        .join(CompanyUser, CompanyUser.user_id == User.id)
+        .where(CompanyUser.company_id == company_id, User.is_active.is_(True))
+        .distinct()
+    )).all()
+    recipients = [
+        (uid, email, fn) for (uid, email, fn) in rows
+        if email and not email.lower().endswith("@afblanks-noemail.invalid")
+    ]
+    if not recipients:
+        raise HTTPException(status_code=422, detail="This customer has no valid email address on file.")
+
+    from app.tasks.email_tasks import send_marketing_email
+    for uid, email, fn in recipients:
+        send_marketing_email.delay(str(uid), email, fn or "", subject, body_html)
+
+    return {"sent_to": [r[1] for r in recipients], "count": len(recipients)}
+
+
 # ─── Bulk "Set Your Password" invite to all active customers ──────────────────
 
 def _password_setup_recipients():

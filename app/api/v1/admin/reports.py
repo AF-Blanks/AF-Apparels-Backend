@@ -324,12 +324,15 @@ async def customer_report(
     )
     aov_rows = (await db.execute(aov_q)).mappings().all()
 
-    # Top customers by spend
+    # Top customers by spend — with what they've paid vs. what's still owed
+    # (all consistent within the selected period, so the columns tie out).
     top_q = (
         select(
             Company.name.label("company_name"),
             func.count(Order.id).label("order_count"),
             func.sum(Order.total).label("total_spend"),
+            func.coalesce(func.sum(func.coalesce(Order.amount_paid, 0)), 0).label("total_paid"),
+            func.coalesce(func.sum(func.greatest(Order.total - func.coalesce(Order.amount_paid, 0), 0)), 0).label("outstanding"),
         )
         .join(Order, Order.company_id == Company.id)
         .where(Order.created_at.between(start, end))
@@ -363,6 +366,8 @@ async def customer_report(
                 "company_name": r["company_name"],
                 "order_count": r["order_count"],
                 "total_spend": float(r["total_spend"] or 0),
+                "total_paid": float(r["total_paid"] or 0),
+                "outstanding_balance": float(r["outstanding"] or 0),
             }
             for r in top_rows
         ],
