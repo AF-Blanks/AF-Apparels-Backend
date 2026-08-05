@@ -705,19 +705,52 @@ class _CustomerEmailRequest(BaseModel):
     body_html: str
 
 
+async def _resolve_customer_emails(company_id: UUID, db: AsyncSession) -> list[tuple[str, str, str]]:
+    """Every real, sendable (identifier, email, first_name) for one customer.
+
+    Gathered from BOTH the company's own business email (Company.company_email —
+    this is where imported customers' real address lives, while their login User
+    often has only a fake @afblanks-noemail.invalid placeholder) AND their login
+    users. Placeholders and blanks are dropped and results are deduped by address.
+    """
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+
+    def _add(identifier: str, email: str | None, first_name: str | None) -> None:
+        e = (email or "").strip()
+        if not e or "@" not in e or e.lower().endswith("@afblanks-noemail.invalid"):
+            return
+        key = e.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append((identifier, e, (first_name or "").strip()))
+
+    company = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if company is None:
+        return out
+
+    # 1) The company's own business email (shown on the customer page)
+    _add(str(company_id), company.company_email, None)
+
+    # 2) Login users on this company (real emails only)
+    user_rows = (await db.execute(
+        select(User.id, User.email, User.first_name)
+        .join(CompanyUser, CompanyUser.user_id == User.id)
+        .where(CompanyUser.company_id == company_id)
+    )).all()
+    for uid, email, fn in user_rows:
+        _add(str(uid), email, fn)
+
+    return out
+
+
 @router.get("/companies/{company_id}/email-recipients")
 async def get_customer_email_recipients(company_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
     """The real, sendable email address(es) on file for this one customer — so the
-    admin can see exactly who a one-off email would go to (fake placeholder
-    @afblanks-noemail.invalid addresses are excluded)."""
-    rows = (await db.execute(
-        select(User.email)
-        .join(CompanyUser, CompanyUser.user_id == User.id)
-        .where(CompanyUser.company_id == company_id, User.is_active.is_(True))
-        .distinct()
-    )).all()
-    emails = [e for (e,) in rows if e and not e.lower().endswith("@afblanks-noemail.invalid")]
-    return {"emails": emails}
+    admin can see exactly who a one-off email would go to."""
+    recips = await _resolve_customer_emails(company_id, db)
+    return {"emails": [e for (_ident, e, _fn) in recips]}
 
 
 @router.post("/companies/{company_id}/send-email")
@@ -728,8 +761,8 @@ async def send_customer_email(
 ) -> dict:
     """Send a one-off, admin-composed email to a SINGLE specific customer (unlike
     the marketing broadcast which goes to everyone). Recipient address(es) are
-    resolved server-side from the company's active users, so there's no typo and
-    we never hit the fake @afblanks-noemail.invalid placeholders."""
+    resolved server-side so there's no typo and we never hit the fake
+    @afblanks-noemail.invalid placeholders."""
     subject = (payload.subject or "").strip()
     body_html = (payload.body_html or "").strip()
     if not subject:
@@ -737,24 +770,15 @@ async def send_customer_email(
     if not body_html:
         raise HTTPException(status_code=422, detail="Message body is required.")
 
-    rows = (await db.execute(
-        select(User.id, User.email, User.first_name)
-        .join(CompanyUser, CompanyUser.user_id == User.id)
-        .where(CompanyUser.company_id == company_id, User.is_active.is_(True))
-        .distinct()
-    )).all()
-    recipients = [
-        (uid, email, fn) for (uid, email, fn) in rows
-        if email and not email.lower().endswith("@afblanks-noemail.invalid")
-    ]
+    recipients = await _resolve_customer_emails(company_id, db)
     if not recipients:
         raise HTTPException(status_code=422, detail="This customer has no valid email address on file.")
 
     from app.tasks.email_tasks import send_marketing_email
-    for uid, email, fn in recipients:
-        send_marketing_email.delay(str(uid), email, fn or "", subject, body_html)
+    for ident, email, fn in recipients:
+        send_marketing_email.delay(ident, email, fn, subject, body_html)
 
-    return {"sent_to": [r[1] for r in recipients], "count": len(recipients)}
+    return {"sent_to": [e for (_ident, e, _fn) in recipients], "count": len(recipients)}
 
 
 # ─── Bulk "Set Your Password" invite to all active customers ──────────────────
