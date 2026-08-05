@@ -121,7 +121,7 @@ class Settings(BaseSettings):
         if self.RESEND_FROM_EMAIL:
             self.EMAIL_FROM_ADDRESS = self.RESEND_FROM_EMAIL
         return self
-    FRONTEND_URL: str = "https://af-apparels.vercel.app"
+    FRONTEND_URL: str = "https://afblanks.com"  # live domain — all email links (reset, order, RMA…) use this
 
     # ── AWS S3 ────────────────────────────────────────────────────────────────
     AWS_ACCESS_KEY_ID: str = ""

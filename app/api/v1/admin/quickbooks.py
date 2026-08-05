@@ -172,7 +172,7 @@ async def quickbooks_callback(
     client_id = os.getenv("QB_CLIENT_ID", "")
     client_secret = os.getenv("QB_CLIENT_SECRET", "")
     redirect_uri = os.getenv("QB_REDIRECT_URI", "")
-    frontend_url = os.getenv("FRONTEND_URL", "https://af-apparels.vercel.app")
+    frontend_url = os.getenv("FRONTEND_URL", "https://afblanks.com")
 
     if not client_id or not client_secret or not redirect_uri:
         raise HTTPException(status_code=500, detail="QuickBooks OAuth env vars not configured")
