@@ -465,6 +465,7 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
                     ).limit(1)
                 )
                 inv_record = inv_result.scalar_one_or_none()
+                prev_qty = inv_record.quantity if inv_record else 0  # stock BEFORE this receipt — needed for weighted-average costing
                 if inv_record:
                     inv_record.quantity = inv_record.quantity + item_data.qty_received
                 else:
@@ -481,18 +482,30 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
                     else:
                         logger.warning("No active warehouse found; skipping inventory update for variant %s", line_item.product_variant_id)
 
-                # Update cost_per_item when actual cost differs from stored cost
+                # Weighted-average cost: blend the existing stock's cost with the
+                # newly received cost, weighted by quantity, so inventory value
+                # reflects what was actually paid instead of jumping to the latest
+                # price. New cost = (prev_qty·old_cost + new_qty·new_cost) / total_qty.
+                # Falls back to the received cost when there's no prior stock or the
+                # item had no cost on file yet.
                 if item_data.unit_cost_actual > 0:
                     variant_obj = (await db.execute(
                         select(ProductVariant).where(ProductVariant.id == line_item.product_variant_id)
                     )).scalar_one_or_none()
                     if variant_obj:
                         old_cost = float(variant_obj.cost_per_item or 0)
-                        if abs(item_data.unit_cost_actual - old_cost) > 0.001:
-                            variant_obj.cost_per_item = item_data.unit_cost_actual
+                        new_qty = item_data.qty_received
+                        new_cost = float(item_data.unit_cost_actual)
+                        if prev_qty > 0 and old_cost > 0 and new_qty > 0:
+                            blended = (prev_qty * old_cost + new_qty * new_cost) / (prev_qty + new_qty)
+                        else:
+                            blended = new_cost
+                        blended = round(blended, 2)
+                        if abs(blended - old_cost) > 0.001:
+                            variant_obj.cost_per_item = blended
                             logger.info(
-                                "cost_per_item updated: %s $%.2f → $%.2f",
-                                variant_obj.sku, old_cost, item_data.unit_cost_actual,
+                                "cost_per_item (weighted avg): %s $%.2f → $%.2f  [%s @ $%.2f + %s @ $%.2f]",
+                                variant_obj.sku, old_cost, blended, prev_qty, old_cost, new_qty, new_cost,
                             )
 
                 if line_item.product_variant_id not in variants_received:
