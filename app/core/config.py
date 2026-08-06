@@ -80,6 +80,24 @@ class Settings(BaseSettings):
     # temporary refresh hiccup never logs the user out mid-session
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 30
 
+    @model_validator(mode="after")
+    def _force_long_session_in_prod(self) -> "Settings":
+        """Users were being logged out after only a little inactivity. Root cause:
+        a SHORT access-token expiry left in the Railway env (from initial setup)
+        overrides the intended 30-day default, so the token expires quickly and any
+        refresh hiccup drops the session. In production/staging, never let the
+        access token live less than 30 days (nor the refresh token under 30 days),
+        regardless of what the env var says — so a brief idle never logs anyone out.
+        Note: only affects NEWLY issued tokens, so users must sign in once more to
+        pick up the long-lived token."""
+        if self.APP_ENV in ("production", "staging"):
+            THIRTY_DAYS_MIN = 60 * 24 * 30
+            if self.JWT_ACCESS_TOKEN_EXPIRE_MINUTES < THIRTY_DAYS_MIN:
+                self.JWT_ACCESS_TOKEN_EXPIRE_MINUTES = THIRTY_DAYS_MIN
+            if self.JWT_REFRESH_TOKEN_EXPIRE_DAYS < 30:
+                self.JWT_REFRESH_TOKEN_EXPIRE_DAYS = 30
+        return self
+
     # ── Stripe ────────────────────────────────────────────────────────────────
     STRIPE_SECRET_KEY: str = ""
     STRIPE_PUBLISHABLE_KEY: str = ""
