@@ -534,10 +534,16 @@ class QuickBooksService:
                     ln["SalesItemLineDetail"]["ItemRef"]["value"]
                     for ln in lines if ln.get("SalesItemLineDetail")
                 }
-                if any(self.reactivate_item(iid) for iid in item_ids):
-                    logger.info("QB: reactivated inactive item(s) %s — retrying invoice for %s", item_ids, order_number)
+                # Reactivate EVERY referenced item — do NOT short-circuit: the
+                # inactive one may not be the first in the set, so we must attempt
+                # them all (an already-active item is just a no-op).
+                results = {iid: self.reactivate_item(iid) for iid in item_ids}
+                if all(results.values()):
+                    logger.info("QB: ensured items active %s — retrying invoice for %s", item_ids, order_number)
                     resp = self._request("POST", "invoice", json=payload)
                 else:
+                    failed = [i for i, ok in results.items() if not ok]
+                    logger.error("QB: could not reactivate item(s) %s — invoice %s still blocked", failed, order_number)
                     raise
             else:
                 raise
@@ -553,6 +559,10 @@ class QuickBooksService:
         try:
             data = self._request("GET", f"item/{item_id}?minorversion=65")
             item = data.get("Item") or {}
+            logger.info(
+                "QB reactivate_item %s: Active=%s Type=%s Name=%r",
+                item_id, item.get("Active"), item.get("Type"), item.get("Name"),
+            )
             if item.get("Active") is True:
                 return True  # already active — nothing to do
             sync_token = item.get("SyncToken")
