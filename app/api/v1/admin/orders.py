@@ -2372,8 +2372,14 @@ async def download_admin_invoice_pdf(order_id: UUID, db: AsyncSession = Depends(
     import io
     from sqlalchemy.orm import selectinload
 
+    # Eager-load the relationships the invoice PDF reads (company + placed_by),
+    # otherwise generating it lazy-loads them and crashes under async SQLAlchemy.
     order = (await db.execute(
-        select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+        select(Order).options(
+            selectinload(Order.items),
+            selectinload(Order.company),
+            selectinload(Order.placed_by),
+        ).where(Order.id == order_id)
     )).scalar_one_or_none()
     if not order:
         raise NotFoundError(f"Order {order_id} not found")
@@ -2404,7 +2410,11 @@ async def download_admin_invoice_pdf(order_id: UUID, db: AsyncSession = Depends(
 
     # Local PDF fallback (works even when the order isn't in QuickBooks)
     from app.services.pdf_service import PDFService
-    pdf = PDFService().generate_invoice(order)
+    try:
+        pdf = PDFService().generate_invoice(order)
+    except Exception as e:
+        logger.error("Local invoice PDF generation failed for order %s: %s", order_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Could not generate the invoice PDF for this order.")
     return StreamingResponse(
         io.BytesIO(pdf),
         media_type="application/pdf",
