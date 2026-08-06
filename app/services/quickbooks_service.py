@@ -831,6 +831,22 @@ class QuickBooksService:
             return True
 
         except Exception as exc:
+            # If the item was deactivated in QB, its quantity update fails with the
+            # same "activate this item before updating the quantity" error as
+            # invoices. Reactivate it and retry once so a QB cleanup never stops
+            # stock quantities from syncing (self-healing, mirrors create_invoice).
+            resp_obj = getattr(exc, "response", None)
+            body = getattr(resp_obj, "text", "") if resp_obj is not None else ""
+            if resp_obj is not None and getattr(resp_obj, "status_code", 0) == 400 and "activate this item" in body.lower():
+                if self.reactivate_item(qb_item_id):
+                    try:
+                        _fresh = self.get_item(qb_item_id)
+                        if _fresh:
+                            _do_update(_fresh["SyncToken"])
+                            logger.info("QB update_item success after reactivation — id=%s", qb_item_id)
+                            return True
+                    except Exception as retry_exc:
+                        logger.error("QB update_item retry after reactivation failed for %s: %s", qb_item_id, retry_exc)
             logger.error("QB update_item failed for %s: %s", qb_item_id, exc)
             return False
 
