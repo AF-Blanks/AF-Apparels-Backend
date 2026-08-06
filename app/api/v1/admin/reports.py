@@ -272,6 +272,66 @@ async def inventory_report(
     }
 
 
+@router.get("/reports/inventory-value")
+async def inventory_value_report(
+    _: None = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Total worth of stock currently on hand: for each product, quantity × unit
+    cost, plus a grand total. Answers 'how much money is sitting in my inventory
+    right now?'. Uses each variant's cost_per_item and stock summed across
+    warehouses. Variants that have stock but no cost on file are counted separately
+    so the owner knows the valuation excludes them."""
+    variant_q = (
+        select(
+            Product.id.label("product_id"),
+            Product.name.label("product_name"),
+            ProductVariant.cost_per_item.label("cost"),
+            func.coalesce(func.sum(InventoryRecord.quantity), 0).label("qty"),
+        )
+        .join(Product, Product.id == ProductVariant.product_id)
+        .outerjoin(InventoryRecord, InventoryRecord.variant_id == ProductVariant.id)
+        .where(ProductVariant.status == "active")
+        .group_by(Product.id, Product.name, ProductVariant.id, ProductVariant.cost_per_item)
+    )
+    rows = (await db.execute(variant_q)).mappings().all()
+
+    products: dict[str, dict] = {}
+    total_value = 0.0
+    total_units = 0
+    missing_cost_units = 0
+    missing_cost_skus = 0
+    for r in rows:
+        qty = int(r["qty"] or 0)
+        if qty <= 0:
+            continue
+        total_units += qty
+        pid = str(r["product_id"])
+        p = products.setdefault(pid, {"product_name": r["product_name"], "quantity": 0, "value": 0.0, "fully_costed": True})
+        p["quantity"] += qty
+        if r["cost"] is None:
+            missing_cost_units += qty
+            missing_cost_skus += 1
+            p["fully_costed"] = False
+        else:
+            val = qty * float(r["cost"])
+            p["value"] += val
+            total_value += val
+
+    items = sorted(products.values(), key=lambda x: x["value"], reverse=True)
+    for p in items:
+        p["value"] = round(p["value"], 2)
+
+    return {
+        "total_value": round(total_value, 2),
+        "total_units": total_units,
+        "product_count": len(items),
+        "missing_cost_units": missing_cost_units,
+        "missing_cost_skus": missing_cost_skus,
+        "items": items,
+    }
+
+
 # ── T187: Customer Report ─────────────────────────────────────────────────────
 
 @router.get("/reports/customers")
