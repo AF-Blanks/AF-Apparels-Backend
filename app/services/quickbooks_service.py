@@ -9,6 +9,7 @@ Tokens are saved back to app_settings after every successful refresh.
 """
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from threading import Lock
@@ -520,7 +521,7 @@ class QuickBooksService:
 
         logger.info("QB create_invoice payload: %s", payload)
         try:
-            resp = self._request("POST", "invoice", json=payload)
+            return self._submit_invoice(payload, order_number)
         except httpx.HTTPStatusError as e:
             # QB rejects an invoice that references an INACTIVE item ("You need to
             # activate this item before updating the quantity", validation code
@@ -540,14 +541,32 @@ class QuickBooksService:
                 results = {iid: self.reactivate_item(iid) for iid in item_ids}
                 if all(results.values()):
                     logger.info("QB: ensured items active %s — retrying invoice for %s", item_ids, order_number)
-                    resp = self._request("POST", "invoice", json=payload)
-                else:
-                    failed = [i for i, ok in results.items() if not ok]
-                    logger.error("QB: could not reactivate item(s) %s — invoice %s still blocked", failed, order_number)
-                    raise
-            else:
-                raise
-        return str(resp["Invoice"]["Id"])
+                    return self._submit_invoice(payload, order_number)
+                failed = [i for i, ok in results.items() if not ok]
+                logger.error("QB: could not reactivate item(s) %s — invoice %s still blocked", failed, order_number)
+            raise
+
+    def _submit_invoice(self, payload: dict[str, Any], order_number: str) -> str:
+        """POST the invoice and return its QB Id. If QB reports the DocNumber is
+        already in use (a prior run already created this invoice), recover and
+        return that existing invoice's Id from the error instead of failing — makes
+        creation idempotent, so a re-sync never duplicates or errors on an order
+        that's already in QuickBooks."""
+        try:
+            resp = self._request("POST", "invoice", json=payload)
+            return str(resp["Invoice"]["Id"])
+        except httpx.HTTPStatusError as e:
+            body = e.response.text if e.response is not None else ""
+            status = e.response.status_code if e.response is not None else 0
+            if status == 400 and "duplicate document number" in body.lower():
+                m = re.search(r"TxnId=(\d+)", body)
+                if m:
+                    logger.info(
+                        "QB: DocNumber %s already exists as invoice %s — using the existing one",
+                        order_number, m.group(1),
+                    )
+                    return m.group(1)
+            raise
 
     def reactivate_item(self, item_id: str) -> bool:
         """Reactivate an inactive QB item so it can be used on invoices again.
