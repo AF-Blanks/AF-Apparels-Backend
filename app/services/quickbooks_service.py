@@ -519,8 +519,57 @@ class QuickBooksService:
             payload["ShipAddr"] = shipping_addr
 
         logger.info("QB create_invoice payload: %s", payload)
-        resp = self._request("POST", "invoice", json=payload)
+        try:
+            resp = self._request("POST", "invoice", json=payload)
+        except httpx.HTTPStatusError as e:
+            # QB rejects an invoice that references an INACTIVE item ("You need to
+            # activate this item before updating the quantity", validation code
+            # 6000). This happens when an item was deactivated/deleted in QB. Rather
+            # than block the sale, reactivate the referenced item(s) and retry once
+            # — so a cleanup in QuickBooks never stops invoices from being created.
+            body = e.response.text if e.response is not None else ""
+            status = e.response.status_code if e.response is not None else 0
+            if status == 400 and "activate this item" in body.lower():
+                item_ids = {
+                    ln["SalesItemLineDetail"]["ItemRef"]["value"]
+                    for ln in lines if ln.get("SalesItemLineDetail")
+                }
+                if any(self.reactivate_item(iid) for iid in item_ids):
+                    logger.info("QB: reactivated inactive item(s) %s — retrying invoice for %s", item_ids, order_number)
+                    resp = self._request("POST", "invoice", json=payload)
+                else:
+                    raise
+            else:
+                raise
         return str(resp["Invoice"]["Id"])
+
+    def reactivate_item(self, item_id: str) -> bool:
+        """Reactivate an inactive QB item so it can be used on invoices again.
+
+        QB items are never truly deleted — deactivating one only sets Active=false,
+        which then blocks any new transaction that references it. Flipping it back
+        requires a sparse update carrying the item's current SyncToken.
+        """
+        try:
+            data = self._request("GET", f"item/{item_id}?minorversion=65")
+            item = data.get("Item") or {}
+            if item.get("Active") is True:
+                return True  # already active — nothing to do
+            sync_token = item.get("SyncToken")
+            if sync_token is None:
+                logger.warning("QB reactivate_item %s: no SyncToken returned", item_id)
+                return False
+            self._request("POST", "item", json={
+                "Id": str(item_id),
+                "SyncToken": sync_token,
+                "Active": True,
+                "sparse": True,
+            })
+            logger.info("QB item %s reactivated", item_id)
+            return True
+        except Exception as e:
+            logger.warning("QB reactivate_item %s failed: %s", item_id, e)
+            return False
 
     # ── Items (Products / Inventory) ─────────────────────────────────────────
 
