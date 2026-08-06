@@ -1875,6 +1875,29 @@ async def sync_order_to_quickbooks(order_id: UUID, db: AsyncSession = Depends(ge
     return {"message": "QuickBooks sync queued", "order_id": str(order_id)}
 
 
+@router.post("/orders/{order_id}/recreate-qb-invoice", response_model=dict)
+async def recreate_qb_invoice(order_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Recreate this order's invoice in QuickBooks from scratch — for when the QB
+    invoice was deleted. The normal sync SKIPS creating when the order already
+    stores a qb_invoice_id (it trusts the invoice exists), so here we clear that
+    stale id first; the sync then creates a fresh invoice AND emails the customer
+    the new invoice. All the order data is preserved in the app, so nothing is
+    lost. One rate-limited QB call — no API storm."""
+    from sqlalchemy import text as _text
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+    # Clear the stale/deleted QB invoice reference so the sync recreates it.
+    await db.execute(
+        _text("UPDATE orders SET qb_invoice_id=NULL WHERE id=:oid"),
+        {"oid": str(order_id)},
+    )
+    await db.commit()
+    from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+    sync_order_invoice_to_qb.delay(str(order_id))
+    return {"message": "Recreating the invoice in QuickBooks — it will appear shortly and the customer will be emailed the new invoice.", "order_id": str(order_id)}
+
+
 # ---------------------------------------------------------------------------
 # Admin RMA management
 # ---------------------------------------------------------------------------
