@@ -2363,3 +2363,50 @@ async def send_abandoned_cart_reminder(
         ),
     )
     return {"message": f"Reminder sent to {owner.email}"}
+
+
+@router.get("/orders/{order_id}/invoice-pdf")
+async def download_admin_invoice_pdf(order_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Download any order's invoice as a PDF (admin). Uses the official QuickBooks
+    invoice PDF when the order is synced to QB, otherwise generates a local one."""
+    import io
+    from sqlalchemy.orm import selectinload
+
+    order = (await db.execute(
+        select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+    )).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+
+    filename = f"invoice-{order.order_number}.pdf"
+
+    # Prefer the official QuickBooks invoice PDF when the order is synced there.
+    if order.qb_invoice_id:
+        try:
+            import httpx as _httpx
+            from app.services.quickbooks_service import QuickBooksService
+            svc = await QuickBooksService().initialize()
+            async with _httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    svc._url(f"invoice/{order.qb_invoice_id}/pdf"),
+                    params={"minorversion": "65"},
+                    headers={"Authorization": f"Bearer {svc._access_token}", "Accept": "application/pdf"},
+                )
+            if resp.status_code == 200:
+                return StreamingResponse(
+                    io.BytesIO(resp.content),
+                    media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                )
+            logger.warning("QB PDF returned %s for invoice %s — using local PDF", resp.status_code, order.qb_invoice_id)
+        except Exception as exc:
+            logger.error("QB invoice PDF fetch failed: %s — using local PDF", exc)
+
+    # Local PDF fallback (works even when the order isn't in QuickBooks)
+    from app.services.pdf_service import PDFService
+    pdf = PDFService().generate_invoice(order)
+    return StreamingResponse(
+        io.BytesIO(pdf),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
