@@ -935,6 +935,13 @@ async def update_admin_order(
             {"tl": _json.dumps(current), "oid": str(order_id)},
         )
 
+    # Moving into fulfilment takes the stock off the shelf (once). Admin-built
+    # orders never went through checkout, so this is where their stock is deducted.
+    if payload.status in _FULFILLMENT_STATUSES:
+        await _deduct_order_inventory(
+            order, db, f"Order {order.order_number} {payload.status} — stock deducted"
+        )
+
     # Cancelling before the goods shipped returns the stock to inventory (once).
     if payload.status == "cancelled" and old_status != "cancelled":
         await _restock_order_inventory(
@@ -1069,6 +1076,13 @@ async def update_order_status(
         _text("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
         {"tl": _json.dumps(current), "oid": str(order_id)},
     )
+
+    # Moving into fulfilment takes the stock off the shelf (once). Admin-built
+    # orders never went through checkout, so this is where their stock is deducted.
+    if payload.status in _FULFILLMENT_STATUSES:
+        await _deduct_order_inventory(
+            order, db, f"Order {order.order_number} {payload.status} — stock deducted"
+        )
 
     # Cancelling before the goods shipped returns the stock to inventory (once).
     if payload.status == "cancelled" and old_status != "cancelled":
@@ -1254,6 +1268,12 @@ async def generate_shipping_label(
     order.status = "shipped"
     if not order.shipped_at:
         order.shipped_at = datetime.now(timezone.utc)
+
+    # Shipping a label moves the goods out — take the stock off the shelf (once).
+    # This path sets the status directly, so it must deduct here as well.
+    await _deduct_order_inventory(
+        order, db, f"Order {order.order_number} shipped (label generated) — stock deducted"
+    )
 
     all_labels_json = _json.dumps(all_labels)
     await db.execute(
@@ -1608,6 +1628,12 @@ async def generate_label_manual(
     if not order.shipped_at:
         order.shipped_at = datetime.now(timezone.utc)
 
+    # Shipping a label moves the goods out — take the stock off the shelf (once).
+    # This path sets the status directly, so it must deduct here as well.
+    await _deduct_order_inventory(
+        order, db, f"Order {order.order_number} shipped (label generated) — stock deducted"
+    )
+
     all_labels_json = _json.dumps(all_labels)
     await db.execute(
         _text2("UPDATE orders SET label_url=:lu, tracking_url=:tu, all_labels=:al WHERE id=:oid"),
@@ -1665,9 +1691,18 @@ async def cancel_admin_order(
     if not order:
         raise NotFoundError(f"Order {order_id} not found")
     _had_qb_invoice = bool(order.qb_invoice_id)
+    _was_cancelled = order.status == "cancelled"
     order.status = "cancelled"
     if hasattr(order, "notes"):
         order.notes = f"Cancelled: {payload.reason}"
+
+    # The goods never left — put the stock back (once). The other cancel paths
+    # already did this; this endpoint was missing it.
+    if not _was_cancelled:
+        await _restock_order_inventory(
+            order, db, "returned", f"Order {order.order_number} cancelled — stock returned"
+        )
+
     await db.commit()
 
     try:
@@ -1990,6 +2025,63 @@ async def _resolve_warehouse_for_variant(variant_id: UUID, db: AsyncSession) -> 
 
     wh = (await db.execute(select(Warehouse.id).limit(1))).scalar_one_or_none()
     return wh
+
+
+# Statuses that mean the goods are committed to the customer — the point at which
+# an admin-built order's stock must come off the shelf.
+_FULFILLMENT_STATUSES = ("confirmed", "processing", "ready_for_pickup", "shipped", "delivered")
+
+
+async def _deduct_order_inventory(order: Order, db: AsyncSession, note: str) -> None:
+    """Take an order's stock off the shelf the first time it enters fulfilment.
+
+    Orders placed through checkout already deduct at payment time (OrderService),
+    but orders an admin builds by hand never pass through checkout — so without
+    this their stock was never reduced, no matter how far the status advanced.
+    Runs exactly once, guarded by ``order.inventory_deducted`` (which is also what
+    lets a later cancel/delete restock it exactly once). Storm-safe: no per-variant
+    QuickBooks push — a single batched sync is queued at the end.
+    """
+    if getattr(order, "inventory_deducted", False):
+        return
+
+    items = (await db.execute(
+        select(OrderItem).where(OrderItem.order_id == order.id)
+    )).scalars().all()
+
+    from app.services.inventory_service import InventoryService
+    inv = InventoryService(db)
+    deducted_ids: list[str] = []
+    for it in items:
+        if not it.variant_id or int(it.quantity or 0) <= 0:
+            continue
+        warehouse_id = await _resolve_warehouse_for_variant(it.variant_id, db)
+        if not warehouse_id:
+            continue
+        await inv.adjust_stock_with_log(
+            variant_id=it.variant_id,
+            warehouse_id=warehouse_id,
+            quantity_delta=-int(it.quantity),
+            reason="sold",
+            notes=note,
+            sync_qb=False,  # batched below — never a per-variant QB storm
+        )
+        if str(it.variant_id) not in deducted_ids:
+            deducted_ids.append(str(it.variant_id))
+
+    if not deducted_ids:
+        return  # nothing shippable on this order — leave the flag alone
+
+    # Mark deducted so this never runs twice, and so cancel/delete restocks once.
+    order.inventory_deducted = True
+
+    try:
+        from app.tasks.quickbooks_tasks import sync_inventory_batch_to_qb
+        sync_inventory_batch_to_qb.apply_async(args=[deducted_ids], countdown=20)
+        logger.info("Order %s deducted %d variant(s) — 1 batched QB sync queued",
+                    order.order_number, len(deducted_ids))
+    except Exception as _e:
+        logger.warning("Deduct QB batch sync dispatch failed: %s", _e)
 
 
 async def _restock_order_inventory(order: Order, db: AsyncSession, reason: str, note: str) -> None:
