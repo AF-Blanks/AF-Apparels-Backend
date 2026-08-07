@@ -1151,7 +1151,7 @@ async def generate_shipping_label(
         except Exception:
             pass
 
-    boxes = calculate_boxes(items, variant_weight_g)
+    boxes = calculate_boxes(items, variant_weight_g, override_count=getattr(order, "manual_box_count", None))
     num_boxes = len(boxes)
 
     carrier_name = order.carrier or payload.carrier or ""
@@ -1425,7 +1425,7 @@ async def get_box_summary(order_id: UUID, db: AsyncSession = Depends(get_db)) ->
             if _wg:
                 variant_weight_g[str(_vid)] = float(_wg)
 
-    boxes = calculate_boxes(items, variant_weight_g)
+    boxes = calculate_boxes(items, variant_weight_g, override_count=getattr(order, "manual_box_count", None))
     num_boxes = len(boxes)
     total_lbs = round(sum(b.weight_lbs for b in boxes), 2)
     per_box = round(total_lbs / num_boxes, 2) if num_boxes else 0.0
@@ -1435,7 +1435,31 @@ async def get_box_summary(order_id: UUID, db: AsyncSession = Depends(get_db)) ->
         "total_weight_lbs": total_lbs,
         "weight_per_box_lbs": per_box,
         "boxes": [{"box_number": b.box_number, "weight_lbs": b.weight_lbs} for b in boxes],
+        "manual_box_count": getattr(order, "manual_box_count", None),
     }
+
+
+@router.patch("/orders/{order_id}/box-count", status_code=200)
+async def set_box_count(order_id: UUID, body: dict, db: AsyncSession = Depends(get_db)) -> dict:
+    """Manually set how many boxes this order was actually packed in — overrides
+    the automatic weight-based estimate (fewer or more boxes). Pass box_count=null
+    to revert to the automatic count."""
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+    raw = body.get("box_count")
+    if raw is None:
+        order.manual_box_count = None
+    else:
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="box_count must be a whole number")
+        if n < 1 or n > 99:
+            raise HTTPException(status_code=422, detail="box_count must be between 1 and 99")
+        order.manual_box_count = n
+    await db.commit()
+    return {"manual_box_count": order.manual_box_count}
 
 
 @router.post("/orders/{order_id}/generate-label-manual", status_code=200)
@@ -1474,7 +1498,7 @@ async def generate_label_manual(
         except Exception:
             pass
 
-    boxes = calculate_boxes(items, variant_weight_g)
+    boxes = calculate_boxes(items, variant_weight_g, override_count=getattr(order, "manual_box_count", None))
     num_boxes = len(boxes)
 
     # Parse shipping address

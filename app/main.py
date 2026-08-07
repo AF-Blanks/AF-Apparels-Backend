@@ -268,6 +268,14 @@ async def _ensure_content_tables() -> None:
                         WHERE order_number NOT LIKE 'DRAFT-%'
                           AND status IN ('pending','confirmed','processing','ready_for_pickup');
                     END IF;
+                    -- Admin override for how many boxes an order was packed in
+                    -- (NULL = use the auto weight-based estimate). (idempotent)
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='orders' AND column_name='manual_box_count'
+                    ) THEN
+                        ALTER TABLE orders ADD COLUMN manual_box_count INTEGER;
+                    END IF;
                 END$$;
             """))
             # Net 7 / Net 30 credit terms on companies (mutually exclusive — the

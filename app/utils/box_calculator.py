@@ -33,18 +33,22 @@ def _item_multiplier(product_name: str, size: str | None) -> float:
     return 1.0  # S, M, L, XL, 2XL T-shirts
 
 
-def calculate_boxes(items, variant_weight_g: dict | None = None) -> list[BoxSpec]:
+def calculate_boxes(items, variant_weight_g: dict | None = None, override_count: int | None = None) -> list[BoxSpec]:
     """Calculate how many boxes an order needs and the weight per box.
 
     Args:
         items: list of OrderItem objects with .product_name, .size, .quantity, .variant_id
         variant_weight_g: optional dict of str(variant_id) -> grams
+        override_count: if set (>=1), forces this many boxes and splits the total
+            weight evenly across them — an admin manually adjusting how the order
+            was actually packed (fewer/more boxes than the auto estimate).
 
     Returns:
         List of BoxSpec objects, minimum 1 box.
     """
     if not items:
-        return [BoxSpec(box_number=1, weight_lbs=1.0)]
+        n = int(override_count) if override_count and override_count >= 1 else 1
+        return [BoxSpec(box_number=i + 1, weight_lbs=1.0) for i in range(n)]
 
     total_units = 0.0
     total_weight_g = 0.0
@@ -62,6 +66,8 @@ def calculate_boxes(items, variant_weight_g: dict | None = None) -> list[BoxSpec
             total_weight_g += FALLBACK_WEIGHT_G * qty * mult
 
     num_boxes = max(1, math.ceil(total_units / UNITS_PER_BOX))
+    if override_count and override_count >= 1:
+        num_boxes = int(override_count)  # admin manually set how many boxes were used
     total_lbs = total_weight_g / GRAMS_PER_LB
     per_box_lbs = total_lbs / num_boxes
 

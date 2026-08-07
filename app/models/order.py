@@ -80,6 +80,9 @@ class Order(BaseModel):
     shipping_rate_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     courier: Mapped[str | None] = mapped_column(String(100))
     courier_service: Mapped[str | None] = mapped_column(String(100))
+    # Admin override for how many boxes the order was actually packed in
+    # (NULL = use the auto weight-based estimate).
+    manual_box_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     shipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # QuickBooks Payments
