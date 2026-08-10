@@ -20,8 +20,28 @@ from app.models.product import Category, Product, ProductCategory, ProductVarian
 router = APIRouter(prefix="/admin", tags=["Admin — Reports"])
 
 
-def _date_range(period: str) -> tuple[datetime, datetime]:
-    """Return (start, end) datetime for the given period key."""
+def _date_range(
+    period: str,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> tuple[datetime, datetime]:
+    """Return (start, end) datetime for the given period key.
+
+    An explicit date_from/date_to wins over the rolling period, so reports can be
+    run for any exact span (a single day, one week, a month, a full year) instead
+    of only the fixed "last N days" windows.
+    """
+    if date_from or date_to:
+        today_ = date.today()
+        f = date_from or date(2000, 1, 1)
+        t = date_to or today_
+        if f > t:
+            f, t = t, f
+        return (
+            datetime.combine(f, datetime.min.time()),
+            datetime.combine(t, datetime.max.time()),
+        )
+
     today = date.today()
     if period == "today":
         start = datetime.combine(today, datetime.min.time())
@@ -44,17 +64,21 @@ def _date_range(period: str) -> tuple[datetime, datetime]:
 @router.get("/reports/sales")
 async def sales_report(
     period: str = Query("month", description="today|week|month|quarter|year"),
-    group_by: Literal["day", "week", "month"] = Query("day"),
+    group_by: Literal["day", "week", "month", "year"] = Query("day"),
+    date_from: date | None = Query(None, description="Exact start date (overrides period)"),
+    date_to: date | None = Query(None, description="Exact end date (overrides period)"),
     _: None = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    start, end = _date_range(period)
+    start, end = _date_range(period, date_from, date_to)
 
-    # Period data: revenue grouped by day/week/month
+    # Period data: revenue grouped by day/week/month/year
     if group_by == "day":
         trunc = func.date_trunc("day", Order.created_at)
     elif group_by == "week":
         trunc = func.date_trunc("week", Order.created_at)
+    elif group_by == "year":
+        trunc = func.date_trunc("year", Order.created_at)
     else:
         trunc = func.date_trunc("month", Order.created_at)
 
@@ -539,13 +563,15 @@ async def customer_report(
 @router.get("/reports/variant-sales")
 async def variant_sales_report(
     period: str = Query("week", description="today|week|month|quarter|year"),
+    date_from: date | None = Query(None, description="Exact start date (overrides period)"),
+    date_to: date | None = Query(None, description="Exact end date (overrides period)"),
     _: None = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Sales broken down by product → color → size for a given period."""
     from collections import defaultdict
 
-    start, end = _date_range(period)
+    start, end = _date_range(period, date_from, date_to)
 
     rows = (await db.execute(
         select(
