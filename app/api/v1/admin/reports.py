@@ -371,8 +371,20 @@ async def outstanding_report(
     """
     from sqlalchemy import and_
 
-    # What each order still owes, never negative.
-    owed = func.greatest(Order.total - func.coalesce(Order.amount_paid, 0), 0)
+    # payment_status is the source of truth for whether an order is settled:
+    # card-captured orders set payment_status="paid" without always filling in
+    # amount_paid, so "total - amount_paid" would wrongly report a fully paid
+    # order as owing its whole value. amount_paid is only used to work out how
+    # much of a still-open order has been part-paid.
+    _settled = Order.payment_status.in_(["paid", "refunded"])
+    owed = case(
+        (_settled, 0),
+        else_=func.greatest(Order.total - func.coalesce(Order.amount_paid, 0), 0),
+    )
+    paid_amount = case(
+        (_settled, Order.total),
+        else_=func.coalesce(Order.amount_paid, 0),
+    )
 
     now = datetime.now(timezone.utc)
     d30, d60, d90 = now - timedelta(days=30), now - timedelta(days=60), now - timedelta(days=90)
@@ -390,7 +402,7 @@ async def outstanding_report(
             Company.net7_enabled.label("net7"),
             func.count(Order.id).label("order_count"),
             func.coalesce(func.sum(Order.total), 0).label("total_purchased"),
-            func.coalesce(func.sum(func.coalesce(Order.amount_paid, 0)), 0).label("total_paid"),
+            func.coalesce(func.sum(paid_amount), 0).label("total_paid"),
             func.coalesce(func.sum(owed), 0).label("outstanding"),
             func.count(case((owed > 0, Order.id))).label("unpaid_orders"),
             func.min(case((owed > 0, Order.created_at))).label("oldest_unpaid_at"),
@@ -510,13 +522,21 @@ async def customer_report(
 
     # Top customers by spend — with what they've paid vs. what's still owed
     # (all consistent within the selected period, so the columns tie out).
+    # payment_status is the source of truth for settled orders — see
+    # outstanding_report: card captures set it without always filling amount_paid.
+    _c_settled = Order.payment_status.in_(["paid", "refunded"])
+    _c_paid = case((_c_settled, Order.total), else_=func.coalesce(Order.amount_paid, 0))
+    _c_owed = case(
+        (_c_settled, 0),
+        else_=func.greatest(Order.total - func.coalesce(Order.amount_paid, 0), 0),
+    )
     top_q = (
         select(
             Company.name.label("company_name"),
             func.count(Order.id).label("order_count"),
             func.sum(Order.total).label("total_spend"),
-            func.coalesce(func.sum(func.coalesce(Order.amount_paid, 0)), 0).label("total_paid"),
-            func.coalesce(func.sum(func.greatest(Order.total - func.coalesce(Order.amount_paid, 0), 0)), 0).label("outstanding"),
+            func.coalesce(func.sum(_c_paid), 0).label("total_paid"),
+            func.coalesce(func.sum(_c_owed), 0).label("outstanding"),
         )
         .join(Order, Order.company_id == Company.id)
         .where(Order.created_at.between(start, end))

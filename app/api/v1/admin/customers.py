@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -651,15 +651,23 @@ async def delete_company(company_id: UUID, db: AsyncSession = Depends(get_db)) -
 
 @router.get("/companies/{company_id}/stats")
 async def get_customer_stats(company_id: UUID, db: AsyncSession = Depends(get_db)):
+    # payment_status is the source of truth for whether an order is settled:
+    # card-captured orders set payment_status="paid" without always filling in
+    # amount_paid, so "total - amount_paid" would wrongly show a fully paid order
+    # as still owing its whole value. amount_paid only decides how much of a
+    # still-open order has been part-paid.
+    _settled = Order.payment_status.in_(["paid", "refunded"])
+    _paid_amount = case((_settled, Order.total), else_=func.coalesce(Order.amount_paid, 0))
+    _owed = case(
+        (_settled, 0),
+        else_=func.greatest(Order.total - func.coalesce(Order.amount_paid, 0), 0),
+    )
     result = await db.execute(
         select(
             func.count(Order.id).label("total_orders"),
             func.coalesce(func.sum(Order.total), 0).label("total_spent"),
-            # What the customer has actually paid so far…
-            func.coalesce(func.sum(func.coalesce(Order.amount_paid, 0)), 0).label("total_paid"),
-            # …and what they still owe (sum of each order's unpaid balance, never
-            # negative). This is the accounts-receivable for this customer.
-            func.coalesce(func.sum(func.greatest(Order.total - func.coalesce(Order.amount_paid, 0), 0)), 0).label("outstanding"),
+            func.coalesce(func.sum(_paid_amount), 0).label("total_paid"),
+            func.coalesce(func.sum(_owed), 0).label("outstanding"),
             func.max(Order.created_at).label("last_order_date"),
         ).where(Order.company_id == company_id, Order.status.not_in(["cancelled", "refunded"]))
     )
