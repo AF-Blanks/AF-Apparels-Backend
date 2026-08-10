@@ -895,6 +895,76 @@ async def remove_order_item(
     return {"message": "Item removed"}
 
 
+@router.patch("/orders/{order_id}/items/{item_id}", status_code=200)
+async def update_order_item(
+    order_id: UUID,
+    item_id: UUID,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Change a line item's unit price and/or quantity on an order that hasn't
+    completed — so an admin can agree a special price with a customer while
+    building the order. Items normally price from the company's tier/discount
+    group; this is the deliberate manual override. Order totals are recalculated
+    from every line so the invoice always matches what's on screen."""
+    item = (await db.execute(
+        select(OrderItem).where(OrderItem.id == item_id, OrderItem.order_id == order_id)
+    )).scalar_one_or_none()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.status in ("delivered", "cancelled", "refunded"):
+        raise HTTPException(status_code=422, detail="Cannot edit items on a completed or cancelled order")
+
+    if "unit_price" in payload and payload["unit_price"] is not None:
+        try:
+            new_price = round(float(payload["unit_price"]), 2)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="unit_price must be a number")
+        if new_price < 0:
+            raise HTTPException(status_code=422, detail="unit_price cannot be negative")
+        item.unit_price = new_price
+
+    if "quantity" in payload and payload["quantity"] is not None:
+        try:
+            new_qty = int(payload["quantity"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="quantity must be a whole number")
+        if new_qty < 1:
+            raise HTTPException(status_code=422, detail="quantity must be at least 1")
+        item.quantity = new_qty
+
+    item.line_total = round(float(item.unit_price or 0) * int(item.quantity or 0), 2)
+
+    # Rebuild the subtotal from all lines rather than adjusting by a delta — that
+    # way the order can never drift out of step with its items.
+    all_items = (await db.execute(
+        select(OrderItem).where(OrderItem.order_id == order_id)
+    )).scalars().all()
+    order.subtotal = round(sum(float(i.line_total or 0) for i in all_items), 2)
+    order.total = round(
+        float(order.subtotal) + float(order.shipping_cost or 0) + float(order.tax_amount or 0), 2
+    )
+    try:
+        order.items_edited = True
+    except Exception:
+        pass
+
+    await db.commit()
+    return {
+        "message": "Item updated",
+        "item_id": str(item.id),
+        "unit_price": float(item.unit_price or 0),
+        "quantity": int(item.quantity or 0),
+        "line_total": float(item.line_total or 0),
+        "subtotal": float(order.subtotal),
+        "total": float(order.total),
+    }
+
+
 @router.patch("/orders/{order_id}", response_model=dict)
 async def update_admin_order(
     order_id: UUID,
