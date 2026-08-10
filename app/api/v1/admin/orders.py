@@ -2134,7 +2134,7 @@ async def _deduct_order_inventory(order: Order, db: AsyncSession, note: str) -> 
             quantity_delta=-int(it.quantity),
             reason="sold",
             notes=note,
-            sync_qb=False,  # batched below — never a per-variant QB storm
+            sync_qb=False,  # QB moves this stock via the invoice/void, not a push
         )
         if str(it.variant_id) not in deducted_ids:
             deducted_ids.append(str(it.variant_id))
@@ -2145,13 +2145,12 @@ async def _deduct_order_inventory(order: Order, db: AsyncSession, note: str) -> 
     # Mark deducted so this never runs twice, and so cancel/delete restocks once.
     order.inventory_deducted = True
 
-    try:
-        from app.tasks.quickbooks_tasks import sync_inventory_batch_to_qb
-        sync_inventory_batch_to_qb.apply_async(args=[deducted_ids], countdown=20)
-        logger.info("Order %s deducted %d variant(s) — 1 batched QB sync queued",
-                    order.order_number, len(deducted_ids))
-    except Exception as _e:
-        logger.warning("Deduct QB batch sync dispatch failed: %s", _e)
+    # No QtyOnHand push to QuickBooks: this order's QB invoice already reduces the
+    # quantity there and books the cost to COGS. Pushing our absolute count as well
+    # made QB log a second, sale-less drop as an "Inventory Adjust" against its
+    # default "Inventory Shrinkage" account.
+    logger.info("Order %s deducted %d variant(s) locally — QB follows the invoice",
+                order.order_number, len(deducted_ids))
 
 
 async def _restock_order_inventory(order: Order, db: AsyncSession, reason: str, note: str) -> None:
@@ -2185,7 +2184,7 @@ async def _restock_order_inventory(order: Order, db: AsyncSession, reason: str, 
             quantity_delta=int(it.quantity),
             reason=reason,
             notes=note,
-            sync_qb=False,  # batched below — never a per-variant QB storm
+            sync_qb=False,  # QB moves this stock via the invoice/void, not a push
         )
         if str(it.variant_id) not in restocked_ids:
             restocked_ids.append(str(it.variant_id))
@@ -2194,13 +2193,11 @@ async def _restock_order_inventory(order: Order, db: AsyncSession, reason: str, 
     order.inventory_deducted = False
 
     if restocked_ids:
-        try:
-            from app.tasks.quickbooks_tasks import sync_inventory_batch_to_qb
-            sync_inventory_batch_to_qb.apply_async(args=[restocked_ids], countdown=20)
-            logger.info("Order %s restocked %d variant(s) — 1 batched QB sync queued",
-                        order.order_number, len(restocked_ids))
-        except Exception as _e:
-            logger.warning("Restock QB batch sync dispatch failed: %s", _e)
+        # No QtyOnHand push: voiding this order's QB invoice restores the quantity
+        # there and reverses the COGS. Pushing our count too made QB log an extra,
+        # document-less movement against its default "Inventory Shrinkage".
+        logger.info("Order %s restocked %d variant(s) locally — QB follows the voided invoice",
+                    order.order_number, len(restocked_ids))
 
 
 
@@ -2320,6 +2317,11 @@ async def update_rma(
                         quantity_delta=quantity,
                         reason="returned",
                         notes=f"RMA {rma_number} approved — item returned",
+                        # The QB credit memo dispatched below restores the quantity
+                        # and reverses COGS in QuickBooks. Pushing our count too
+                        # made QB log a second, document-less movement against its
+                        # default "Inventory Shrinkage" account.
+                        sync_qb=False,
                     )
             restock_ok = True
         except Exception as exc:

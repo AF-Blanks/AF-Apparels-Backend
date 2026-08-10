@@ -391,12 +391,15 @@ class OrderService:
                     )
                     qty_to_deduct -= deduct
 
-            # Sync updated stock to QB after each variant deduction
-            try:
-                from app.tasks.quickbooks_tasks import sync_inventory_to_qb as _siqb
-                _siqb.apply_async(args=[str(variant_id)], countdown=15)
-            except Exception as _exc:
-                logger.warning("QB inventory sync dispatch failed for variant %s: %s", variant_id, _exc)
+            # Deliberately NOT pushing QtyOnHand to QuickBooks here. This order's
+            # QB invoice carries Inventory-type items, so QB reduces the quantity
+            # itself and books the cost to COGS. Sending our absolute count as well
+            # made QB record a second, sale-less drop as an "Inventory Adjust" —
+            # and the Item endpoint cannot carry an AdjustmentAccountRef, so QB
+            # filed each one under its default "Inventory Shrinkage" account,
+            # inflating COGS on the P&L. Stock corrections with no QB document
+            # behind them (manual edits, CSV imports) still sync — see
+            # admin/inventory.py and inventory_service.py.
 
         # Stock is now out of inventory for this order — mark it so a later
         # cancel/delete returns exactly this stock to the shelf.

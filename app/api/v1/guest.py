@@ -401,8 +401,11 @@ async def guest_checkout(
 
     # Sync all updated stock to QB in ONE batched task instead of one task per
     # variant. countdown=15 keeps the original buffer so the DB commit lands first.
-    _dispatch_qb_inventory_sync(
-        _variant_ids_to_sync, countdown=15, context=f"guest order {order.order_number}"
+    # Deliberately NOT pushing QtyOnHand to QuickBooks — this order's QB invoice
+    # reduces the quantity there and books COGS. See order_service.create_order.
+    logger.info(
+        "Guest order %s deducted %d variant(s) locally — QB follows the invoice",
+        order.order_number, len(_variant_ids_to_sync),
     )
 
     # Bust product detail Redis cache so stock shows correctly for everyone
