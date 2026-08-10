@@ -1,7 +1,7 @@
 """Admin — reporting & analytics endpoints."""
 import csv
 import io
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
@@ -328,6 +328,106 @@ async def inventory_value_report(
         "product_count": len(items),
         "missing_cost_units": missing_cost_units,
         "missing_cost_skus": missing_cost_skus,
+        "items": items,
+    }
+
+
+@router.get("/reports/outstanding")
+async def outstanding_report(
+    include_settled: bool = Query(False, description="Also list customers who owe nothing"),
+    _: None = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Accounts receivable by customer — who owes money, how much, and how old it is.
+
+    Everything comes from our own orders table in a single grouped query: no
+    QuickBooks calls at all, so this can be opened as often as needed without
+    touching the QB API budget. (The per-customer "Refresh from QuickBooks" button
+    on the customer page remains the only QB lookup, and it is one manual call.)
+    """
+    from sqlalchemy import and_
+
+    # What each order still owes, never negative.
+    owed = func.greatest(Order.total - func.coalesce(Order.amount_paid, 0), 0)
+
+    now = datetime.now(timezone.utc)
+    d30, d60, d90 = now - timedelta(days=30), now - timedelta(days=60), now - timedelta(days=90)
+
+    def _bucket(condition):
+        return func.coalesce(func.sum(case((condition, owed), else_=0)), 0)
+
+    q = (
+        select(
+            Company.id.label("company_id"),
+            Company.name.label("company_name"),
+            Company.company_email.label("email"),
+            Company.phone.label("phone"),
+            Company.net30_enabled.label("net30"),
+            Company.net7_enabled.label("net7"),
+            func.count(Order.id).label("order_count"),
+            func.coalesce(func.sum(Order.total), 0).label("total_purchased"),
+            func.coalesce(func.sum(func.coalesce(Order.amount_paid, 0)), 0).label("total_paid"),
+            func.coalesce(func.sum(owed), 0).label("outstanding"),
+            func.count(case((owed > 0, Order.id))).label("unpaid_orders"),
+            func.min(case((owed > 0, Order.created_at))).label("oldest_unpaid_at"),
+            # Ageing: split what's owed by how old the order is.
+            _bucket(Order.created_at >= d30).label("age_current"),
+            _bucket(and_(Order.created_at < d30, Order.created_at >= d60)).label("age_30"),
+            _bucket(and_(Order.created_at < d60, Order.created_at >= d90)).label("age_60"),
+            _bucket(Order.created_at < d90).label("age_90"),
+        )
+        .join(Order, Order.company_id == Company.id)
+        .where(Order.status.notin_(["cancelled", "refunded"]))
+        .group_by(
+            Company.id, Company.name, Company.company_email, Company.phone,
+            Company.net30_enabled, Company.net7_enabled,
+        )
+        .order_by(func.coalesce(func.sum(owed), 0).desc())
+    )
+    if not include_settled:
+        q = q.having(func.coalesce(func.sum(owed), 0) > 0)
+
+    rows = (await db.execute(q)).mappings().all()
+
+    items = []
+    for r in rows:
+        oldest = r["oldest_unpaid_at"]
+        # created_at is stored tz-aware; guard anyway so one legacy naive row
+        # can't break the whole report.
+        if oldest is not None and oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=timezone.utc)
+        days = (now - oldest).days if oldest else None
+        terms = "Net 7" if r["net7"] else ("Net 30" if r["net30"] else None)
+        items.append({
+            "company_id": str(r["company_id"]),
+            "company_name": r["company_name"],
+            "email": r["email"],
+            "phone": r["phone"],
+            "payment_terms": terms,
+            "order_count": r["order_count"],
+            "unpaid_orders": r["unpaid_orders"],
+            "total_purchased": round(float(r["total_purchased"] or 0), 2),
+            "total_paid": round(float(r["total_paid"] or 0), 2),
+            "outstanding": round(float(r["outstanding"] or 0), 2),
+            "oldest_unpaid_date": oldest.date().isoformat() if oldest else None,
+            "days_outstanding": days,
+            "aging": {
+                "current": round(float(r["age_current"] or 0), 2),
+                "d30": round(float(r["age_30"] or 0), 2),
+                "d60": round(float(r["age_60"] or 0), 2),
+                "d90": round(float(r["age_90"] or 0), 2),
+            },
+        })
+
+    return {
+        "customers_owing": sum(1 for i in items if i["outstanding"] > 0.005),
+        "total_outstanding": round(sum(i["outstanding"] for i in items), 2),
+        "total_aging": {
+            "current": round(sum(i["aging"]["current"] for i in items), 2),
+            "d30": round(sum(i["aging"]["d30"] for i in items), 2),
+            "d60": round(sum(i["aging"]["d60"] for i in items), 2),
+            "d90": round(sum(i["aging"]["d90"] for i in items), 2),
+        },
         "items": items,
     }
 
