@@ -40,6 +40,9 @@ def _build_access_token_claims(user: User, membership: CompanyUser | None) -> di
     """Build extra JWT claims from user + company membership."""
     claims: dict = {
         "is_admin": user.is_admin,
+        # Staff may open the admin panel read-only — see the admin gate in
+        # AuthMiddleware, which refuses every write for them.
+        "is_staff": bool(getattr(user, "is_staff", False)),
         "account_type": getattr(user, "account_type", "wholesale"),
     }
     if membership:

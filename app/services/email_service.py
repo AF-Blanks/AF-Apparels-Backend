@@ -173,6 +173,25 @@ class EmailService:
             logger.warning("No valid recipient for email '%s' — skipping", subject)
             return False
 
+        # Blind-copy the business archive inbox on customer-facing mail, so there
+        # is one place holding a record of everything customers were sent.
+        # Internal alerts (admin notifications, order alerts) are skipped — the
+        # team already receives those — as is anything already addressed there.
+        _archive = (getattr(settings, "EMAIL_ARCHIVE_BCC", "") or "").strip()
+        if _archive:
+            _internal = {
+                e.strip().lower()
+                for e in f"{settings.ADMIN_NOTIFICATION_EMAIL},{settings.ORDER_ALERT_EMAILS}".split(",")
+                if e.strip()
+            }
+            _addressed = (
+                {e.lower() for e in to_list}
+                | {e.lower() for e in (cc or [])}
+                | {e.lower() for e in (bcc or [])}
+            )
+            if _archive.lower() not in _addressed and not _addressed.issubset(_internal):
+                bcc = list(bcc or []) + [_archive]
+
         params: resend.Emails.SendParams = {
             "from": from_addr,
             "to": to_list,

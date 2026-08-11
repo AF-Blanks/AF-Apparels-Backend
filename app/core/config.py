@@ -133,6 +133,9 @@ class Settings(BaseSettings):
     # Business inboxes that receive a copy of every new-order alert
     # (comma-separated, env-overridable). Customer still gets their own confirmation.
     ORDER_ALERT_EMAILS: str = "info@afblanks.com,sales@afblanks.com,info.afapparel@gmail.com"
+    # Every customer-facing email is blind-copied here so the business keeps one
+    # record of what customers were actually sent. Blank disables the copy.
+    EMAIL_ARCHIVE_BCC: str = "invoice@afblanks.com"
 
     @model_validator(mode="after")
     def _apply_resend_from_email(self) -> "Settings":

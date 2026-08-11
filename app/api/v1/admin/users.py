@@ -19,8 +19,10 @@ router = APIRouter(prefix="/admin/users", tags=["admin", "users"])
 def _user_to_dict(user: User) -> dict:
     if user.is_admin:
         role = "admin"
+    elif getattr(user, "is_staff", False):
+        role = "staff"
     elif user.company_memberships:
-        role = "customer"
+        role = "customer"   # a shop account, not something assignable here
     else:
         role = "staff"
 
@@ -38,6 +40,7 @@ def _user_to_dict(user: User) -> dict:
         "full_name": f"{user.first_name} {user.last_name}".strip(),
         "role": role,
         "is_admin": user.is_admin,
+        "is_staff": bool(getattr(user, "is_staff", False)),
         "is_active": user.is_active,
         "email_verified": user.email_verified,
         "company_name": company_name,
@@ -105,6 +108,10 @@ async def create_user(
 
     if not email or not first_name:
         raise HTTPException(status_code=422, detail="email and first_name are required")
+    # Only these two are assignable here — "customer" accounts are created by the
+    # customer themselves (or via the customers screen), not from user management.
+    if role not in ("admin", "staff"):
+        raise HTTPException(status_code=422, detail="role must be 'admin' or 'staff'")
 
     existing = await db.execute(select(User).where(User.email == email))
     if existing.scalar_one_or_none():
@@ -118,6 +125,7 @@ async def create_user(
         last_name=last_name,
         hashed_password=hash_password(raw_password),
         is_admin=(role == "admin"),
+        is_staff=(role == "staff"),
         is_active=True,
         email_verified=True,
     )
@@ -185,7 +193,12 @@ async def update_user(
                 raise HTTPException(status_code=409, detail="Email already in use")
             user.email = new_email
     if "role" in payload:
-        user.is_admin = (payload["role"] == "admin")
+        new_role = payload["role"]
+        if new_role not in ("admin", "staff"):
+            raise HTTPException(status_code=422, detail="role must be 'admin' or 'staff'")
+        # Exactly one of the two — never both.
+        user.is_admin = (new_role == "admin")
+        user.is_staff = (new_role == "staff")
     if "is_active" in payload:
         user.is_active = bool(payload["is_active"])
 

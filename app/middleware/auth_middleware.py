@@ -130,6 +130,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # ── Inject user info into request state ───────────────────────────────
         request.state.user_id = payload.get("sub")
         request.state.is_admin = payload.get("is_admin", False)
+        request.state.is_staff = payload.get("is_staff", False)
         request.state.company_id = payload.get("company_id")
         request.state.pricing_tier_id = payload.get("pricing_tier_id")
         request.state.company_role = payload.get("company_role")
@@ -150,11 +151,27 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 )
 
         # ── Admin-only path enforcement ───────────────────────────────────────
+        # Staff accounts may read the admin panel but never change anything, so
+        # they pass on safe methods and are refused on every write. Enforcing it
+        # here covers every admin route at once — hiding menu items alone would
+        # still leave the API open to anyone who typed a URL.
         if path.startswith("/api/v1/admin/") and not request.state.is_admin:
-            return JSONResponse(
-                status_code=403,
-                content={"error": {"code": "FORBIDDEN", "message": "Admin access required"}},
-            )
+            if getattr(request.state, "is_staff", False) and request.method in ("GET", "HEAD", "OPTIONS"):
+                pass  # read-only staff access
+            else:
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": {
+                            "code": "FORBIDDEN",
+                            "message": (
+                                "Your account has view-only access"
+                                if getattr(request.state, "is_staff", False)
+                                else "Admin access required"
+                            ),
+                        }
+                    },
+                )
 
         return await call_next(request)
 

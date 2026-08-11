@@ -283,6 +283,12 @@ async def _ensure_content_tables() -> None:
             await conn.execute(text("""
                 DO $$
                 BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='users' AND column_name='is_staff'
+                    ) THEN
+                        ALTER TABLE users ADD COLUMN is_staff BOOLEAN NOT NULL DEFAULT false;
+                    END IF;
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='companies' AND column_name='net30_enabled') THEN
                         ALTER TABLE companies ADD COLUMN net30_enabled BOOLEAN NOT NULL DEFAULT false;
                     END IF;

@@ -27,6 +27,9 @@ class User(BaseModel):
     account_type: Mapped[str] = mapped_column(String(20), default="wholesale", nullable=False)
 
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Staff: may open the admin panel but only to LOOK — every write is refused.
+    # Kept separate from is_admin so an account is one or the other, never both.
+    is_staff: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     email_verification_token: Mapped[str | None] = mapped_column(String(255))
