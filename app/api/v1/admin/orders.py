@@ -1020,6 +1020,11 @@ async def update_admin_order(
 
     await db.commit()
 
+    # An order entering fulfilment must exist in QuickBooks — revenue, COGS and the
+    # stock reduction all hang off its invoice.
+    if payload.status in _FULFILLMENT_STATUSES:
+        _ensure_qb_invoice(order)
+
     if payload.status and payload.status != old_status:
         try:
             from app.tasks.email_tasks import (
@@ -1161,6 +1166,11 @@ async def update_order_status(
         )
 
     await db.commit()
+
+    # An order entering fulfilment must exist in QuickBooks — revenue, COGS and the
+    # stock reduction all hang off its invoice.
+    if payload.status in _FULFILLMENT_STATUSES:
+        _ensure_qb_invoice(order)
 
     if payload.status != old_status:
         try:
@@ -1374,6 +1384,11 @@ async def generate_shipping_label(
     )
 
     await db.commit()
+
+    # Shipping a label puts the order into fulfilment — make sure QuickBooks has
+    # its invoice (revenue, COGS and the stock reduction all follow from it).
+    _ensure_qb_invoice(order)
+
     try:
         from app.tasks.email_tasks import send_order_shipped_email as _se
         _se.delay(str(order.id), first["tracking_number"] or "")
@@ -1733,6 +1748,11 @@ async def generate_label_manual(
     )
 
     await db.commit()
+
+    # Shipping a label puts the order into fulfilment — make sure QuickBooks has
+    # its invoice (revenue, COGS and the stock reduction all follow from it).
+    _ensure_qb_invoice(order)
+
     try:
         from app.tasks.email_tasks import send_order_shipped_email as _se
         _se.delay(str(order.id), first["tracking_number"] or "")
@@ -2100,6 +2120,49 @@ async def _resolve_warehouse_for_variant(variant_id: UUID, db: AsyncSession) -> 
 # Statuses that mean the goods are committed to the customer — the point at which
 # an admin-built order's stock must come off the shelf.
 _FULFILLMENT_STATUSES = ("confirmed", "processing", "ready_for_pickup", "shipped", "delivered")
+
+
+def _ensure_qb_invoice(order: Order) -> None:
+    """Make sure an order entering fulfilment has an invoice in QuickBooks.
+
+    Orders placed through checkout raise their invoice at payment time, but an
+    admin-built order only reached QB if someone pressed "Sync to QB" or marked
+    it paid — so a hand-built order could be delivered with no QB invoice at all:
+    no revenue, no COGS, and (now that inventory follows the invoice rather than a
+    QtyOnHand push) no stock reduction either.
+
+    Call AFTER the commit so the worker reads the saved order. Safe to call on
+    every status change: it returns immediately once an invoice exists, and a
+    short-lived Redis key stops two triggers (e.g. a status change and a label)
+    queueing the same sync twice.
+    """
+    if getattr(order, "qb_invoice_id", None):
+        return  # already in QuickBooks — the sync task would skip creation anyway
+    if float(order.subtotal or 0) <= 0:
+        # An empty shell of an order (no priced lines yet) — QuickBooks would
+        # reject a line-less invoice and the task would retry on a loop. It will
+        # sync as soon as items are added and the status is set again.
+        logger.info("Order %s has no priced items — QB invoice not queued yet", order.order_number)
+        return
+    try:
+        import redis as _redis_sync
+        from app.core.config import settings as _cfg
+        _r = _redis_sync.Redis.from_url(
+            _cfg.REDIS_URL or _cfg.CELERY_BROKER_URL, socket_timeout=2
+        )
+        if not _r.set(f"qb:order_sync_dispatched:{order.id}", "1", nx=True, ex=120):
+            logger.info("QB invoice sync already dispatched for order %s — skipping", order.order_number)
+            return
+    except Exception as _e:
+        # Redis unavailable — still dispatch; the task itself is idempotent via
+        # the order's qb_invoice_id and QB's duplicate-DocNumber handling.
+        logger.warning("QB invoice dedup check failed (%s) — dispatching anyway", _e)
+    try:
+        from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+        sync_order_invoice_to_qb.apply_async(args=[str(order.id)], countdown=10)
+        logger.info("QB invoice sync queued for order %s (entered fulfilment)", order.order_number)
+    except Exception as _e:
+        logger.warning("QB invoice sync dispatch failed for order %s: %s", order.order_number, _e)
 
 
 async def _deduct_order_inventory(order: Order, db: AsyncSession, note: str) -> None:
