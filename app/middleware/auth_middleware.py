@@ -150,6 +150,31 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     content={"error": {"code": "ACCOUNT_SUSPENDED", "message": "Your account has been suspended"}},
                 )
 
+        # ── Live role check for admin paths ───────────────────────────────────
+        # The JWT carries the role it was minted with, and tokens last 30 days —
+        # so promoting or demoting someone wouldn't take effect until they next
+        # signed in. Worse, a demoted admin would keep full write access for
+        # weeks. Admin traffic is low, so for these paths we read the current
+        # role straight from the database and let that decide.
+        if path.startswith("/api/v1/admin/") and request.state.user_id:
+            try:
+                from app.models.user import User as _RoleUser
+                async with AsyncSessionLocal() as _rsession:
+                    _row = (await _rsession.execute(
+                        select(_RoleUser.is_admin, _RoleUser.is_staff, _RoleUser.is_active)
+                        .where(_RoleUser.id == request.state.user_id)
+                    )).first()
+                if _row is not None:
+                    if not _row.is_active:
+                        return JSONResponse(
+                            status_code=403,
+                            content={"error": {"code": "FORBIDDEN", "message": "Your account has been deactivated"}},
+                        )
+                    request.state.is_admin = bool(_row.is_admin)
+                    request.state.is_staff = bool(_row.is_staff)
+            except Exception:
+                pass  # DB hiccup — fall back to the token's claims
+
         # ── Admin-only path enforcement ───────────────────────────────────────
         # Staff accounts may read the admin panel but never change anything, so
         # they pass on safe methods and are refused on every write. Enforcing it

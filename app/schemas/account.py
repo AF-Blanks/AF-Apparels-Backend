@@ -13,6 +13,10 @@ class ProfileOut(BaseModel):
     is_active: bool
     email_verified: bool
     created_at: datetime
+    # Current role, straight from the database — the JWT carries whatever role it
+    # was minted with, so the app refreshes from here to notice a change.
+    is_admin: bool = False
+    is_staff: bool = False
 
     model_config = {"from_attributes": True}
 
