@@ -670,6 +670,39 @@ async def _ensure_content_tables() -> None:
         print(f"Content tables warning (non-fatal): {exc}")
 
 
+# ── Column guarantees ─────────────────────────────────────────────────────────
+async def _ensure_columns() -> None:
+    """Add newer columns, each in its OWN transaction.
+
+    _ensure_content_tables runs ~30 statements inside a single transaction and
+    swallows the error, so one unrelated failure silently rolls back every column
+    in that block. When a model then references a column the database never got,
+    every query against that table fails — which is how adding a column here once
+    made the whole orders list come back empty. Running each ALTER separately, and
+    logging what happened, keeps one failure from taking the others down.
+    """
+    from sqlalchemy import text
+    from app.core.database import engine
+
+    statements: list[tuple[str, str]] = [
+        ("orders.discount_percent",
+         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_percent NUMERIC(5,2) NOT NULL DEFAULT 0"),
+        ("orders.discount_amount",
+         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_amount NUMERIC(10,2) NOT NULL DEFAULT 0"),
+        ("orders.manual_box_count",
+         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS manual_box_count INTEGER"),
+        ("users.is_staff",
+         "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_staff BOOLEAN NOT NULL DEFAULT false"),
+    ]
+    for label, sql in statements:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(sql))
+            print(f"Column ensured: {label}")
+        except Exception as exc:
+            print(f"Column FAILED: {label} — {exc}")
+
+
 # ── QB token seed ─────────────────────────────────────────────────────────────
 async def _seed_qb_tokens() -> None:
     """Copy QB env-var tokens into app_settings rows that are null/absent.
@@ -811,6 +844,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Ensure content tables exist (fallback in case Alembic migration didn't run)
     await _ensure_content_tables()
+
+    # Newer columns, each in its own transaction so one failure can't roll the
+    # others back (see _ensure_columns).
+    await _ensure_columns()
 
     # Seed email templates
     await _seed_email_templates()
