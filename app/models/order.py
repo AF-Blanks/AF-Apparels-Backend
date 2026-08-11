@@ -58,6 +58,11 @@ class Order(BaseModel):
     subtotal: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     shipping_cost: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     tax_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)
+    # Admin-granted discount on this order. The percent is what the admin typed;
+    # the amount is what actually comes off the subtotal and is the figure every
+    # total, invoice and QuickBooks line is built from.
+    discount_percent: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0, server_default="0")
+    discount_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0, server_default="0")
     tax_rate: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True)
     tax_region: Mapped[str | None] = mapped_column(String(10), nullable=True)
     total: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)

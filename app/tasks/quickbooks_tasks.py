@@ -470,6 +470,7 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
                     "qb_invoice_id": order.qb_invoice_id,  # cached from prior successful run
                     "qb_payment_id": getattr(order, "qb_payment_id", None),  # set once payment recorded
                     "shipping_addr": shipping_addr,
+                    "discount_amount": float(getattr(order, "discount_amount", 0) or 0),
                 }
 
             # ── 2. Load live QB tokens ────────────────────────────────────────
@@ -553,6 +554,7 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
                     line_items=order_data["items"],
                     total=order_data["total"],
                     shipping_addr=order_data.get("shipping_addr"),
+                    discount_amount=order_data.get("discount_amount", 0),
                 )
                 logger.info("sync_order_invoice_to_qb success — qb_invoice_id=%s order=%s", qb_invoice_id, order_data["order_number"])
 

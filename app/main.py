@@ -276,6 +276,14 @@ async def _ensure_content_tables() -> None:
                     ) THEN
                         ALTER TABLE orders ADD COLUMN manual_box_count INTEGER;
                     END IF;
+                    -- Admin-granted order discount (percent typed, amount applied). (idempotent)
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='orders' AND column_name='discount_amount'
+                    ) THEN
+                        ALTER TABLE orders ADD COLUMN discount_percent NUMERIC(5,2) NOT NULL DEFAULT 0;
+                        ALTER TABLE orders ADD COLUMN discount_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+                    END IF;
                 END$$;
             """))
             # Net 7 / Net 30 credit terms on companies (mutually exclusive — the

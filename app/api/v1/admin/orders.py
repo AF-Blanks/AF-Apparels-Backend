@@ -597,6 +597,8 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
             subtotal=order.subtotal,
             shipping_cost=order.shipping_cost,
             tax_amount=order.tax_amount,
+            discount_percent=getattr(order, "discount_percent", 0),
+            discount_amount=getattr(order, "discount_amount", 0),
             total=order.total,
             company_id=order.company_id,
             company_name=company_name,
@@ -761,7 +763,7 @@ async def add_order_item(
 
     # Recalculate order totals
     order.subtotal = float(order.subtotal or 0) + line_total
-    order.total = float(order.subtotal) + float(order.shipping_cost or 0) + float(order.tax_amount or 0)
+    _recalc_order_total(order)
     try:
         order.items_edited = True
     except Exception:
@@ -860,7 +862,7 @@ async def add_order_items_bulk(
     } for (it, pname, var, qty, up, lt) in created]
 
     order.subtotal = float(order.subtotal or 0) + added_subtotal
-    order.total = float(order.subtotal) + float(order.shipping_cost or 0) + float(order.tax_amount or 0)
+    _recalc_order_total(order)
     try:
         order.items_edited = True
     except Exception:
@@ -885,7 +887,7 @@ async def remove_order_item(
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
     if order and order.status not in ("delivered", "cancelled", "refunded"):
         order.subtotal = max(0, float(order.subtotal or 0) - float(item.line_total or 0))
-        order.total = float(order.subtotal) + float(order.shipping_cost or 0) + float(order.tax_amount or 0)
+        _recalc_order_total(order)
         try:
             order.items_edited = True
         except Exception:
@@ -946,9 +948,7 @@ async def update_order_item(
         select(OrderItem).where(OrderItem.order_id == order_id)
     )).scalars().all()
     order.subtotal = round(sum(float(i.line_total or 0) for i in all_items), 2)
-    order.total = round(
-        float(order.subtotal) + float(order.shipping_cost or 0) + float(order.tax_amount or 0), 2
-    )
+    _recalc_order_total(order)
     try:
         order.items_edited = True
     except Exception:
@@ -986,11 +986,7 @@ async def update_admin_order(
     # Draft orders: when shipping or tax is edited, recompute the grand total
     # (subtotal + shipping + tax) so the invoice/total stays correct.
     if "shipping_cost" in _fields_set or "tax_amount" in _fields_set:
-        order.total = (
-            float(order.subtotal or 0)
-            + float(order.shipping_cost or 0)
-            + float(order.tax_amount or 0)
-        )
+        _recalc_order_total(order)
 
     if payload.status and payload.status != old_status:
         entry = {
@@ -1542,6 +1538,40 @@ async def get_box_summary(order_id: UUID, db: AsyncSession = Depends(get_db)) ->
         "weight_per_box_lbs": per_box,
         "boxes": [{"box_number": b.box_number, "weight_lbs": b.weight_lbs} for b in boxes],
         "manual_box_count": getattr(order, "manual_box_count", None),
+    }
+
+
+@router.patch("/orders/{order_id}/discount", status_code=200)
+async def set_order_discount(order_id: UUID, body: dict, db: AsyncSession = Depends(get_db)) -> dict:
+    """Set (or clear) a percentage discount on an order that hasn't completed.
+
+    The percent is stored alongside the amount it works out to, so the discount
+    keeps tracking the subtotal as items change. Pass 0 to remove it.
+    """
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+    if order.status in ("delivered", "cancelled", "refunded"):
+        raise HTTPException(status_code=422, detail="Cannot change the discount on a completed or cancelled order")
+
+    raw = body.get("discount_percent")
+    try:
+        percent = round(float(raw or 0), 2)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="discount_percent must be a number")
+    if percent < 0 or percent > 100:
+        raise HTTPException(status_code=422, detail="discount_percent must be between 0 and 100")
+
+    order.discount_percent = percent
+    order.discount_amount = round(float(order.subtotal or 0) * percent / 100, 2)
+    _recalc_order_total(order)
+    await db.commit()
+
+    return {
+        "discount_percent": float(order.discount_percent or 0),
+        "discount_amount": float(order.discount_amount or 0),
+        "subtotal": float(order.subtotal or 0),
+        "total": float(order.total or 0),
     }
 
 
@@ -2114,6 +2144,27 @@ async def list_admin_rma(
         }
         for r in rmas
     ]
+
+
+def _recalc_order_total(order: Order) -> None:
+    """Rebuild an order's total from its parts, honouring any admin discount.
+
+    The discount is stored as both a percent (what the admin typed) and an amount
+    (what actually comes off). Recomputing the amount from the percent here means
+    the discount follows the subtotal automatically as items are added, repriced
+    or removed — a 10% discount stays 10% instead of freezing at an old figure.
+    """
+    subtotal = float(order.subtotal or 0)
+    percent = float(getattr(order, "discount_percent", 0) or 0)
+    if percent > 0:
+        order.discount_amount = round(subtotal * percent / 100, 2)
+    discount = min(float(getattr(order, "discount_amount", 0) or 0), subtotal)
+    order.total = round(
+        (subtotal - discount)
+        + float(order.shipping_cost or 0)
+        + float(order.tax_amount or 0),
+        2,
+    )
 
 
 async def _resolve_warehouse_for_variant(variant_id: UUID, db: AsyncSession) -> UUID | None:

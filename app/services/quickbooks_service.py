@@ -469,6 +469,7 @@ class QuickBooksService:
         total: float,
         due_date: str | None = None,
         shipping_addr: dict | None = None,
+        discount_amount: float = 0.0,
     ) -> str:
         """Create a QB Invoice. Returns QB invoice Id (idempotent by DocNumber).
 
@@ -504,6 +505,18 @@ class QuickBooksService:
                 "Description": item["description"],
                 "SalesItemLineDetail": line_detail,
             })
+
+        # An admin discount is a real QuickBooks discount line, not a negative
+        # item — that way QB reduces revenue properly and the invoice total
+        # matches to the cent what the customer was actually charged. It must
+        # come after the item lines.
+        if discount_amount and float(discount_amount) > 0:
+            lines.append({
+                "Amount": round(float(discount_amount), 2),
+                "DetailType": "DiscountLineDetail",
+                "DiscountLineDetail": {"PercentBased": False},
+            })
+            logger.info("QB invoice: discount %.2f added as a discount line", float(discount_amount))
 
         payload: dict[str, Any] = {
             "CustomerRef": {"value": qb_customer_id},

@@ -218,6 +218,9 @@ class AdminOrderDetail(OrderOut):
     # Admin edits flag + convenience fee
     items_edited: bool = False
     convenience_fee: Decimal | None = None
+    # Admin-granted discount (percent typed, amount taken off the subtotal)
+    discount_percent: Decimal | None = None
+    discount_amount: Decimal | None = None
     # Multi-box labels JSON string (parsed by frontend)
     all_labels: str | None = None
 
