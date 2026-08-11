@@ -535,16 +535,52 @@ class QuickBooksService:
                     ln["SalesItemLineDetail"]["ItemRef"]["value"]
                     for ln in lines if ln.get("SalesItemLineDetail")
                 }
-                # Reactivate EVERY referenced item — do NOT short-circuit: the
-                # inactive one may not be the first in the set, so we must attempt
-                # them all (an already-active item is just a no-op).
-                results = {iid: self.reactivate_item(iid) for iid in item_ids}
-                if all(results.values()):
-                    logger.info("QB: ensured items active %s — retrying invoice for %s", item_ids, order_number)
-                    return self._submit_invoice(payload, order_number)
-                failed = [i for i, ok in results.items() if not ok]
-                logger.error("QB: could not reactivate item(s) %s — invoice %s still blocked", failed, order_number)
+                # Ask QB in ONE query which of these are inactive rather than
+                # fetching every item in turn: a 29-line invoice cost 29 GETs per
+                # attempt, and double that whenever a retry and a fresh dispatch
+                # overlapped on two workers.
+                inactive = self._find_inactive_items(item_ids)
+                for iid in inactive:
+                    self.reactivate_item(iid)
+                logger.info(
+                    "QB: reactivated %d of %d referenced item(s) — retrying invoice for %s",
+                    len(inactive), len(item_ids), order_number,
+                )
+                # Retry either way — an empty list usually means a concurrent sync
+                # already reactivated them, and _submit_invoice is idempotent.
+                return self._submit_invoice(payload, order_number)
             raise
+
+    def _find_inactive_items(self, item_ids) -> list[str]:
+        """Which of these QB item Ids are deactivated — in one query per 40 ids.
+
+        QuickBooks rejects an invoice that references a deactivated item, and an
+        order can easily carry 30 lines, so checking them individually was both
+        slow and a needless drain on the API budget. If the lookup itself fails we
+        return the whole chunk, which just restores the old per-item behaviour
+        (reactivate_item is a no-op on an already-active item).
+        """
+        ids = sorted({str(i) for i in item_ids if i})
+        inactive: list[str] = []
+        for start in range(0, len(ids), 40):
+            chunk = ids[start:start + 40]
+            in_list = ",".join(f"'{i}'" for i in chunk)
+            try:
+                data = self._request(
+                    "GET",
+                    f"query?query=SELECT Id FROM Item WHERE Active = false"
+                    f" AND Id IN ({in_list})&minorversion=65",
+                )
+                inactive += [
+                    str(it["Id"]) for it in data.get("QueryResponse", {}).get("Item", [])
+                ]
+            except Exception as e:
+                logger.warning(
+                    "QB inactive-item lookup failed (%s) — checking these %d individually",
+                    e, len(chunk),
+                )
+                inactive += chunk
+        return inactive
 
     def _submit_invoice(self, payload: dict[str, Any], order_number: str) -> str:
         """POST the invoice and return its QB Id. If QB reports the DocNumber is

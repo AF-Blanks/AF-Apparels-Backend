@@ -2019,8 +2019,15 @@ async def mark_order_paid(
 
 @router.post("/orders/{order_id}/sync-quickbooks", response_model=dict)
 async def sync_order_to_quickbooks(order_id: UUID, db: AsyncSession = Depends(get_db)):
-    from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
-    sync_order_invoice_to_qb.delay(str(order_id))
+    # Dispatch through the deduped helper: pressing this while an automatic sync
+    # (or a Celery retry) is already in flight otherwise put two workers on the
+    # same order, each repeating the whole QuickBooks conversation.
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+    if order.qb_invoice_id:
+        return {"message": "Already in QuickBooks", "order_id": str(order_id)}
+    _ensure_qb_invoice(order)
     return {"message": "QuickBooks sync queued", "order_id": str(order_id)}
 
 
@@ -2042,6 +2049,16 @@ async def recreate_qb_invoice(order_id: UUID, db: AsyncSession = Depends(get_db)
         {"oid": str(order_id)},
     )
     await db.commit()
+    # Explicit admin action — clear any in-flight dedup marker so this is never
+    # swallowed as a duplicate of an automatic sync.
+    try:
+        import redis as _redis_rc
+        from app.core.config import settings as _cfg_rc
+        _redis_rc.Redis.from_url(
+            _cfg_rc.REDIS_URL or _cfg_rc.CELERY_BROKER_URL, socket_timeout=2
+        ).delete(f"qb:order_sync_dispatched:{order_id}")
+    except Exception:
+        pass
     from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
     sync_order_invoice_to_qb.delay(str(order_id))
     return {"message": "Recreating the invoice in QuickBooks — it will appear shortly and the customer will be emailed the new invoice.", "order_id": str(order_id)}
