@@ -405,6 +405,7 @@ async def list_admin_orders(
             guest_email=order.guest_email,
             guest_name=order.guest_name,
             timeline=order.timeline or [],
+            in_quickbooks=bool(getattr(order, "qb_invoice_id", None)),
         ))
 
     return PaginatedResponse(items=items, total=total, page=page, page_size=page_size, pages=(total + page_size - 1) // page_size)

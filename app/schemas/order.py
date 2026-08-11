@@ -162,6 +162,9 @@ class AdminOrderListItem(BaseModel):
     timeline: list[dict] = []
     # "returned" | "refunded" when an approved RMA exists for this order.
     return_status: str | None = None
+    # True once this order has an invoice in QuickBooks, so the list can flag an
+    # order that was fulfilled but never reached the books.
+    in_quickbooks: bool = False
 
     model_config = {"from_attributes": True}
 
