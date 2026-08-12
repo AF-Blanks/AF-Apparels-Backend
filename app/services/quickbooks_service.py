@@ -418,9 +418,27 @@ class QuickBooksService:
         resp.raise_for_status()
         return resp.json()
 
+    @staticmethod
+    def _soql_escape(value: str) -> str:
+        """Escape a value for use inside a SOQL string literal."""
+        return str(value or "").replace("\\", "\\\\").replace("'", "\'")
+
+    def _query_path(self, soql: str) -> str:
+        """Build the query path with the statement percent-encoded.
+
+        The SOQL travels inside the URL, so a '#' in a customer or item name
+        (e.g. "MOE INK - PO #33216") cut the URL short at the fragment marker —
+        QuickBooks received an unterminated string and answered
+        "QueryParserError ... Encountered: <EOF>". '&' and '+' corrupted it in
+        other ways, and an apostrophe ("Women's Fitted Tee") arrived unescaped.
+        Percent-encoding the whole statement makes any name safe.
+        """
+        from urllib.parse import quote
+        return f"query?query={quote(soql, safe='')}&minorversion=65"
+
     def query(self, soql: str) -> dict[str, Any]:
         """Run a raw SOQL query against the QB Accounting API (rate-limited via _request)."""
-        return self._request("GET", f"query?query={soql}&minorversion=65")
+        return self._request("GET", self._query_path(soql))
 
     # ── Customer ──────────────────────────────────────────────────────────────
 
@@ -437,7 +455,7 @@ class QuickBooksService:
         escaped = company_name.replace("'", "\\'")
         query_resp = self._request(
             "GET",
-            f"query?query=SELECT * FROM Customer WHERE DisplayName = '{escaped}'&minorversion=65",
+            self._query_path(f"SELECT * FROM Customer WHERE DisplayName = '{escaped}'"),
         )
         entities = query_resp.get("QueryResponse", {}).get("Customer", [])
         if entities:
@@ -581,8 +599,9 @@ class QuickBooksService:
             try:
                 data = self._request(
                     "GET",
-                    f"query?query=SELECT Id FROM Item WHERE Active = false"
-                    f" AND Id IN ({in_list})&minorversion=65",
+                    self._query_path(
+                        f"SELECT Id FROM Item WHERE Active = false AND Id IN ({in_list})"
+                    ),
                 )
                 inactive += [
                     str(it["Id"]) for it in data.get("QueryResponse", {}).get("Item", [])
@@ -693,8 +712,10 @@ class QuickBooksService:
         escaped_type = account_type.replace("'", "\\'")
         result = self._request(
             "GET",
-            f"query?query=SELECT * FROM Account WHERE Name = '{escaped_name}'"
-            f" AND AccountType = '{escaped_type}'&minorversion=65",
+            self._query_path(
+                f"SELECT * FROM Account WHERE Name = '{escaped_name}'"
+                f" AND AccountType = '{escaped_type}'"
+            ),
         )
         accounts = result.get("QueryResponse", {}).get("Account", [])
         if not accounts:
@@ -740,7 +761,7 @@ class QuickBooksService:
         escaped_name = name[:100].replace("'", "\\'")
         result = self._request(
             "GET",
-            f"query?query=SELECT * FROM Item WHERE Name = '{escaped_name}'&minorversion=65",
+            self._query_path(f"SELECT * FROM Item WHERE Name = '{escaped_name}'"),
         )
         items = result.get("QueryResponse", {}).get("Item", [])
         if items:
@@ -1068,7 +1089,7 @@ class QuickBooksService:
         # ── 1. Search existing vendor ─────────────────────────────────────────
         result = await self._make_request(
             "GET",
-            f"query?query=SELECT * FROM Vendor WHERE DisplayName = '{escaped}'&minorversion=65",
+            self._query_path(f"SELECT * FROM Vendor WHERE DisplayName = '{escaped}'"),
         )
         vendors = result.get("QueryResponse", {}).get("Vendor", [])
         if vendors:
@@ -1123,7 +1144,7 @@ class QuickBooksService:
             )
             retry = await self._make_request(
                 "GET",
-                f"query?query=SELECT * FROM Vendor WHERE DisplayName = '{escaped}'&minorversion=65",
+                self._query_path(f"SELECT * FROM Vendor WHERE DisplayName = '{escaped}'"),
             )
             retry_vendors = retry.get("QueryResponse", {}).get("Vendor", [])
             if retry_vendors:
