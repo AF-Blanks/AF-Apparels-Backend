@@ -120,6 +120,14 @@ class Settings(BaseSettings):
     # charge. Default is this company's live item; override via env if it changes.
     QB_TAX_ITEM_ID: str = "584"
 
+    # Carriers we wait for when quoting rates. Shippo fills a shipment's rates in
+    # progressively, so a carrier that is slow to answer is simply absent from the
+    # first response — we re-poll until these have arrived. Only list carriers
+    # actually connected in Shippo: waiting on one that is not connected burns the
+    # whole retry budget on every single lookup and never succeeds. Add "fedex"
+    # here once that account is connected.
+    SHIPPO_EXPECTED_CARRIERS: str = "ups,usps"
+
     # ── Email (Resend) ────────────────────────────────────────────────────────
     RESEND_API_KEY: str = ""
     SENDGRID_API_KEY: str = ""  # kept for backward compat, unused

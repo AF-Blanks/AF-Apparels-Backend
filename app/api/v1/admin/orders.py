@@ -1480,12 +1480,23 @@ async def fetch_order_rates(
                 async_=False,
             )
         )
-        # Retry if major carriers are missing (Shippo may return partial results)
-        _expected = {"ups", "usps", "fedex"}
-        for _attempt in range(5):
+        # Shippo fills a shipment's rates in progressively, so a slow carrier is
+        # simply absent from the first response - re-poll until it lands. Only
+        # carriers actually connected in Shippo belong here: a disconnected one is
+        # never going to appear, so waiting on it spends the entire retry budget on
+        # every lookup and still returns a partial list.
+        from app.core.config import settings as _cfg
+        _expected = {
+            c.strip().lower()
+            for c in (_cfg.SHIPPO_EXPECTED_CARRIERS or "").split(",")
+            if c.strip()
+        }
+        _attempts = 6
+        _missing: set[str] = set()
+        for _attempt in range(_attempts):
             _present = {(r.provider or "").lower() for r in (shipment.rates or [])}
             _missing = _expected - _present
-            if not _missing or _attempt == 4:
+            if not _missing or _attempt == _attempts - 1:
                 if _missing:
                     logger.warning("fetch-rates: %s absent after %d attempts", _missing, _attempt + 1)
                 break
@@ -1513,7 +1524,14 @@ async def fetch_order_rates(
             except Exception:
                 continue
         rates.sort(key=lambda r: r["cost"])
-        return {"rates": rates, "box_count": box_count, "weight_per_box_lbs": round(weight_lbs, 2)}
+        return {
+            "rates": rates,
+            "box_count": box_count,
+            "weight_per_box_lbs": round(weight_lbs, 2),
+            # Named so the panel can say a carrier is still on its way rather than
+            # presenting a short list as if it were the whole market.
+            "missing_carriers": sorted(_missing),
+        }
     except Exception as exc:
         logger.warning("Admin fetch-rates error: %s", exc)
         return {"rates": [], "error": str(exc)}
