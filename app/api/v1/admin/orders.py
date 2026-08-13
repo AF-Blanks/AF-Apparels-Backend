@@ -1406,6 +1406,9 @@ async def generate_shipping_label(
 
 class _FetchRatesRequest(BaseModel):
     weight_lbs: float = 1.0
+    # Labels are bought one per box (see create_label_for_box), so a rate is
+    # quoted for ONE box and the shipment costs that rate x box_count.
+    box_count: int = 1
 
 
 @router.post("/orders/{order_id}/fetch-rates", status_code=200)
@@ -1435,6 +1438,23 @@ async def fetch_order_rates(
         raise HTTPException(status_code=422, detail="Incomplete shipping address on order (missing state or ZIP)")
 
     weight_lbs = max(payload.weight_lbs, 0.5)
+    box_count = max(1, int(payload.box_count or 1))
+
+    # This weight is for ONE box. UPS and FedEx cap a package at 150 lbs and USPS
+    # at 70, so anything above that comes back from Shippo as an empty rate list
+    # with no reason given - which reads as "the carriers disappeared". Say what
+    # actually happened instead.
+    if weight_lbs > 150:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{weight_lbs:.2f} lbs is over the 150 lb per-package limit for UPS and FedEx "
+                f"(USPS stops at 70), so no carrier will quote it. This box weight is per box, "
+                f"not the shipment total - split the order into more boxes, or enter the weight "
+                f"of a single box."
+            ),
+        )
+
     wh = WAREHOUSE_ADDRESS
 
     try:
@@ -1493,7 +1513,7 @@ async def fetch_order_rates(
             except Exception:
                 continue
         rates.sort(key=lambda r: r["cost"])
-        return {"rates": rates}
+        return {"rates": rates, "box_count": box_count, "weight_per_box_lbs": round(weight_lbs, 2)}
     except Exception as exc:
         logger.warning("Admin fetch-rates error: %s", exc)
         return {"rates": [], "error": str(exc)}
