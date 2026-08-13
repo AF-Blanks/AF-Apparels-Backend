@@ -479,25 +479,16 @@ class QuickBooksService:
 
     # ── Invoice ───────────────────────────────────────────────────────────────
 
-    def create_invoice(
-        self,
-        qb_customer_id: str,
-        order_number: str,
-        line_items: list[dict],
-        total: float,
-        due_date: str | None = None,
-        shipping_addr: dict | None = None,
-        discount_amount: float = 0.0,
-    ) -> str:
-        """Create a QB Invoice. Returns QB invoice Id (idempotent by DocNumber).
+    def _build_invoice_lines(
+        self, line_items: list[dict], discount_amount: float = 0.0
+    ) -> list[dict[str, Any]]:
+        """Turn our line items into QB Invoice Line objects.
 
-        line_items: list of {description, quantity, unit_price, amount}
-        shipping_addr: optional dict with keys Line1, City, CountrySubDivisionCode, PostalCode
+        Shared by create and update so an edited order is re-sent exactly the way
+        it would have been billed first time round - same item refs, same tax
+        treatment, same discount handling.
         """
-        # DocNumber idempotency is handled at the task level (order.qb_invoice_id check).
-        # Skipping the CorePlus SELECT query here to preserve monthly API call budget.
-
-        lines = []
+        lines: list[dict[str, Any]] = []
         for item in line_items:
             _qb_item_id = item.get("qb_item_id")
             if not _qb_item_id:
@@ -536,6 +527,109 @@ class QuickBooksService:
             })
             logger.info("QB invoice: discount %.2f added as a discount line", float(discount_amount))
 
+        return lines
+
+    def update_invoice(
+        self,
+        invoice_id: str,
+        qb_customer_id: str,
+        order_number: str,
+        line_items: list[dict],
+        shipping_addr: dict | None = None,
+        discount_amount: float = 0.0,
+    ) -> dict[str, Any]:
+        """Rewrite an existing invoice's lines so QB matches the edited order.
+
+        Nothing updated an invoice once it existed, so adding items to an order —
+        or changing a price, a discount, or shipping — left QuickBooks showing the
+        original amount for good.
+
+        Refuses as soon as money is attached: a payment, deposit or credit memo
+        against the invoice means the customer has been billed and (part-)settled
+        at the old figure, and silently rewriting history there is worse than the
+        mismatch. Those come back as "skipped_paid" for a human to judge.
+
+        Returns {"status": created|updated|skipped_paid|missing, ...}.
+        """
+        try:
+            current = self._request("GET", f"invoice/{invoice_id}?minorversion=65")
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return {"status": "missing"}
+            raise
+        inv = current.get("Invoice") or {}
+        if not inv:
+            return {"status": "missing"}
+
+        total_amt = float(inv.get("TotalAmt") or 0)
+        balance = float(inv.get("Balance") or 0)
+        linked = [
+            t for t in (inv.get("LinkedTxn") or [])
+            if t.get("TxnType") in ("Payment", "CreditMemo", "Deposit")
+        ]
+        if linked or (total_amt > 0 and abs(balance - total_amt) > 0.01):
+            logger.warning(
+                "QB update_invoice: invoice %s (order %s) has money against it "
+                "(total=%.2f balance=%.2f linked=%d) — leaving it alone",
+                invoice_id, order_number, total_amt, balance, len(linked),
+            )
+            return {
+                "status": "skipped_paid",
+                "qb_total": total_amt,
+                "balance": balance,
+                "invoice_id": invoice_id,
+            }
+
+        payload: dict[str, Any] = {
+            "Id": str(invoice_id),
+            "SyncToken": str(inv.get("SyncToken", "0")),
+            "CustomerRef": {"value": qb_customer_id},
+            "DocNumber": inv.get("DocNumber") or order_number,
+            "Line": self._build_invoice_lines(line_items, discount_amount),
+            "GlobalTaxCalculation": "NotApplicable",
+            # A full (non-sparse) update: QB replaces the whole Line array, which is
+            # the only way to drop a line the order no longer has.
+            "sparse": False,
+        }
+        if shipping_addr:
+            payload["ShipAddr"] = shipping_addr
+        # Keep the original invoice date — the order was placed when it was placed,
+        # and re-dating it would move the revenue into a different month's P&L.
+        if inv.get("TxnDate"):
+            payload["TxnDate"] = inv["TxnDate"]
+
+        result = self._request("POST", "invoice?minorversion=65", json=payload)
+        updated = result.get("Invoice", {})
+        logger.info(
+            "QB update_invoice: order %s invoice %s → total %.2f (was %.2f)",
+            order_number, invoice_id, float(updated.get("TotalAmt") or 0), total_amt,
+        )
+        return {
+            "status": "updated",
+            "invoice_id": invoice_id,
+            "qb_total": float(updated.get("TotalAmt") or 0),
+            "previous_total": total_amt,
+        }
+
+    def create_invoice(
+        self,
+        qb_customer_id: str,
+        order_number: str,
+        line_items: list[dict],
+        total: float,
+        due_date: str | None = None,
+        shipping_addr: dict | None = None,
+        discount_amount: float = 0.0,
+    ) -> str:
+        """Create a QB Invoice. Returns QB invoice Id (idempotent by DocNumber).
+
+        line_items: list of {description, quantity, unit_price, amount}
+        shipping_addr: optional dict with keys Line1, City, CountrySubDivisionCode, PostalCode
+        """
+        # DocNumber idempotency is handled at the task level (order.qb_invoice_id check).
+        # Skipping the CorePlus SELECT query here to preserve monthly API call budget.
+
+        lines = self._build_invoice_lines(line_items, discount_amount)
         payload: dict[str, Any] = {
             "CustomerRef": {"value": qb_customer_id},
             "DocNumber": order_number,

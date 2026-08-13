@@ -236,7 +236,7 @@ def sync_customer_to_qb(self, company_id: str):
 
 
 @celery_app.task(bind=True, max_retries=5)
-def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
+def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, refresh_lines: bool = False):
     """Sync an Order to QuickBooks as an Invoice.
 
     force_payment=True: create QB payment even for Net-30 orders (used by mark-paid endpoint).
@@ -536,6 +536,35 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False):
             # entirely — avoids 1 CorePlus DocNumber query on every retry.
             _invoice_freshly_created = False
             _existing_invoice_id = order_data.get("qb_invoice_id")
+
+            if _existing_invoice_id and refresh_lines:
+                # The order changed after it was invoiced. Re-send the lines so
+                # QuickBooks shows what the customer is actually being billed —
+                # update_invoice declines on its own if money is already against it.
+                _upd = await asyncio.to_thread(
+                    svc.update_invoice,
+                    invoice_id=_existing_invoice_id,
+                    qb_customer_id=qb_customer_id,
+                    order_number=order_data["order_number"],
+                    line_items=order_data["items"],
+                    shipping_addr=order_data.get("shipping_addr"),
+                    discount_amount=order_data.get("discount_amount", 0),
+                )
+                logger.info(
+                    "sync_order_invoice_to_qb refresh — order=%s result=%s",
+                    order_data["order_number"], _upd,
+                )
+                if _upd.get("status") == "missing":
+                    # Deleted in QuickBooks since we stored the id — raise a fresh
+                    # invoice below rather than reporting success on nothing.
+                    _existing_invoice_id = None
+                else:
+                    return {
+                        "status": "success",
+                        "qb_invoice_id": _existing_invoice_id,
+                        "refresh": _upd,
+                    }
+
             if _existing_invoice_id:
                 qb_invoice_id = _existing_invoice_id
                 logger.info(

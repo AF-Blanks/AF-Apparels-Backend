@@ -770,6 +770,7 @@ async def add_order_item(
         pass
 
     await db.commit()
+    _refresh_qb_invoice(order)
     return {
         "message": "Item added",
         "item_id": str(item.id),
@@ -868,6 +869,7 @@ async def add_order_items_bulk(
     except Exception:
         pass
     await db.commit()
+    _refresh_qb_invoice(order)
     return {"items": resp_items, "subtotal": float(order.subtotal), "total": float(order.total)}
 
 
@@ -895,6 +897,7 @@ async def remove_order_item(
 
     await db.delete(item)
     await db.commit()
+    _refresh_qb_invoice(order)
     return {"message": "Item removed"}
 
 
@@ -955,6 +958,7 @@ async def update_order_item(
         pass
 
     await db.commit()
+    _refresh_qb_invoice(order)
     return {
         "message": "Item updated",
         "item_id": str(item.id),
@@ -1021,6 +1025,11 @@ async def update_admin_order(
     # stock reduction all hang off its invoice.
     if payload.status in _FULFILLMENT_STATUSES:
         _ensure_qb_invoice(order)
+
+    # This endpoint also edits shipping cost and tax, which move the total. Once an
+    # invoice exists _ensure_qb_invoice returns without doing anything, so bring the
+    # existing one up to date instead of leaving QB on the old figure.
+    _refresh_qb_invoice(order)
 
     if payload.status and payload.status != old_status:
         try:
@@ -1604,6 +1613,7 @@ async def set_order_discount(order_id: UUID, body: dict, db: AsyncSession = Depe
     order.discount_amount = round(float(order.subtotal or 0) * percent / 100, 2)
     _recalc_order_total(order)
     await db.commit()
+    _refresh_qb_invoice(order)
 
     return {
         "discount_percent": float(order.discount_percent or 0),
@@ -2102,23 +2112,26 @@ async def sync_order_to_quickbooks(order_id: UUID, db: AsyncSession = Depends(ge
 
 @router.post("/orders/{order_id}/recreate-qb-invoice", response_model=dict)
 async def recreate_qb_invoice(order_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Recreate this order's invoice in QuickBooks from scratch — for when the QB
-    invoice was deleted. The normal sync SKIPS creating when the order already
-    stores a qb_invoice_id (it trusts the invoice exists), so here we clear that
-    stale id first; the sync then creates a fresh invoice AND emails the customer
-    the new invoice. All the order data is preserved in the app, so nothing is
-    lost. One rate-limited QB call — no API storm."""
-    from sqlalchemy import text as _text
+    """Bring this order's QuickBooks invoice back in line with the order.
+
+    Two different faults land here and they need opposite treatment. If the invoice
+    was *deleted* in QB, the id we hold is stale and a fresh invoice must be raised.
+    If the invoice still exists but shows the wrong amount — the order was edited
+    after it was billed — clearing the id would not help: QB rejects the duplicate
+    DocNumber and hands back the very same wrong invoice, so the button would
+    report success and change nothing.
+
+    So: refresh the existing invoice's lines, and only fall back to creating a new
+    one when QB says the invoice is genuinely gone. The task declines to rewrite an
+    invoice that already has a payment or credit memo against it.
+    """
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
     if not order:
         raise NotFoundError(f"Order {order_id} not found")
-    # Clear the stale/deleted QB invoice reference so the sync recreates it.
-    await db.execute(
-        _text("UPDATE orders SET qb_invoice_id=NULL WHERE id=:oid"),
-        {"oid": str(order_id)},
-    )
-    await db.commit()
-    # Explicit admin action — clear any in-flight dedup marker so this is never
+
+    from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+
+    # Explicit admin action - clear any in-flight dedup marker so this is never
     # swallowed as a duplicate of an automatic sync.
     try:
         import redis as _redis_rc
@@ -2128,7 +2141,17 @@ async def recreate_qb_invoice(order_id: UUID, db: AsyncSession = Depends(get_db)
         ).delete(f"qb:order_sync_dispatched:{order_id}")
     except Exception:
         pass
-    from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+
+    if getattr(order, "qb_invoice_id", None):
+        sync_order_invoice_to_qb.delay(str(order_id), refresh_lines=True)
+        return {
+            "message": (
+                "Updating the QuickBooks invoice to match this order — it will refresh shortly. "
+                "If the invoice has already been paid it is left untouched and the mismatch is reported instead."
+            ),
+            "order_id": str(order_id),
+        }
+
     sync_order_invoice_to_qb.delay(str(order_id))
     return {"message": "Recreating the invoice in QuickBooks — it will appear shortly and the customer will be emailed the new invoice.", "order_id": str(order_id)}
 
@@ -2270,6 +2293,32 @@ def _ensure_qb_invoice(order: Order) -> None:
         logger.info("QB invoice sync queued for order %s (entered fulfilment)", order.order_number)
     except Exception as _e:
         logger.warning("QB invoice sync dispatch failed for order %s: %s", order.order_number, _e)
+
+
+def _refresh_qb_invoice(order: Order) -> None:
+    """Push an edited order's new figures onto its existing QuickBooks invoice.
+
+    An invoice was written once and never revisited, so anything changed after it
+    was raised — items added or removed, a price corrected, a discount applied,
+    shipping adjusted — stayed in our books alone. QuickBooks kept billing the
+    original amount, and the difference only ever surfaced by hand-comparing a P&L.
+
+    Call AFTER the commit, and only for orders that already have an invoice; a
+    brand-new one is _ensure_qb_invoice's job. The task declines to touch an
+    invoice that already has a payment or credit memo against it.
+    """
+    if not getattr(order, "qb_invoice_id", None):
+        return  # no invoice yet — nothing to bring up to date
+    try:
+        from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+        # Short delay so several edits in a row (a price, then a discount) settle
+        # into one update instead of racing each other onto the same invoice.
+        sync_order_invoice_to_qb.apply_async(
+            args=[str(order.id)], kwargs={"refresh_lines": True}, countdown=15
+        )
+        logger.info("QB invoice refresh queued for order %s (order edited)", order.order_number)
+    except Exception as _e:
+        logger.warning("QB invoice refresh dispatch failed for order %s: %s", order.order_number, _e)
 
 
 async def _deduct_order_inventory(order: Order, db: AsyncSession, note: str) -> None:
