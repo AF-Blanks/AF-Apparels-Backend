@@ -776,3 +776,207 @@ async def export_report_csv(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ── QuickBooks reconciliation ─────────────────────────────────────────────────
+@router.get("/reports/qb-reconciliation")
+async def qb_reconciliation(
+    period: str = Query("month"),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    _: None = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Line the dashboard's sales figure up against QuickBooks income, order by order.
+
+    The two are *meant* to differ by the sales tax: the dashboard reports what we
+    billed (order.total = subtotal - discount + shipping + tax + convenience fee)
+    while a P&L reports income, and collected tax is booked to the Sales Tax
+    Payable *liability*, never to income. Whatever is left after subtracting tax
+    is a real gap — an order whose invoice never reached QB, or one whose invoice
+    carries a TxnDate outside the window being compared — and this names it.
+
+    Costs at most a handful of QB calls: one paged query over the window, plus one
+    batched DocNumber lookup for whatever did not match.
+    """
+    import asyncio
+
+    from app.api.v1.admin.analytics import ACTIVE_STATUSES
+    from app.services.quickbooks_service import QuickBooksService
+
+    start, end = _date_range(period, date_from, date_to)
+
+    rows = (await db.execute(
+        select(
+            Order.order_number,
+            Order.created_at,
+            Order.total,
+            Order.tax_amount,
+            Order.shipping_cost,
+            Order.payment_status,
+            Order.status,
+            Order.qb_invoice_id,
+            Company.name.label("company_name"),
+        )
+        .join(Company, Order.company_id == Company.id, isouter=True)
+        .where(
+            Order.created_at >= start,
+            Order.created_at <= end,
+            Order.status.in_(ACTIVE_STATUSES),
+        )
+        .order_by(Order.created_at.desc())
+    )).all()
+
+    app_total = sum(float(r.total or 0) for r in rows)
+    app_tax = sum(float(r.tax_amount or 0) for r in rows)
+
+    # ── Pull the QB invoices that fall inside the same window ─────────────────
+    by_id: dict[str, dict] = {}
+    by_doc: dict[str, dict] = {}
+    qb_error: str | None = None
+    svc = None
+    d_from, d_to = start.date().isoformat(), end.date().isoformat()
+
+    try:
+        svc = await QuickBooksService().initialize()
+        pos = 1
+        while True:
+            soql = (
+                "SELECT Id, DocNumber, TxnDate, TotalAmt, Balance FROM Invoice "
+                f"WHERE TxnDate >= '{d_from}' AND TxnDate <= '{d_to}' "
+                f"STARTPOSITION {pos} MAXRESULTS 500"
+            )
+            resp = await asyncio.to_thread(svc.query, soql)
+            batch = (resp.get("QueryResponse") or {}).get("Invoice") or []
+            for inv in batch:
+                inv["_in_window"] = True
+                by_id[str(inv.get("Id"))] = inv
+                if inv.get("DocNumber"):
+                    by_doc[str(inv["DocNumber"])] = inv
+            if len(batch) < 500:
+                break
+            pos += 500
+    except Exception as exc:  # QB down / disconnected — still return the app side
+        qb_error = str(exc)[:300]
+
+    # ── Anything unmatched may still exist in QB under a different TxnDate ────
+    if svc is not None and qb_error is None:
+        unmatched = [
+            r.order_number for r in rows
+            if not (
+                (r.qb_invoice_id and str(r.qb_invoice_id) in by_id)
+                or str(r.order_number) in by_doc
+            )
+        ]
+        try:
+            for i in range(0, len(unmatched), 40):
+                chunk = unmatched[i:i + 40]
+                in_list = ", ".join("'" + svc._soql_escape(d) + "'" for d in chunk)
+                resp = await asyncio.to_thread(
+                    svc.query,
+                    "SELECT Id, DocNumber, TxnDate, TotalAmt, Balance FROM Invoice "
+                    f"WHERE DocNumber IN ({in_list}) MAXRESULTS 500",
+                )
+                for inv in (resp.get("QueryResponse") or {}).get("Invoice") or []:
+                    inv["_in_window"] = False
+                    by_id.setdefault(str(inv.get("Id")), inv)
+                    if inv.get("DocNumber"):
+                        by_doc.setdefault(str(inv["DocNumber"]), inv)
+        except Exception as exc:
+            qb_error = str(exc)[:300]
+
+    # ── Match each order to its invoice ───────────────────────────────────────
+    matched_qb_ids: set[str] = set()
+    out: list[dict] = []
+    missing_total, missing_n = 0.0, 0
+    outside_total, outside_n = 0.0, 0
+    mismatch_total, mismatch_n = 0.0, 0
+    qb_window_total = 0.0
+
+    for r in rows:
+        total = float(r.total or 0)
+        tax = float(r.tax_amount or 0)
+        inv = None
+        if r.qb_invoice_id and str(r.qb_invoice_id) in by_id:
+            inv = by_id[str(r.qb_invoice_id)]
+        elif str(r.order_number) in by_doc:
+            inv = by_doc[str(r.order_number)]
+
+        qb_total = None
+        txn_date = None
+        if inv is None:
+            state = "missing_from_qb"
+            missing_total += total - tax
+            missing_n += 1
+        else:
+            matched_qb_ids.add(str(inv.get("Id")))
+            qb_total = float(inv.get("TotalAmt") or 0)
+            txn_date = inv.get("TxnDate")
+            if not inv.get("_in_window"):
+                state = "dated_outside_range"
+                outside_total += total - tax
+                outside_n += 1
+            elif abs(qb_total - total) > 0.01:
+                state = "amount_mismatch"
+                mismatch_total += qb_total - total
+                mismatch_n += 1
+                qb_window_total += qb_total
+            else:
+                state = "ok"
+                qb_window_total += qb_total
+
+        out.append({
+            "order_number": r.order_number,
+            "date": r.created_at.isoformat() if r.created_at else None,
+            "company": r.company_name,
+            "status": r.status,
+            "payment_status": r.payment_status,
+            "app_total": round(total, 2),
+            "sales_tax": round(tax, 2),
+            "shipping": round(float(r.shipping_cost or 0), 2),
+            "counts_as_income": round(total - tax, 2),
+            "qb_invoice_id": str(r.qb_invoice_id) if r.qb_invoice_id else None,
+            "qb_doc_number": inv.get("DocNumber") if inv else None,
+            "qb_total": round(qb_total, 2) if qb_total is not None else None,
+            "qb_txn_date": txn_date,
+            "state": state,
+        })
+
+    # Invoices sitting in QB for this window that no order accounts for.
+    extra = [
+        {
+            "qb_invoice_id": str(inv.get("Id")),
+            "qb_doc_number": inv.get("DocNumber"),
+            "qb_txn_date": inv.get("TxnDate"),
+            "qb_total": round(float(inv.get("TotalAmt") or 0), 2),
+        }
+        for inv in by_id.values()
+        if inv.get("_in_window") and str(inv.get("Id")) not in matched_qb_ids
+    ]
+    extra_total = sum(e["qb_total"] for e in extra)
+
+    return {
+        "period": {"from": start.date().isoformat(), "to": end.date().isoformat()},
+        "qb_available": qb_error is None,
+        "qb_error": qb_error,
+        "summary": {
+            "orders": len(rows),
+            # What the dashboard tile shows.
+            "dashboard_sales": round(app_total, 2),
+            # Removed because QB books it to a liability, not to income.
+            "sales_tax_excluded": round(app_tax, 2),
+            # What a QB P&L for this window *should* report as income.
+            "expected_qb_income": round(app_total - app_tax, 2),
+            "qb_invoice_total_in_window": round(qb_window_total, 2),
+            "missing_from_qb_count": missing_n,
+            "missing_from_qb_income": round(missing_total, 2),
+            "dated_outside_range_count": outside_n,
+            "dated_outside_range_income": round(outside_total, 2),
+            "amount_mismatch_count": mismatch_n,
+            "amount_mismatch_delta": round(mismatch_total, 2),
+            "extra_in_qb_count": len(extra),
+            "extra_in_qb_total": round(extra_total, 2),
+        },
+        "orders": out,
+        "extra_invoices": extra,
+    }
