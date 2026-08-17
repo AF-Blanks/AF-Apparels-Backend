@@ -1247,6 +1247,14 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
 
                 vendor_name = po.manufacturer.name if po.manufacturer else "Unknown Vendor"
                 li_map = {str(li.id): li for li in po.line_items}
+                # A bill line only carries a QUANTITY when it references a QB item.
+                # Without one it degrades to an account-based line: the money posts
+                # to Cost of Goods Sold and the stock never reaches QuickBooks at
+                # all, while every later sale still deducts from it — which is how
+                # QtyOnHand marched negative and COGS inflated. So make sure the
+                # item exists here, before the bill is built, rather than leaving it
+                # to a background task that may land afterwards.
+                _svc_for_items = None
                 bill_lines = []
                 for ri in receiving.items:
                     li = li_map.get(str(ri.po_line_item_id)) if ri.po_line_item_id else None
@@ -1259,6 +1267,44 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
                         detail = "/".join(filter(None, [variant.color, variant.size]))
                         desc = f"{product_name} — {detail}" if detail else product_name
                         qb_item_id = variant.qb_item_id
+
+                        if not qb_item_id:
+                            if _svc_for_items is None:
+                                _svc_for_items = await QuickBooksService().initialize()
+                            try:
+                                # Opening quantity 0 on purpose: this bill is about to
+                                # add what was just received, and QB turns a non-zero
+                                # opening balance into an inventory adjustment posted
+                                # to its default Shrinkage account. Any stock that
+                                # predates this receipt is corrected by the stock-count
+                                # reload, not by an entry nobody asked for.
+                                qb_item_id = await asyncio.to_thread(
+                                    _svc_for_items.find_or_create_item,
+                                    sku=variant.sku,
+                                    name=f"{product_name} - {variant.sku}",
+                                    unit_price=float(variant.retail_price or 0),
+                                    cost=float(ri.unit_cost_actual or 0) or None,
+                                    qty_on_hand=0,
+                                    description=desc,
+                                )
+                                variant.qb_item_id = str(qb_item_id)
+                                await session.flush()
+                                logger.info(
+                                    "sync_po_receipt_to_qb: created QB item %s for sku=%s"
+                                    " so the bill can carry its quantity",
+                                    qb_item_id, variant.sku,
+                                )
+                            except Exception as _item_exc:
+                                # Better a bill without the quantity than no bill at
+                                # all — but say so loudly, because this is the exact
+                                # condition that drove QtyOnHand negative.
+                                qb_item_id = None
+                                logger.error(
+                                    "sync_po_receipt_to_qb: could not create a QB item for"
+                                    " sku=%s (%s) — this bill line will post to COGS with"
+                                    " NO quantity and QuickBooks stock will drift low",
+                                    variant.sku, _item_exc,
+                                )
                     elif li and li.new_product_name:
                         detail = "/".join(filter(None, [li.new_product_color, li.new_product_size]))
                         desc = f"{li.new_product_name} — {detail}" if detail else li.new_product_name
@@ -1320,8 +1366,15 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
 
 
 @celery_app.task(bind=True, max_retries=5)
-def sync_inventory_batch_to_qb(self, variant_ids: list[str]):
+def sync_inventory_batch_to_qb(self, variant_ids: list[str], push_quantity: bool = True):
     """Push current stock for multiple variants in one task.
+
+    push_quantity=False updates price and cost but leaves QtyOnHand alone. Use it
+    wherever QuickBooks is already being told about the movement by a document —
+    a vendor bill adds the received quantity itself, so pushing a total on top of
+    it either double-counts or overwrites the bill, depending on which task the
+    worker happens to run first. It also avoids the inventory adjustment QB books
+    to its Shrinkage account on every quantity push.
 
     Called once per order instead of once per variant — replaces the old
     per-variant loop that fired N separate tasks on every checkout.
@@ -1370,11 +1423,11 @@ def sync_inventory_batch_to_qb(self, variant_ids: list[str]):
                         variant.qb_item_id,
                         float(variant.retail_price),
                         float(variant.cost_per_item) if variant.cost_per_item else None,
-                        total_stock,
+                        total_stock if push_quantity else None,
                     )
                     logger.info(
-                        "sync_inventory_batch_to_qb: updated variant=%s qty=%d",
-                        variant_id, total_stock,
+                        "sync_inventory_batch_to_qb: updated variant=%s qty=%s",
+                        variant_id, total_stock if push_quantity else "unchanged (document-driven)",
                     )
 
                 except Exception as exc:

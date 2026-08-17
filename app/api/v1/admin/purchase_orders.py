@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _dispatch_qb_inventory_sync(variant_ids: list[str], *, countdown: int, context: str) -> None:
+def _dispatch_qb_inventory_sync(
+    variant_ids: list[str], *, countdown: int, context: str, push_quantity: bool = True
+) -> None:
     """Queue a SINGLE batched QB inventory-sync task for many variants.
 
     This is the optimization: instead of one Celery task (and its 2 QB calls +
@@ -40,7 +42,7 @@ def _dispatch_qb_inventory_sync(variant_ids: list[str], *, countdown: int, conte
         return
     try:
         from app.tasks.quickbooks_tasks import sync_inventory_batch_to_qb as _batch
-        _batch.apply_async(args=[variant_ids], countdown=countdown)
+        _batch.apply_async(args=[variant_ids, push_quantity], countdown=countdown)
         logger.info(
             "QB inventory batch sync queued for %d variants (%s)",
             len(variant_ids), context,
@@ -56,6 +58,17 @@ def _dispatch_qb_inventory_sync(variant_ids: list[str], *, countdown: int, conte
         return
 
     # Fallback — preserve prior behaviour rather than skipping the sync entirely.
+    # The per-variant task always pushes a quantity, so it is only safe where a
+    # quantity push was wanted. Where the caller asked for price and cost only,
+    # skipping is the correct outcome: a stray push would fight the document that
+    # already recorded the movement.
+    if not push_quantity:
+        logger.warning(
+            "QB price/cost sync skipped (%s): batch task unavailable and the "
+            "per-variant fallback would push a quantity the bill already recorded",
+            context,
+        )
+        return
     try:
         from app.tasks.quickbooks_tasks import sync_inventory_to_qb as _single
         for _vid in variant_ids:
@@ -544,8 +557,13 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
     # Dispatch QB inventory+cost sync as ONE batched task for all received
     # variants (countdown=5s so the cost_per_item commit lands first). A 50-variant
     # receive now queues 1 task instead of 50 — same data synced, far fewer QB hits.
+    # Price and cost only. The vendor bill above is what tells QuickBooks the
+    # quantity arrived; pushing a stock total alongside it raced the bill — land
+    # first and the bill added its quantity on top, land second and it overwrote
+    # the bill — so the same receive could come out high or correct at random.
     _dispatch_qb_inventory_sync(
-        [str(v) for v in variants_received], countdown=5, context=f"PO {po_id} receive"
+        [str(v) for v in variants_received], countdown=5,
+        context=f"PO {po_id} receive", push_quantity=False,
     )
 
     return {"success": True, "receiving_id": str(receiving.id)}
