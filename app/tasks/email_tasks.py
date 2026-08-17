@@ -190,10 +190,23 @@ def send_qb_invoice_ready_email(self, order_id: str) -> dict:
 # ─── Shared helpers ──────────────────────────────────────────────────────────
 
 async def _get_order_recipients(order, db) -> list[tuple[str, str]]:
-    """Return (email, first_name) list — notify contacts first, then placed_by fallback."""
+    """Every address that should hear about this order, as (email, first_name).
+
+    A wholesale customer gives more than one address when they register — a buyer,
+    an accounts inbox, the company's own — and expects the order paperwork at all
+    of them. This previously stopped at the first source that returned anything:
+    if a notification contact existed, the person who actually placed the order
+    was not written to at all.
+
+    So gather every source and de-duplicate instead of falling through:
+    notification contacts, the extra addresses given at registration, the
+    company's business email, and the user who placed the order. Placeholder
+    addresses on imported accounts are dropped.
+    """
     from sqlalchemy import select
-    from app.models.company import Contact
+    from app.models.company import Company, Contact
     from app.models.user import User
+    from app.utils.email_list import PLACEHOLDER_DOMAIN, parse_email_list
 
     if order.is_guest_order or not order.company_id:
         if order.guest_email:
@@ -201,24 +214,42 @@ async def _get_order_recipients(order, db) -> list[tuple[str, str]]:
             return [(order.guest_email, name)]
         return []
 
-    contacts = (await db.execute(
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(email: str | None, first_name: str | None) -> None:
+        e = (email or "").strip()
+        if not e or "@" not in e or e.lower().endswith(PLACEHOLDER_DOMAIN):
+            return
+        if e.lower() in seen:
+            return
+        seen.add(e.lower())
+        out.append((e, (first_name or "").strip() or "Valued Customer"))
+
+    for c in (await db.execute(
         select(Contact).where(
             Contact.company_id == order.company_id,
             Contact.notify_order_confirmation.is_(True),
         )
-    )).scalars().all()
+    )).scalars().all():
+        _add(c.email, c.first_name)
 
-    if contacts:
-        return [(c.email, c.first_name or "Valued Customer") for c in contacts]
+    company = (await db.execute(
+        select(Company).where(Company.id == order.company_id)
+    )).scalar_one_or_none()
+    if company is not None:
+        for extra in parse_email_list(getattr(company, "additional_emails", None)):
+            _add(extra, None)
+        _add(company.company_email, None)
 
     if order.placed_by_id:
         user = (await db.execute(
             select(User).where(User.id == order.placed_by_id)
         )).scalar_one_or_none()
-        if user and user.email:
-            return [(user.email, user.first_name or "Valued Customer")]
+        if user is not None:
+            _add(user.email, user.first_name)
 
-    return []
+    return out
 
 
 def _build_items_summary(items) -> str:

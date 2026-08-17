@@ -741,6 +741,12 @@ async def _resolve_customer_emails(company_id: UUID, db: AsyncSession) -> list[t
     # 1) The company's own business email (shown on the customer page)
     _add(str(company_id), company.company_email, None)
 
+    # 1b) Extra addresses the customer gave at registration - they already receive
+    # the order paperwork, so they must be offerable here too.
+    from app.utils.email_list import parse_email_list
+    for _i, _extra in enumerate(parse_email_list(getattr(company, "additional_emails", None))):
+        _add(f"extra:{_i}", _extra, None)
+
     # 2) Login users on this company (real emails only)
     user_rows = (await db.execute(
         select(User.id, User.email, User.first_name)

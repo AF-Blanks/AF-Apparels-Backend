@@ -73,6 +73,7 @@ class WholesaleService:
             phone=getattr(application, "phone", None),
             fax=getattr(application, "fax", None),
             company_email=getattr(application, "company_email", None),
+            additional_emails=getattr(application, "additional_emails", None),
             address_line1=getattr(application, "address_line1", None),
             address_line2=getattr(application, "address_line2", None),
             city=getattr(application, "city", None),

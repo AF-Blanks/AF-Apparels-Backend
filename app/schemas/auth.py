@@ -35,6 +35,11 @@ class RegisterWholesaleRequest(BaseModel):
     postal_code: str | None = Field(None, max_length=20)
     country: str | None = Field(None, max_length=100)
     how_heard: str | None = Field(None, max_length=100)
+
+    # Extra mailboxes that should also receive this customer's order paperwork
+    # (a buyer, an accounts inbox, a warehouse). The direct and company emails
+    # above are always included, so this is only the additions.
+    additional_emails: list[str] = Field(default_factory=list)
     num_employees: str | None = Field(None, max_length=50)
     num_sales_reps: str | None = Field(None, max_length=50)
 

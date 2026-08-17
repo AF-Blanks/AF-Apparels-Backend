@@ -27,6 +27,9 @@ class WholesaleApplication(BaseModel):
 
     # Extended company info (from registration form)
     company_email: Mapped[str | None] = mapped_column(String(255))
+    # Extra notification addresses the applicant asked for; carried onto the
+    # Company when the application is approved.
+    additional_emails: Mapped[str | None] = mapped_column(Text)
     address_line1: Mapped[str | None] = mapped_column(String(255))
     address_line2: Mapped[str | None] = mapped_column(String(255))
     city: Mapped[str | None] = mapped_column(String(100))

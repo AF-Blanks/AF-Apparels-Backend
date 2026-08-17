@@ -65,6 +65,9 @@ class Company(BaseModel):
 
     # Registration-form fields (added from wholesale application form)
     company_email: Mapped[str | None] = mapped_column(String(255))
+    # Extra addresses that should receive this customer's order paperwork,
+    # captured at registration. One per line; see utils.email_list.
+    additional_emails: Mapped[str | None] = mapped_column(Text)
     address_line1: Mapped[str | None] = mapped_column(String(255))
     address_line2: Mapped[str | None] = mapped_column(String(255))
     city: Mapped[str | None] = mapped_column(String(100))

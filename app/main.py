@@ -693,6 +693,10 @@ async def _ensure_columns() -> None:
          "ALTER TABLE orders ADD COLUMN IF NOT EXISTS manual_box_count INTEGER"),
         ("users.is_staff",
          "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_staff BOOLEAN NOT NULL DEFAULT false"),
+        ("companies.additional_emails",
+         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS additional_emails TEXT"),
+        ("wholesale_applications.additional_emails",
+         "ALTER TABLE wholesale_applications ADD COLUMN IF NOT EXISTS additional_emails TEXT"),
     ]
     for label, sql in statements:
         try:

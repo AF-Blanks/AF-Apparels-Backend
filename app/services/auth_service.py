@@ -195,7 +195,10 @@ class AuthService:
         self.db.add(user)
         await self.db.flush()
 
+        from app.utils.email_list import join_email_list
+
         application = WholesaleApplication(
+            additional_emails=join_email_list(getattr(data, "additional_emails", None)),
             company_name=data.company_name,
             tax_id=data.tax_id,
             business_type=data.business_type,
