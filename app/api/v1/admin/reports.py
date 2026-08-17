@@ -980,3 +980,133 @@ async def qb_reconciliation(
         "orders": out,
         "extra_invoices": extra,
     }
+
+
+# ── Inventory vs QuickBooks reconciliation ────────────────────────────────────
+@router.get("/reports/inventory-qb-reconciliation")
+async def inventory_qb_reconciliation(
+    only_problems: bool = Query(True, description="Omit variants that already agree"),
+    _: None = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Compare our stock against QuickBooks' QtyOnHand, variant by variant.
+
+    Two systems counting the same shelf drift apart, and until now the only sign
+    was a negative quantity turning up on a QuickBooks worksheet weeks later. This
+    names every variant where the two disagree, so a stock-count reload can be
+    checked the same day it is loaded.
+
+    Cheap on the API: QuickBooks items are read in pages of 1000 (three calls for
+    a three-thousand-item catalogue), not one call per variant, and the read goes
+    through the same 250/min limiter as everything else.
+    """
+    import asyncio
+
+    from app.services.quickbooks_service import QuickBooksService
+
+    # ── Our side: stock per variant ───────────────────────────────────────────
+    rows = (await db.execute(
+        select(
+            ProductVariant.id,
+            ProductVariant.sku,
+            ProductVariant.color,
+            ProductVariant.size,
+            ProductVariant.qb_item_id,
+            Product.name.label("product_name"),
+            func.coalesce(func.sum(InventoryRecord.quantity), 0).label("app_stock"),
+        )
+        .join(Product, Product.id == ProductVariant.product_id)
+        .outerjoin(InventoryRecord, InventoryRecord.variant_id == ProductVariant.id)
+        .group_by(
+            ProductVariant.id, ProductVariant.sku, ProductVariant.color,
+            ProductVariant.size, ProductVariant.qb_item_id, Product.name,
+        )
+        .order_by(Product.name, ProductVariant.color, ProductVariant.size)
+    )).all()
+
+    # ── QuickBooks side: QtyOnHand per item, in pages ─────────────────────────
+    qb_qty: dict[str, float] = {}
+    qb_error: str | None = None
+    try:
+        svc = await QuickBooksService().initialize()
+        pos = 1
+        while True:
+            resp = await asyncio.to_thread(
+                svc.query,
+                "SELECT Id, QtyOnHand FROM Item WHERE Type = 'Inventory' "
+                f"STARTPOSITION {pos} MAXRESULTS 1000",
+            )
+            batch = (resp.get("QueryResponse") or {}).get("Item") or []
+            for it in batch:
+                qb_qty[str(it.get("Id"))] = float(it.get("QtyOnHand") or 0)
+            if len(batch) < 1000:
+                break
+            pos += 1000
+    except Exception as exc:
+        qb_error = str(exc)[:300]
+
+    out: list[dict] = []
+    n_ok = n_mismatch = n_negative = n_not_in_qb = 0
+    app_units = qb_units = 0.0
+    short_by = 0.0
+
+    for r in rows:
+        app_stock = float(r.app_stock or 0)
+        app_units += app_stock
+        item_id = str(r.qb_item_id) if r.qb_item_id else None
+
+        if not item_id:
+            # Never synced, so QuickBooks has no line for it at all. Its sales fall
+            # back to a generic service item, which is why these never show up as
+            # negative — they are invisible instead.
+            state, qty, diff = "not_in_qb", None, None
+            n_not_in_qb += 1
+        elif qb_error is not None or item_id not in qb_qty:
+            state, qty, diff = "unknown", None, None
+        else:
+            qty = qb_qty[item_id]
+            qb_units += qty
+            diff = round(qty - app_stock, 2)
+            if qty < 0:
+                state = "negative_in_qb"
+                n_negative += 1
+            elif abs(diff) > 0.001:
+                state = "mismatch"
+                n_mismatch += 1
+            else:
+                state = "ok"
+                n_ok += 1
+            if diff < 0:
+                short_by += -diff
+
+        if only_problems and state == "ok":
+            continue
+        out.append({
+            "sku": r.sku,
+            "product": r.product_name,
+            "color": r.color,
+            "size": r.size,
+            "app_stock": app_stock,
+            "qb_qty": qty,
+            "difference": diff,
+            "qb_item_id": item_id,
+            "state": state,
+        })
+
+    return {
+        "qb_available": qb_error is None,
+        "qb_error": qb_error,
+        "summary": {
+            "variants": len(rows),
+            "agreeing": n_ok,
+            "mismatched": n_mismatch,
+            "negative_in_qb": n_negative,
+            "not_in_qb": n_not_in_qb,
+            "app_units": round(app_units, 2),
+            "qb_units": round(qb_units, 2),
+            # How many units QuickBooks is short across every variant it knows —
+            # the size of the hole, in pieces.
+            "qb_short_by_units": round(short_by, 2),
+        },
+        "variants": out,
+    }
