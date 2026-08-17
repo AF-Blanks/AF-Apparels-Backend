@@ -170,6 +170,33 @@ async def get_analytics(
     )
     total_tax_collected = float(tax_collected_q.scalar() or 0)
 
+    # ── Money in vs money still owed, on the same orders Total Sales counts ────
+    # payment_status is the source of truth for settlement: a card capture marks
+    # an order paid without always writing amount_paid, so "total - amount_paid"
+    # would report a fully-paid order as still owing its whole value. amount_paid
+    # only decides how much of a still-open order has been part-paid.
+    _settled = Order.payment_status.in_(["paid", "refunded"])
+    money_q = await db.execute(
+        select(
+            func.coalesce(func.sum(
+                case((_settled, Order.total), else_=func.coalesce(Order.amount_paid, 0))
+            ), 0),
+            func.coalesce(func.sum(
+                case((_settled, 0), else_=func.greatest(Order.total - func.coalesce(Order.amount_paid, 0), 0))
+            ), 0),
+        ).where(
+            Order.created_at >= cur_start_dt,
+            Order.created_at <= cur_end_dt,
+            Order.status.in_(ACTIVE_STATUSES),
+        )
+    )
+    _received_gross, _outstanding = (float(v or 0) for v in money_q.one())
+    # A refund is money going back out, so it is no longer money we received —
+    # and this keeps received + outstanding equal to the Total Sales tile, which
+    # is already net of refunds.
+    money_received = max(0.0, _received_gross - cur_refunds)
+    outstanding_amount = round(_outstanding, 2)
+
     # ── Customer counts ───────────────────────────────────────────────────────
     # Total unique companies that ever ordered
     total_cust_q = await db.execute(
@@ -355,6 +382,8 @@ async def get_analytics(
     return {
         "overview": {
             "total_revenue": round(cur_revenue, 2),
+            "money_received": round(money_received, 2),
+            "outstanding_amount": outstanding_amount,
             "total_orders": cur_orders,
             "average_order_value": round(aov, 2),
             "total_customers": total_customers,
