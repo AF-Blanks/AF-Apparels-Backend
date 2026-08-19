@@ -40,6 +40,17 @@ def get_client():
     return shippo.Shippo(api_key_header=api_key)
 
 
+def is_test_mode() -> bool:
+    """True when Shippo is running on a test key.
+
+    A test key still returns rates and still hands back a label PDF - but the
+    PDF is stamped "SAMPLE - DO NOT MAIL" and the carrier will not accept it.
+    Nothing in the response says so, so the only way to find out used to be
+    opening the file, which is one step too late. Callers surface this.
+    """
+    return os.getenv("SHIPPO_API_KEY", "").startswith("shippo_test")
+
+
 async def create_label(order_id: str, to_address: dict, carrier_token: str, weight_oz: float = 16.0) -> dict:
     try:
         client = get_client()

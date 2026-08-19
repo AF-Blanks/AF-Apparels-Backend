@@ -1401,8 +1401,13 @@ async def generate_shipping_label(
     except Exception as _e:
         logger.warning("Shipped email dispatch failed: %s", _e)
 
+    from app.services.shippo_service import is_test_mode as _is_test
     return {
         "success": True,
+        # A test key still produces a PDF, but it is watermarked
+        # "SAMPLE - DO NOT MAIL" and no carrier will accept it. Say so here rather
+        # than leaving it to be discovered when the parcel is refused.
+        "test_mode": _is_test(),
         "num_boxes": len(all_labels),
         "tracking_number": first["tracking_number"],
         "tracking_url": first.get("tracking_url"),
@@ -1533,8 +1538,10 @@ async def fetch_order_rates(
             except Exception:
                 continue
         rates.sort(key=lambda r: r["cost"])
+        from app.services.shippo_service import is_test_mode as _is_test
         return {
             "rates": rates,
+            "test_mode": _is_test(),
             "box_count": box_count,
             "weight_per_box_lbs": round(weight_lbs, 2),
             # Named so the panel can say a carrier is still on its way rather than
@@ -1838,8 +1845,13 @@ async def generate_label_manual(
     except Exception as _e:
         logger.warning("Shipped email dispatch failed: %s", _e)
 
+    from app.services.shippo_service import is_test_mode as _is_test
     return {
         "success": True,
+        # A test key still produces a PDF, but it is watermarked
+        # "SAMPLE - DO NOT MAIL" and no carrier will accept it. Say so here rather
+        # than leaving it to be discovered when the parcel is refused.
+        "test_mode": _is_test(),
         "num_boxes": len(all_labels),
         "tracking_number": first["tracking_number"],
         "tracking_url": first.get("tracking_url"),
