@@ -1622,10 +1622,15 @@ async def get_box_summary(order_id: UUID, db: AsyncSession = Depends(get_db)) ->
 
 @router.patch("/orders/{order_id}/discount", status_code=200)
 async def set_order_discount(order_id: UUID, body: dict, db: AsyncSession = Depends(get_db)) -> dict:
-    """Set (or clear) a percentage discount on an order that hasn't completed.
+    """Set (or clear) a discount on an order that hasn't completed.
 
-    The percent is stored alongside the amount it works out to, so the discount
-    keeps tracking the subtotal as items change. Pass 0 to remove it.
+    Takes either form. Send discount_percent for "10% off", and the discount keeps
+    tracking the subtotal as items are added or repriced. Send discount_amount for
+    "$50 off", and it stays at that figure whatever the subtotal does — which is
+    what a negotiated deduction usually means. Send 0 in either to remove it.
+
+    A percentage is stored alongside the money it works out to, so a fixed amount
+    is simply a percentage of zero with the amount set directly.
     """
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
     if not order:
@@ -1633,16 +1638,34 @@ async def set_order_discount(order_id: UUID, body: dict, db: AsyncSession = Depe
     if order.status in ("delivered", "cancelled", "refunded"):
         raise HTTPException(status_code=422, detail="Cannot change the discount on a completed or cancelled order")
 
-    raw = body.get("discount_percent")
-    try:
-        percent = round(float(raw or 0), 2)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="discount_percent must be a number")
-    if percent < 0 or percent > 100:
-        raise HTTPException(status_code=422, detail="discount_percent must be between 0 and 100")
+    subtotal = float(order.subtotal or 0)
+    has_amount = "discount_amount" in body and body.get("discount_amount") is not None
 
-    order.discount_percent = percent
-    order.discount_amount = round(float(order.subtotal or 0) * percent / 100, 2)
+    if has_amount:
+        try:
+            amount = round(float(body.get("discount_amount") or 0), 2)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="discount_amount must be a number")
+        if amount < 0:
+            raise HTTPException(status_code=422, detail="discount_amount cannot be negative")
+        if amount > subtotal:
+            raise HTTPException(
+                status_code=422,
+                detail=f"A ${amount:,.2f} discount is more than the ${subtotal:,.2f} of goods on this order.",
+            )
+        # percent 0 is what marks this as a fixed amount — _recalc_order_total only
+        # recomputes the amount from a percentage when one is set.
+        order.discount_percent = 0
+        order.discount_amount = amount
+    else:
+        try:
+            percent = round(float(body.get("discount_percent") or 0), 2)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="discount_percent must be a number")
+        if percent < 0 or percent > 100:
+            raise HTTPException(status_code=422, detail="discount_percent must be between 0 and 100")
+        order.discount_percent = percent
+        order.discount_amount = round(subtotal * percent / 100, 2)
     _recalc_order_total(order)
     await db.commit()
     _refresh_qb_invoice(order)
@@ -2314,6 +2337,10 @@ def _recalc_order_total(order: Order) -> None:
     (what actually comes off). Recomputing the amount from the percent here means
     the discount follows the subtotal automatically as items are added, repriced
     or removed — a 10% discount stays 10% instead of freezing at an old figure.
+
+    A percent of zero means a fixed amount was agreed instead: that figure is left
+    alone as items change, which is what "$50 off" is normally taken to mean. It is
+    still capped at the subtotal so an order can never total less than its shipping.
     """
     subtotal = float(order.subtotal or 0)
     percent = float(getattr(order, "discount_percent", 0) or 0)
