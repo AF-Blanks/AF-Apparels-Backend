@@ -479,6 +479,19 @@ class QuickBooksService:
 
     # ── Invoice ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _po_memo(po_number: str | None) -> dict[str, Any] | None:
+        """The customer's PO number, in the one place QuickBooks will print it.
+
+        A QuickBooks invoice has no PO field of its own — the "P.O. Number" box on
+        the form is a custom field, which has to be switched on per company and
+        addressed by an id we cannot know from here. CustomerMemo needs no setup
+        and shows on the invoice the customer receives, which is what the PO is
+        for: matching our invoice against their own paperwork.
+        """
+        po = (po_number or "").strip()
+        return {"value": f"PO Number: {po}"} if po else None
+
     def _build_invoice_lines(
         self, line_items: list[dict], discount_amount: float = 0.0
     ) -> list[dict[str, Any]]:
@@ -537,6 +550,7 @@ class QuickBooksService:
         line_items: list[dict],
         shipping_addr: dict | None = None,
         discount_amount: float = 0.0,
+        po_number: str | None = None,
     ) -> dict[str, Any]:
         """Rewrite an existing invoice's lines so QB matches the edited order.
 
@@ -593,6 +607,13 @@ class QuickBooksService:
         }
         if shipping_addr:
             payload["ShipAddr"] = shipping_addr
+        _memo = self._po_memo(po_number)
+        if _memo:
+            payload["CustomerMemo"] = _memo
+        elif inv.get("CustomerMemo"):
+            # A full update drops anything not resent, and the memo may hold
+            # something a person typed in QuickBooks.
+            payload["CustomerMemo"] = inv["CustomerMemo"]
         # Keep the original invoice date — the order was placed when it was placed,
         # and re-dating it would move the revenue into a different month's P&L.
         if inv.get("TxnDate"):
@@ -620,6 +641,7 @@ class QuickBooksService:
         due_date: str | None = None,
         shipping_addr: dict | None = None,
         discount_amount: float = 0.0,
+        po_number: str | None = None,
     ) -> str:
         """Create a QB Invoice. Returns QB invoice Id (idempotent by DocNumber).
 
@@ -643,6 +665,9 @@ class QuickBooksService:
             payload["DueDate"] = due_date
         if shipping_addr:
             payload["ShipAddr"] = shipping_addr
+        _memo = self._po_memo(po_number)
+        if _memo:
+            payload["CustomerMemo"] = _memo
 
         logger.info("QB create_invoice payload: %s", payload)
         try:
