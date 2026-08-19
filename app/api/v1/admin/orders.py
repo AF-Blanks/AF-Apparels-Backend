@@ -2147,6 +2147,69 @@ async def sync_order_to_quickbooks(order_id: UUID, db: AsyncSession = Depends(ge
     return {"message": "QuickBooks sync queued", "order_id": str(order_id)}
 
 
+@router.post("/orders/{order_id}/reset-label", response_model=dict)
+async def reset_order_label(order_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """Clear an order's shipping label so a new one can be bought.
+
+    Once a label was stored the panel showed it and hid the rate list, leaving no
+    way to buy another. That matters whenever the first one cannot be used: the
+    weight was wrong, the address changed, the printed sheet was ruined — or, as
+    happened here, it was bought on a Shippo test key and came out watermarked
+    "SAMPLE - DO NOT MAIL".
+
+    This only forgets our copy. It does not refund the old label: Shippo refunds
+    are requested from their dashboard (USPS allows it within 30 days on an unused
+    label), and a test-key label cost nothing to begin with. The order's status is
+    left alone — re-labelling is not un-shipping.
+    """
+    from sqlalchemy import text as _text
+
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+
+    previous = {
+        "carrier": order.courier,
+        "service": order.courier_service,
+        "tracking": order.tracking_number,
+    }
+    if not order.tracking_number and not getattr(order, "label_url", None):
+        return {"success": True, "message": "This order has no label to clear.", "previous": None}
+
+    await db.execute(
+        _text(
+            "UPDATE orders SET label_url=NULL, tracking_url=NULL, all_labels=NULL,"
+            " tracking_number=NULL WHERE id=:oid"
+        ),
+        {"oid": str(order_id)},
+    )
+
+    # Leave a trace: someone will ask later why the tracking number changed.
+    entry = {
+        "status": order.status,
+        "message": (
+            "Shipping label cleared for re-issue"
+            + (f" — was {previous['carrier'] or ''} {previous['service'] or ''}".rstrip() if previous["carrier"] else "")
+            + (f", tracking {previous['tracking']}" if previous["tracking"] else "")
+        ),
+        "created_by": "admin",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    current = list(order.timeline or [])
+    current.append(entry)
+    await db.execute(
+        _text("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
+        {"tl": _json.dumps(current), "oid": str(order_id)},
+    )
+    await db.commit()
+    logger.info("Label cleared for order %s (was %s)", order.order_number, previous)
+    return {
+        "success": True,
+        "message": "Label cleared — fetch rates and generate a new one.",
+        "previous": previous,
+    }
+
+
 @router.post("/orders/{order_id}/recreate-qb-invoice", response_model=dict)
 async def recreate_qb_invoice(order_id: UUID, db: AsyncSession = Depends(get_db)):
     """Bring this order's QuickBooks invoice back in line with the order.
