@@ -127,6 +127,11 @@ class Order(BaseModel):
     # True while this order's stock is deducted from inventory; flipped off when a
     # cancel/delete restocks it, so a return-to-stock happens exactly once.
     inventory_deducted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Marks an order an admin built by hand rather than one placed at checkout.
+    # Drafts used to be recognised by a "DRAFT-" prefix on the order number, but
+    # that put them outside the ordinary numbering the customer sees. The flag
+    # carries the meaning instead, leaving the number free to run in sequence.
+    is_draft: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     convenience_fee: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True, default=0.0)
     # Multi-box labels: JSON array of {box_number, tracking_number, tracking_url, label_url, carrier, service}
     all_labels: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

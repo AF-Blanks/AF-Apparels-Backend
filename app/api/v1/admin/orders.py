@@ -292,7 +292,6 @@ async def create_draft_order(
     """Create an empty draft (pending) order for admin to fill in."""
     from uuid import UUID as _UUID
     from app.models.company import Company as _Company, CompanyUser as _CompanyUser
-    import string, random
 
     company_id = _UUID(str(payload.company_id))
 
@@ -309,25 +308,49 @@ async def create_draft_order(
     if not member:
         raise HTTPException(status_code=422, detail="Company has no active users — add a user first")
 
-    # Generate order number
-    suffix = "".join(random.choices(string.digits, k=6))
-    order_number = f"DRAFT-{suffix}"
+    # An admin-built order carries the same running number a customer's order
+    # gets. It used to be "DRAFT-" plus six random digits, which read as a
+    # different kind of document to anyone looking at it and broke the sequence
+    # the customer sees. What makes it a draft is the is_draft flag, not the name.
+    from sqlalchemy.exc import IntegrityError as _IntegrityError
+    from app.services.order_service import OrderService as _OrderSvc
 
-    order = Order(
-        company_id=company_id,
-        placed_by_id=member.user_id,
-        order_number=order_number,
-        status="pending",
-        payment_status="unpaid",
-        po_number=payload.po_number,
-        notes=payload.notes,
-        subtotal=0,
-        shipping_cost=0,
-        tax_amount=0,
-        total=0,
-    )
-    db.add(order)
-    await db.commit()
+    order = None
+    # Numbers are handed out by reading the highest one back, so two admins
+    # starting an order in the same moment can pick the same one. order_number is
+    # unique, so the loser of that race just takes the next number.
+    for _attempt in range(5):
+        order_number = await _OrderSvc(db)._generate_order_number()
+        candidate = Order(
+            company_id=company_id,
+            placed_by_id=member.user_id,
+            order_number=order_number,
+            is_draft=True,
+            status="pending",
+            payment_status="unpaid",
+            po_number=payload.po_number,
+            notes=payload.notes,
+            subtotal=0,
+            shipping_cost=0,
+            tax_amount=0,
+            total=0,
+        )
+        db.add(candidate)
+        try:
+            await db.commit()
+        except _IntegrityError:
+            await db.rollback()
+            logger.info("Draft order number %s was taken — retrying", order_number)
+            continue
+        order = candidate
+        break
+
+    if order is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Couldn't allocate an order number — please try again.",
+        )
+
     await db.refresh(order)
     return {"id": str(order.id), "order_number": order.order_number}
 
@@ -402,6 +425,7 @@ async def list_admin_orders(
             courier_service=order.courier_service,
             shipped_at=order.shipped_at,
             is_guest_order=order.is_guest_order,
+            is_draft=bool(getattr(order, "is_draft", False)),
             guest_email=order.guest_email,
             guest_name=order.guest_name,
             timeline=order.timeline or [],
@@ -626,6 +650,7 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
             customer_phone=customer_phone,
             shipping_address=shipping_address,
             is_guest_order=order.is_guest_order,
+            is_draft=bool(getattr(order, "is_draft", False)),
             guest_email=order.guest_email,
             guest_name=order.guest_name,
             guest_phone=order.guest_phone,

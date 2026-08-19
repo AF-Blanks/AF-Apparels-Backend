@@ -112,6 +112,10 @@ class OrderOut(BaseModel):
     is_fully_paid: bool = False
     convenience_fee: Decimal | None = None
     qb_invoice_id: str | None = None
+    # Raised by an admin rather than placed at checkout, so the customer is
+    # offered a Pay Now link for the invoice. Older ones predate the flag and are
+    # still recognised by a "DRAFT-" order number.
+    is_draft: bool = False
     items: list[OrderItemOut]
     created_at: datetime
     updated_at: datetime
@@ -158,6 +162,9 @@ class AdminOrderListItem(BaseModel):
     is_guest_order: bool = False
     guest_email: str | None = None
     guest_name: str | None = None
+    # Hand-built by an admin rather than placed at checkout. Older drafts predate
+    # this flag and are still recognisable by a "DRAFT-" order number.
+    is_draft: bool = False
     # Timeline entries for customer activity feed
     timeline: list[dict] = []
     # "returned" | "refunded" when an approved RMA exists for this order.
