@@ -96,6 +96,7 @@ def send_order_confirmation_email(self, order_id: str) -> dict:
                         variables={
                             "contact_name": contact.first_name or "Valued Customer",
                             "order_number": order.order_number,
+                            "customer_po_number": getattr(order, "po_number", None) or "",
                             "company_name": company_name,
                             "order_date": order.created_at.strftime("%B %d, %Y"),
                             "order_total": f"${float(order.total):.2f}",
@@ -316,6 +317,7 @@ def send_order_confirmed_email(self, order_id: str) -> dict:
                         variables={
                             "contact_name": name,
                             "order_number": order.order_number,
+                            "customer_po_number": getattr(order, "po_number", None) or "",
                             "company_name": company_name,
                             "order_date": order.created_at.strftime("%B %d, %Y"),
                             "order_total": f"${float(order.total):.2f}",
@@ -369,6 +371,7 @@ def send_order_processing_email(self, order_id: str) -> dict:
                         variables={
                             "contact_name": name,
                             "order_number": order.order_number,
+                            "customer_po_number": getattr(order, "po_number", None) or "",
                             "company_name": company_name,
                             "order_date": order.created_at.strftime("%B %d, %Y"),
                             "order_total": f"${float(order.total):.2f}",
@@ -423,6 +426,7 @@ def send_order_ready_email(self, order_id: str) -> dict:
                         variables={
                             "contact_name": name,
                             "order_number": order.order_number,
+                            "customer_po_number": getattr(order, "po_number", None) or "",
                             "company_name": company_name,
                             "order_date": order.created_at.strftime("%B %d, %Y"),
                             "order_total": f"${float(order.total):.2f}",
@@ -472,6 +476,7 @@ def send_order_shipped_email(self, order_id: str, tracking_number: str = "") -> 
                         variables={
                             "contact_name": name,
                             "order_number": order.order_number,
+                            "customer_po_number": getattr(order, "po_number", None) or "",
                             "order_total": f"${float(order.total):.2f}",
                             "tracking_number": tracking,
                             "tracking_url": order.tracking_url or "",
@@ -523,6 +528,7 @@ def send_ready_for_pickup_email(self, order_id: str) -> dict:
                         variables={
                             "contact_name": name,
                             "order_number": order.order_number,
+                            "customer_po_number": getattr(order, "po_number", None) or "",
                             "company_name": company_name,
                             "order_date": order.created_at.strftime("%B %d, %Y"),
                             "order_total": f"${float(order.total):.2f}",
@@ -576,6 +582,7 @@ def send_order_delivered_email(self, order_id: str) -> dict:
                         variables={
                             "contact_name": name,
                             "order_number": order.order_number,
+                            "customer_po_number": getattr(order, "po_number", None) or "",
                             "company_name": company_name,
                             "order_date": order.created_at.strftime("%B %d, %Y"),
                             "order_total": f"${float(order.total):.2f}",
@@ -627,6 +634,7 @@ def send_order_cancelled_email(self, order_id: str, reason: str = "") -> dict:
                         variables={
                             "contact_name": name,
                             "order_number": order.order_number,
+                            "customer_po_number": getattr(order, "po_number", None) or "",
                             "order_date": order.created_at.strftime("%B %d, %Y"),
                             "order_total": f"${float(order.total):.2f}",
                             "reason": reason,
@@ -683,6 +691,7 @@ def send_invoice_email(self, order_id: str) -> dict:
                             "contact_name": contact.first_name or "Valued Customer",
                             "company_name": company_name,
                             "order_number": order.order_number,
+                            "customer_po_number": getattr(order, "po_number", None) or "",
                             "po_number": order.po_number or order.qb_invoice_id or "",
                             "order_date": order.created_at.strftime("%B %d, %Y"),
                             "order_total": f"${float(order.total):.2f}",

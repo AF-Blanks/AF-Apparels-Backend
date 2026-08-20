@@ -329,6 +329,7 @@ class EmailService:
             variables={
                 "contact_name": contact_name,
                 "order_number": order.order_number,
+                "customer_po_number": getattr(order, "po_number", None) or "",
                 "order_date": order.created_at.strftime("%B %d, %Y"),
                 "order_total": f"${float(order.total):.2f}",
                 "order_url": order_url if not getattr(order, "is_guest_order", False) else "",

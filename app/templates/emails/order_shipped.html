@@ -12,6 +12,12 @@
     <td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;width:38%;border-bottom:1px solid #2d4a6b;">Order Number</td>
     <td style="padding:10px 16px;font-size:13px;color:#1c3557;font-weight:700;background:#ffffff;border-bottom:1px solid #e5e7eb;">#{{ order_number }}</td>
   </tr>
+  {% if customer_po_number %}
+  <tr>
+    <td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;width:38%;border-bottom:1px solid #2d4a6b;">PO Number</td>
+    <td style="padding:10px 16px;font-size:13px;color:#374151;background:#ffffff;border-bottom:1px solid #e5e7eb;">{{ customer_po_number }}</td>
+  </tr>
+  {% endif %}
   {% if shipped_date %}
   <tr>
     <td style="padding:10px 16px;font-size:13px;font-weight:600;color:#ffffff;background:#1c3557;border-bottom:1px solid #2d4a6b;">Shipped On</td>
