@@ -4,9 +4,9 @@ import io
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import case, cast, func, select, text
+from sqlalchemy import case, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
@@ -1109,4 +1109,166 @@ async def inventory_qb_reconciliation(
             "qb_short_by_units": round(short_by, 2),
         },
         "variants": out,
+    }
+
+
+# ── Variant Sales Comparison ──────────────────────────────────────────────────
+
+# The shop opened on this date. Nothing before it is real trading, so month
+# pickers start here and a comparison against an earlier month is meaningless.
+STORE_LAUNCH = date(2026, 8, 1)
+
+
+def _month_bounds(ym: str) -> tuple[datetime, datetime, str]:
+    """Turn "2026-09" into the datetimes covering it, plus a readable label."""
+    try:
+        year, month = (int(p) for p in ym.split("-", 1))
+        first = date(year, month, 1)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="Month must look like 2026-09")
+    nxt = date(year + (month == 12), (month % 12) + 1, 1)
+    return (
+        datetime.combine(first, datetime.min.time()),
+        datetime.combine(nxt - timedelta(days=1), datetime.max.time()),
+        first.strftime("%B %Y"),
+    )
+
+
+def _previous_month(ym: str) -> str:
+    year, month = (int(p) for p in ym.split("-", 1))
+    return f"{year - (month == 1)}-{(month - 2) % 12 + 1:02d}"
+
+
+@router.get("/reports/variant-sales-comparison")
+async def variant_sales_comparison(
+    month: str | None = Query(None, description='Month to report, as "2026-09". Defaults to the current month.'),
+    compare_to: str | None = Query(None, description='Month to compare against. Defaults to the month before.'),
+    q: str | None = Query(None, description="Filter by product name, colour or size"),
+    _: None = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """One month's sales against another, down to the individual variant.
+
+    "How did 1001 Pink 3XL do this month against last?" could only be answered by
+    running the variant report twice and comparing by eye. This puts both months
+    on one row, with the change between them, so a colour or size that has fallen
+    away is visible rather than inferred.
+
+    Months start at the shop's opening date — there is nothing before it to
+    compare against.
+    """
+    from collections import defaultdict
+
+    today = date.today()
+    month = month or today.strftime("%Y-%m")
+    compare_to = compare_to or _previous_month(month)
+
+    cur_start, cur_end, cur_label = _month_bounds(month)
+    prv_start, prv_end, prv_label = _month_bounds(compare_to)
+
+    async def _sold(start: datetime, end: datetime) -> dict[tuple, tuple[int, float]]:
+        stmt = (
+            select(
+                OrderItem.product_name,
+                OrderItem.color,
+                OrderItem.size,
+                func.coalesce(func.sum(OrderItem.quantity), 0).label("units"),
+                func.coalesce(func.sum(OrderItem.line_total), 0).label("revenue"),
+            )
+            .join(Order, Order.id == OrderItem.order_id)
+            .where(Order.created_at.between(start, end))
+            .where(Order.status.notin_(["cancelled", "refunded"]))
+            .group_by(OrderItem.product_name, OrderItem.color, OrderItem.size)
+        )
+        if q and q.strip():
+            # Same shape as the product search: every word must match somewhere, so
+            # "1001 pink" narrows to the pink variants of 1001 rather than to
+            # anything mentioning either.
+            for tok in (t for t in q.split() if t.strip()):
+                like = f"%{tok.strip()}%"
+                stmt = stmt.where(
+                    or_(
+                        OrderItem.product_name.ilike(like),
+                        OrderItem.color.ilike(like),
+                        OrderItem.size.ilike(like),
+                    )
+                )
+        return {
+            (r.product_name or "—", r.color or "—", r.size or "—"): (int(r.units or 0), float(r.revenue or 0))
+            for r in (await db.execute(stmt)).all()
+        }
+
+    current = await _sold(cur_start, cur_end)
+    previous = await _sold(prv_start, prv_end)
+
+    def _pct(now: float, before: float) -> float | None:
+        # No percentage from a base of nothing — "up 100%" from zero reads as a
+        # modest gain when it is actually a variant that only just started selling.
+        if before == 0:
+            return None
+        return round((now - before) / before * 100, 1)
+
+    rows: list[dict] = []
+    for key in set(current) | set(previous):
+        name, color, size = key
+        units, revenue = current.get(key, (0, 0.0))
+        p_units, p_revenue = previous.get(key, (0, 0.0))
+        if units and not p_units:
+            state = "new"
+        elif p_units and not units:
+            state = "stopped"
+        elif units > p_units:
+            state = "up"
+        elif units < p_units:
+            state = "down"
+        else:
+            state = "same"
+        rows.append({
+            "product_name": name,
+            "color": color,
+            "size": size,
+            "units": units,
+            "prev_units": p_units,
+            "units_change": units - p_units,
+            "units_change_pct": _pct(units, p_units),
+            "revenue": round(revenue, 2),
+            "prev_revenue": round(p_revenue, 2),
+            "revenue_change": round(revenue - p_revenue, 2),
+            "revenue_change_pct": _pct(revenue, p_revenue),
+            "state": state,
+        })
+
+    # Biggest movers first, in either direction — those are what a buyer acts on.
+    rows.sort(key=lambda r: (-abs(r["units_change"]), r["product_name"], r["color"], r["size"]))
+
+    # Months the shop has actually traded in, newest first, for the pickers.
+    months: list[dict] = []
+    cursor = date(today.year, today.month, 1)
+    while cursor >= STORE_LAUNCH:
+        months.append({"value": cursor.strftime("%Y-%m"), "label": cursor.strftime("%B %Y")})
+        cursor = date(cursor.year - (cursor.month == 1), (cursor.month - 2) % 12 + 1, 1)
+
+    units_now = sum(r["units"] for r in rows)
+    units_before = sum(r["prev_units"] for r in rows)
+    rev_now = sum(r["revenue"] for r in rows)
+    rev_before = sum(r["prev_revenue"] for r in rows)
+
+    return {
+        "period": {"value": month, "label": cur_label},
+        "compare": {"value": compare_to, "label": prv_label},
+        "available_months": months,
+        "summary": {
+            "variants": len(rows),
+            "units": units_now,
+            "prev_units": units_before,
+            "units_change": units_now - units_before,
+            "units_change_pct": _pct(units_now, units_before),
+            "revenue": round(rev_now, 2),
+            "prev_revenue": round(rev_before, 2),
+            "revenue_change": round(rev_now - rev_before, 2),
+            "revenue_change_pct": _pct(rev_now, rev_before),
+            "improved": sum(1 for r in rows if r["state"] in ("up", "new")),
+            "declined": sum(1 for r in rows if r["state"] in ("down", "stopped")),
+        },
+        "rows": rows,
     }
