@@ -1272,3 +1272,190 @@ async def variant_sales_comparison(
         },
         "rows": rows,
     }
+
+
+# ── Stock Movement (opening → sold → received → closing) ──────────────────────
+
+@router.get("/reports/stock-movement")
+async def stock_movement_report(
+    month: str | None = Query(None, description='Month to report, as "2026-08". Defaults to the current month.'),
+    q: str | None = Query(None, description="Filter by product name, colour or size"),
+    hide_idle: bool = Query(True, description="Leave out variants with no stock and no movement"),
+    _: None = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """What happened to each variant's stock over a month.
+
+    Answers the question a buyer actually asks — "we had this much of 1001 Pink
+    3XL, we sold this much, and this much new stock is on the way" — which no
+    single existing report covered: sales reports ignore stock, and the stock
+    report only knows today's figure.
+
+    Opening and closing are reconstructed from the adjustment log rather than
+    stored, since nothing snapshots stock at a month boundary: every change
+    writes a before/after row, so winding today's figure back through them gives
+    the balance on any date.
+    """
+    from app.models.inventory import InventoryAdjustment
+    from app.models.purchase_order import POLineItem, POReceiving, POReceivingItem, PurchaseOrder
+
+    month = month or date.today().strftime("%Y-%m")
+    start, end, label = _month_bounds(month)
+
+    def _variant_filter(stmt, name_col, color_col, size_col):
+        if not (q and q.strip()):
+            return stmt
+        for tok in (t for t in q.split() if t.strip()):
+            like = f"%{tok.strip()}%"
+            stmt = stmt.where(or_(name_col.ilike(like), color_col.ilike(like), size_col.ilike(like)))
+        return stmt
+
+    # ── Every variant we might report on, with today's stock ──────────────────
+    base = (
+        select(
+            ProductVariant.id.label("variant_id"),
+            Product.name.label("product_name"),
+            ProductVariant.color,
+            ProductVariant.size,
+            ProductVariant.sku,
+            func.coalesce(func.sum(InventoryRecord.quantity), 0).label("stock_now"),
+        )
+        .join(Product, Product.id == ProductVariant.product_id)
+        .outerjoin(InventoryRecord, InventoryRecord.variant_id == ProductVariant.id)
+        .group_by(ProductVariant.id, Product.name, ProductVariant.color, ProductVariant.size, ProductVariant.sku)
+    )
+    base = _variant_filter(base, Product.name, ProductVariant.color, ProductVariant.size)
+    variants = {
+        r.variant_id: {
+            "variant_id": str(r.variant_id),
+            "product_name": r.product_name,
+            "color": r.color or "—",
+            "size": r.size or "—",
+            "sku": r.sku,
+            "stock_now": int(r.stock_now or 0),
+        }
+        for r in (await db.execute(base)).all()
+    }
+    if not variants:
+        return {"period": {"value": month, "label": label}, "available_months": [], "summary": {}, "rows": []}
+
+    ids = list(variants)
+
+    async def _net_change(since: datetime | None = None, after: datetime | None = None) -> dict:
+        """Net stock change recorded by the adjustment log over a window."""
+        stmt = (
+            select(
+                InventoryRecord.variant_id,
+                func.coalesce(func.sum(InventoryAdjustment.quantity_after - InventoryAdjustment.quantity_before), 0),
+            )
+            .join(InventoryRecord, InventoryRecord.id == InventoryAdjustment.inventory_record_id)
+            .where(InventoryRecord.variant_id.in_(ids))
+            .group_by(InventoryRecord.variant_id)
+        )
+        if since is not None:
+            stmt = stmt.where(InventoryAdjustment.created_at >= since)
+        if after is not None:
+            stmt = stmt.where(InventoryAdjustment.created_at > after)
+        return {vid: int(n or 0) for vid, n in (await db.execute(stmt)).all()}
+
+    changed_since_start = await _net_change(since=start)
+    changed_after_end = await _net_change(after=end)
+
+    # ── Sold in the month ─────────────────────────────────────────────────────
+    sold = {
+        vid: int(n or 0)
+        for vid, n in (await db.execute(
+            select(OrderItem.variant_id, func.coalesce(func.sum(OrderItem.quantity), 0))
+            .join(Order, Order.id == OrderItem.order_id)
+            .where(OrderItem.variant_id.in_(ids))
+            .where(Order.created_at.between(start, end))
+            .where(Order.status.notin_(["cancelled", "refunded"]))
+            .group_by(OrderItem.variant_id)
+        )).all()
+    }
+
+    # ── Received in the month (goods that actually arrived) ───────────────────
+    received = {
+        vid: int(n or 0)
+        for vid, n in (await db.execute(
+            select(POLineItem.product_variant_id, func.coalesce(func.sum(POReceivingItem.qty_received), 0))
+            .join(POLineItem, POLineItem.id == POReceivingItem.po_line_item_id)
+            .join(POReceiving, POReceiving.id == POReceivingItem.receiving_id)
+            .where(POLineItem.product_variant_id.in_(ids))
+            .where(POReceiving.created_at.between(start, end))
+            .group_by(POLineItem.product_variant_id)
+        )).all()
+    }
+
+    # ── Still on order — new stock booked but not yet in the building ─────────
+    ordered = {
+        vid: int(n or 0)
+        for vid, n in (await db.execute(
+            select(POLineItem.product_variant_id, func.coalesce(func.sum(POLineItem.qty_ordered), 0))
+            .join(PurchaseOrder, PurchaseOrder.id == POLineItem.po_id)
+            .where(POLineItem.product_variant_id.in_(ids))
+            .where(PurchaseOrder.status.notin_(["cancelled", "draft", "received"]))
+            .group_by(POLineItem.product_variant_id)
+        )).all()
+    }
+    received_on_open_pos = {
+        vid: int(n or 0)
+        for vid, n in (await db.execute(
+            select(POLineItem.product_variant_id, func.coalesce(func.sum(POReceivingItem.qty_received), 0))
+            .join(POLineItem, POLineItem.id == POReceivingItem.po_line_item_id)
+            .join(PurchaseOrder, PurchaseOrder.id == POLineItem.po_id)
+            .where(POLineItem.product_variant_id.in_(ids))
+            .where(PurchaseOrder.status.notin_(["cancelled", "draft", "received"]))
+            .group_by(POLineItem.product_variant_id)
+        )).all()
+    }
+
+    rows: list[dict] = []
+    for vid, v in variants.items():
+        closing = v["stock_now"] - changed_after_end.get(vid, 0)
+        opening = v["stock_now"] - changed_since_start.get(vid, 0)
+        s = sold.get(vid, 0)
+        r = received.get(vid, 0)
+        on_order = max(0, ordered.get(vid, 0) - received_on_open_pos.get(vid, 0))
+        # Whatever the month's movement is not explained by selling or receiving:
+        # manual corrections, returns to stock, a cancelled order restocking. Shown
+        # rather than hidden so opening + received - sold + other always equals
+        # closing, and the reader can see the row balances.
+        other = closing - opening - r + s
+
+        if hide_idle and not any((opening, closing, s, r, on_order, other)):
+            continue
+        rows.append({
+            **v,
+            "opening": opening,
+            "sold": s,
+            "received": r,
+            "other": other,
+            "closing": closing,
+            "on_order": on_order,
+        })
+
+    # Busiest first — what moved is what a buyer wants to look at.
+    rows.sort(key=lambda x: (-(x["sold"] + x["received"]), x["product_name"], x["color"], x["size"]))
+
+    today = date.today()
+    months: list[dict] = []
+    cursor = date(today.year, today.month, 1)
+    while cursor >= STORE_LAUNCH:
+        months.append({"value": cursor.strftime("%Y-%m"), "label": cursor.strftime("%B %Y")})
+        cursor = date(cursor.year - (cursor.month == 1), (cursor.month - 2) % 12 + 1, 1)
+
+    return {
+        "period": {"value": month, "label": label},
+        "available_months": months,
+        "summary": {
+            "variants": len(rows),
+            "opening": sum(x["opening"] for x in rows),
+            "sold": sum(x["sold"] for x in rows),
+            "received": sum(x["received"] for x in rows),
+            "other": sum(x["other"] for x in rows),
+            "closing": sum(x["closing"] for x in rows),
+            "on_order": sum(x["on_order"] for x in rows),
+        },
+        "rows": rows,
+    }
