@@ -1459,3 +1459,132 @@ async def stock_movement_report(
         },
         "rows": rows,
     }
+
+
+# ── Profit & Loss ─────────────────────────────────────────────────────────────
+
+@router.get("/reports/profit-loss")
+async def profit_loss_report(
+    month: str | None = Query(None, description='Month to report, as "2026-08". Defaults to the current month.'),
+    date_from: date | None = Query(None, description="Exact start date (overrides month)"),
+    date_to: date | None = Query(None, description="Exact end date (overrides month)"),
+    _: None = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """What was sold, what it cost us, and what was left.
+
+    Sales tax is left out of revenue on purpose: it is collected on the state's
+    behalf and owed straight back, so counting it as income overstates the
+    business by exactly the amount it will hand over. This is the same treatment
+    QuickBooks applies, which is why the figures here line up with a QuickBooks
+    Profit & Loss rather than with the dashboard's billed total.
+
+    Cost of goods uses each variant's current weighted-average cost — nothing
+    snapshots cost onto an order line at the time of sale, so a variant whose
+    cost has since moved is valued at today's figure. Steady costs make this
+    exact; a sharp change makes it an estimate, and the response says which
+    lines had no cost on file at all.
+    """
+    if date_from or date_to:
+        start, end = _date_range("custom", date_from, date_to)
+        label = f"{start.date().isoformat()} to {end.date().isoformat()}"
+        month_value = None
+    else:
+        month = month or date.today().strftime("%Y-%m")
+        start, end, label = _month_bounds(month)
+        month_value = month
+
+    sold_ok = Order.status.notin_(["cancelled", "refunded"])
+
+    # ── Order-level money: what was billed, split into its parts ──────────────
+    totals = (await db.execute(
+        select(
+            func.count(Order.id.distinct()),
+            func.coalesce(func.sum(Order.subtotal), 0),
+            func.coalesce(func.sum(Order.shipping_cost), 0),
+            func.coalesce(func.sum(Order.tax_amount), 0),
+            func.coalesce(func.sum(Order.discount_amount), 0),
+            func.coalesce(func.sum(Order.total), 0),
+        ).where(Order.created_at.between(start, end), sold_ok)
+    )).one()
+    orders, subtotal, shipping, tax, discount, billed = (float(v or 0) for v in totals)
+    orders = int(orders)
+
+    # Refunds actually paid back reduce what was earned.
+    from app.models.rma import RMARequest
+    refunds = float((await db.execute(
+        select(func.coalesce(func.sum(RMARequest.refund_amount), 0))
+        .select_from(RMARequest)
+        .join(Order, RMARequest.order_id == Order.id)
+        .where(Order.created_at.between(start, end))
+        .where(RMARequest.status == "approved", RMARequest.refund_status == "refunded")
+    )).scalar() or 0)
+
+    # ── Cost of goods, per product ────────────────────────────────────────────
+    lines = (await db.execute(
+        select(
+            OrderItem.product_name,
+            func.coalesce(func.sum(OrderItem.quantity), 0).label("units"),
+            func.coalesce(func.sum(OrderItem.line_total), 0).label("revenue"),
+            func.coalesce(
+                func.sum(OrderItem.quantity * func.coalesce(ProductVariant.cost_per_item, 0)), 0
+            ).label("cogs"),
+            func.coalesce(
+                func.sum(case((ProductVariant.cost_per_item.is_(None), OrderItem.quantity), else_=0)), 0
+            ).label("units_without_cost"),
+        )
+        .join(Order, Order.id == OrderItem.order_id)
+        .outerjoin(ProductVariant, ProductVariant.id == OrderItem.variant_id)
+        .where(Order.created_at.between(start, end), sold_ok)
+        .group_by(OrderItem.product_name)
+        .order_by(func.sum(OrderItem.line_total).desc())
+    )).all()
+
+    products = []
+    cogs_total = 0.0
+    units_without_cost = 0
+    for r in lines:
+        rev = float(r.revenue or 0)
+        cogs = float(r.cogs or 0)
+        cogs_total += cogs
+        units_without_cost += int(r.units_without_cost or 0)
+        products.append({
+            "product_name": r.product_name or "—",
+            "units": int(r.units or 0),
+            "revenue": round(rev, 2),
+            "cogs": round(cogs, 2),
+            "gross_profit": round(rev - cogs, 2),
+            "margin_pct": round((rev - cogs) / rev * 100, 1) if rev else None,
+            "units_without_cost": int(r.units_without_cost or 0),
+        })
+
+    # Revenue excludes the tax and is net of refunds — the figure a P&L reports.
+    revenue = billed - tax - refunds
+    gross_profit = revenue - cogs_total
+
+    today = date.today()
+    months: list[dict] = []
+    cursor = date(today.year, today.month, 1)
+    while cursor >= STORE_LAUNCH:
+        months.append({"value": cursor.strftime("%Y-%m"), "label": cursor.strftime("%B %Y")})
+        cursor = date(cursor.year - (cursor.month == 1), (cursor.month - 2) % 12 + 1, 1)
+
+    return {
+        "period": {"value": month_value, "label": label,
+                   "from": start.date().isoformat(), "to": end.date().isoformat()},
+        "available_months": months,
+        "summary": {
+            "orders": orders,
+            "product_sales": round(subtotal - discount, 2),
+            "shipping_charged": round(shipping, 2),
+            "discounts": round(discount, 2),
+            "sales_tax_excluded": round(tax, 2),
+            "refunds": round(refunds, 2),
+            "revenue": round(revenue, 2),
+            "cogs": round(cogs_total, 2),
+            "gross_profit": round(gross_profit, 2),
+            "margin_pct": round(gross_profit / revenue * 100, 1) if revenue else None,
+            "units_without_cost": units_without_cost,
+        },
+        "products": products,
+    }
