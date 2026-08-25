@@ -87,15 +87,28 @@ class ProductService:
             )
 
         if params.q:
-            query = query.where(
-                or_(
-                    Product.search_vector.op("@@")(
-                        func.plainto_tsquery("english", params.q)
-                    ),
-                    Product.name.ilike(f"%{params.q}%"),
-                    Product.product_code.ilike(f"%{params.q}%"),
+            # Match every word the shopper typed, each against the product OR any
+            # of its variants. Matching the phrase as a whole meant "1001 black"
+            # found nothing at all — no product is named that — while the shopper
+            # had described exactly what they wanted. Word by word, the more they
+            # type the tighter it gets: "1001" finds the tee, "1001 black" only
+            # the tee that comes in black, "1001 black 2xl" only if that exists.
+            for _tok in (t for t in params.q.split() if t.strip()):
+                _like = f"%{_tok.strip()}%"
+                query = query.where(
+                    or_(
+                        Product.name.ilike(_like),
+                        Product.product_code.ilike(_like),
+                        Product.fabric.ilike(_like),
+                        Product.variants.any(
+                            or_(
+                                ProductVariant.color.ilike(_like),
+                                ProductVariant.size.ilike(_like),
+                                ProductVariant.sku.ilike(_like),
+                            )
+                        ),
+                    )
                 )
-            )
 
         if params.size or params.color:
             variant_conds = [
