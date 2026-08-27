@@ -1292,39 +1292,7 @@ async def generate_shipping_label(
     #   seed/admin:   "address_line1"
     #   wholesale:    "line1"  (from _resolve_address in order_service)
     #   guest:        "line1" + "phone"
-    addr = _json.loads(order.shipping_address_snapshot or "{}")
-    to_address = {
-        "name": addr.get("full_name") or addr.get("label") or addr.get("name") or "",
-        "street1": (
-            addr.get("address_line1") or addr.get("line1") or addr.get("street1") or ""
-        ),
-        "city": addr.get("city") or "",
-        "state": addr.get("state") or addr.get("state_province") or "",
-        "zip": addr.get("postal_code") or addr.get("zip_code") or addr.get("zip") or "",
-        "country": addr.get("country") or "US",
-        "phone": addr.get("phone") or "",
-    }
-
-    # Fallback to UserAddress record when snapshot is null or incomplete
-    if not all([to_address["street1"], to_address["city"], to_address["state"], to_address["zip"]]):
-        addr_id = getattr(order, "shipping_address_id", None)
-        if addr_id:
-            from app.models.company import UserAddress as _UA
-            ua = (await db.execute(select(_UA).where(_UA.id == addr_id))).scalar_one_or_none()
-            if ua:
-                to_address = {
-                    "name": ua.full_name or ua.label or "",
-                    "street1": ua.address_line1 or "",
-                    "city": ua.city or "",
-                    "state": ua.state or "",
-                    "zip": ua.postal_code or "",
-                    "country": ua.country or "US",
-                    "phone": ua.phone or "",
-                }
-
-    if not all([to_address["street1"], to_address["city"], to_address["state"], to_address["zip"]]):
-        logger.warning("Incomplete address for order %s: %s", getattr(order, "order_number", "?"), to_address)
-        return {"success": False, "error": "Incomplete shipping address on order"}
+    to_address = await _ship_to_address(order, db)
 
     # Ensure required fields have non-empty values for Shippo label purchase
     if not to_address.get("name"):
@@ -1466,17 +1434,10 @@ async def fetch_order_rates(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    addr = _json.loads(order.shipping_address_snapshot or "{}")
-    to_address = {
-        "name": addr.get("full_name") or addr.get("name") or "Customer",
-        "street1": addr.get("address_line1") or addr.get("street1") or "123 Main St",
-        "city": addr.get("city") or "Unknown",
-        "state": addr.get("state") or addr.get("state_province", ""),
-        "zip": addr.get("zip_code") or addr.get("postal_code") or addr.get("zip", ""),
-        "country": addr.get("country", "US"),
-    }
-    if not to_address["state"] or not to_address["zip"]:
-        raise HTTPException(status_code=422, detail="Incomplete shipping address on order (missing state or ZIP)")
+    # Rates are quoted against a Shippo shipment, and buying one of those rates
+    # ships to the address on THAT shipment — so a wrong address here is not a
+    # wrong quote, it is a wrongly addressed parcel.
+    to_address = await _ship_to_address(order, db)
 
     weight_lbs = max(payload.weight_lbs, 0.5)
     box_count = max(1, int(payload.box_count or 1))
@@ -1743,17 +1704,7 @@ async def generate_label_manual(
     num_boxes = len(boxes)
 
     # Parse shipping address
-    addr = _json.loads(order.shipping_address_snapshot or "{}")
-    to_address = {
-        "name": addr.get("full_name") or addr.get("name") or "",
-        "street1": addr.get("address_line1") or addr.get("street1") or "",
-        "city": addr.get("city", ""),
-        "state": addr.get("state") or addr.get("state_province", ""),
-        "zip": addr.get("zip_code") or addr.get("postal_code") or addr.get("zip", ""),
-        "country": addr.get("country", "US"),
-    }
-    if not all([to_address["street1"], to_address["city"], to_address["state"], to_address["zip"]]):
-        raise HTTPException(status_code=422, detail="Incomplete shipping address on order")
+    to_address = await _ship_to_address(order, db)
 
     all_labels: list[dict] = []
 
@@ -2351,6 +2302,65 @@ async def _is_short_stock(variant, quantity: int, db: AsyncSession) -> bool:
         ).where(_IRec.variant_id == variant.id)
     )).one()
     return int(records or 0) > 0 and int(available or 0) < quantity
+
+
+async def _ship_to_address(order, db: AsyncSession) -> dict:
+    """The address a parcel for this order must actually go to.
+
+    Snapshots exist in three key formats depending on how the order was raised —
+    "address_line1", the older "line1", and "street1" — and each reader used to
+    pick its own subset. The rate lookup read address_line1/street1 only, missed
+    "line1" entirely, and papered over the gap with a literal "123 Main St".
+    A parcel was printed and posted to that address: the admin screen showed the
+    customer's real street the whole time, because the screen reads "line1" and
+    the label did not.
+
+    So: one reader, every key, and no invented value. A missing address raises,
+    because refusing to print a label is recoverable and posting a parcel to a
+    made-up street is not.
+    """
+    addr = _json.loads(getattr(order, "shipping_address_snapshot", None) or "{}")
+    out = {
+        "name": addr.get("full_name") or addr.get("label") or addr.get("name") or "",
+        "street1": addr.get("address_line1") or addr.get("line1") or addr.get("street1") or "",
+        "street2": addr.get("address_line2") or addr.get("line2") or addr.get("street2") or "",
+        "city": addr.get("city") or "",
+        "state": addr.get("state") or addr.get("state_province") or "",
+        "zip": addr.get("postal_code") or addr.get("zip_code") or addr.get("zip") or "",
+        "country": addr.get("country") or "US",
+        "phone": addr.get("phone") or "",
+    }
+
+    # The snapshot can be empty on older orders; the saved address book still has it.
+    if not all([out["street1"], out["city"], out["state"], out["zip"]]):
+        addr_id = getattr(order, "shipping_address_id", None)
+        if addr_id:
+            from app.models.company import UserAddress as _UA
+            ua = (await db.execute(select(_UA).where(_UA.id == addr_id))).scalar_one_or_none()
+            if ua:
+                out = {
+                    "name": ua.full_name or ua.label or "",
+                    "street1": ua.address_line1 or "",
+                    "street2": getattr(ua, "address_line2", "") or "",
+                    "city": ua.city or "",
+                    "state": ua.state or "",
+                    "zip": ua.postal_code or "",
+                    "country": ua.country or "US",
+                    "phone": ua.phone or "",
+                }
+
+    missing = [k for k in ("street1", "city", "state", "zip") if not out[k]]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"This order has no {', '.join(missing)} on file, so a label would be "
+                f"printed to the wrong place. Fix the shipping address on the order first."
+            ),
+        )
+    if not out["name"]:
+        out["name"] = getattr(order, "order_number", "Customer")
+    return out
 
 
 def _recalc_order_total(order: Order) -> None:
