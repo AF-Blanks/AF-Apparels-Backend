@@ -33,6 +33,13 @@ def _fmt_items(items) -> list[dict]:
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_order_confirmation_email(self, order_id: str) -> dict:
     """Send order received to all contacts with notify_order_confirmation=True."""
+    # Invoice only, by request. Guarded here as well as at the two direct sends:
+    # this task fires from the payment webhook, which is a different route into
+    # the same email, and a switch that only half applies is worse than none.
+    from app.core.config import settings as _cfg_email
+    if not _cfg_email.SEND_ORDER_CONFIRMATION_EMAIL:
+        return {"status": "skipped", "reason": "order_confirmation_disabled"}
+
     try:
         async def _send():
             import json as _json

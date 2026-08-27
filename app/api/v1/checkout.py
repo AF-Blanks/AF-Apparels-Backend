@@ -407,7 +407,10 @@ async def _confirm_checkout_inner(
             )).scalar_one_or_none()
             if _user:
                 _email_svc = _EmailSvc(db)
-                _email_svc.send_order_confirmation(_order_full, _user.email, restock_dates=await _restock_dates_for_order(_order_full, db))
+                # Invoice only, by request — see SEND_ORDER_CONFIRMATION_EMAIL.
+                from app.core.config import settings as _cfg_email
+                if _cfg_email.SEND_ORDER_CONFIRMATION_EMAIL:
+                    _email_svc.send_order_confirmation(_order_full, _user.email, restock_dates=await _restock_dates_for_order(_order_full, db))
                 _email_svc.send_admin_new_order_alert(_order_full)
     except Exception as _exc:
         _log.warning("Order confirmation email failed: %s", _exc)

@@ -145,6 +145,14 @@ class Settings(BaseSettings):
     # record of what customers were actually sent. Blank disables the copy.
     EMAIL_ARCHIVE_BCC: str = "invoice@afblanks.com"
 
+    # Two emails used to follow an order: an "Order Received" confirmation, then
+    # the invoice once QuickBooks had raised it. The owner wants the invoice only.
+    #
+    # Kept as a switch rather than deleted because the invoice email depends on
+    # the QuickBooks sync succeeding — if that stalls, the customer hears nothing
+    # at all. Set this back to true and the confirmation resumes immediately.
+    SEND_ORDER_CONFIRMATION_EMAIL: bool = False
+
     @model_validator(mode="after")
     def _apply_resend_from_email(self) -> "Settings":
         if self.RESEND_FROM_EMAIL:

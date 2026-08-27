@@ -473,7 +473,10 @@ async def guest_checkout(
         from app.services.email_service import EmailService
         from app.core.config import get_settings as _get_settings
         _email_svc = EmailService(db)
-        _email_svc.send_order_confirmation(order, order.guest_email, restock_dates=await _restock_dates_for_order(order, db))
+        # Invoice only, by request — see SEND_ORDER_CONFIRMATION_EMAIL.
+        from app.core.config import settings as _cfg_email
+        if _cfg_email.SEND_ORDER_CONFIRMATION_EMAIL:
+            _email_svc.send_order_confirmation(order, order.guest_email, restock_dates=await _restock_dates_for_order(order, db))
         _email_svc.send_admin_new_order_alert(order)
         if _activation_token:
             _cfg = _get_settings()
