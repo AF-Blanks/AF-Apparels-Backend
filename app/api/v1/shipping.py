@@ -33,6 +33,7 @@ class LiveRatesRequest(BaseModel):
 
 @router.post("/live-rates")
 async def get_live_rates(payload: LiveRatesRequest, db: AsyncSession = Depends(get_db)):
+    from app.utils.box_calculator import BOX_LENGTH as _BOX_L, BOX_WIDTH as _BOX_W, BOX_HEIGHT as _BOX_H
     """Return real-time carrier rates from Shippo.
 
     Calculates shipment weight from cart_items (variant weight_grams × quantity).
@@ -93,10 +94,15 @@ async def get_live_rates(payload: LiveRatesRequest, db: AsyncSession = Depends(g
                     zip=to_zip,
                     country="US",
                 ),
+                # What the customer is quoted has to describe the carton that
+                # actually ships. Quoting a 12x10x6 against a 20x16x12 shipment
+                # understated every rate at checkout — the customer paid the small
+                # figure and the carrier billed the real one, and the difference
+                # came out of the business rather than the sale.
                 parcels=[components.ParcelCreateRequest(
-                    length="12",
-                    width="10",
-                    height="6",
+                    length=_BOX_L,
+                    width=_BOX_W,
+                    height=_BOX_H,
                     distance_unit=DistanceUnitEnum.IN,
                     weight=str(round(weight_oz, 2)),
                     mass_unit=WeightUnitEnum.OZ,

@@ -1428,6 +1428,7 @@ async def fetch_order_rates(
 ) -> dict:
     """Return live Shippo rates for a Standard Ground order so the admin can pick one."""
     from app.services.shippo_service import get_client, WAREHOUSE_ADDRESS
+    from app.utils.box_calculator import BOX_LENGTH as _BOX_L, BOX_WIDTH as _BOX_W, BOX_HEIGHT as _BOX_H
     from shippo.models import components as _comp
 
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
@@ -1473,8 +1474,13 @@ async def fetch_order_rates(
                     city=to_address["city"], state=to_address["state"],
                     zip=to_address["zip"], country=to_address["country"],
                 ),
+                # The same carton the label is bought for. Quoting a 12x10x6 while
+                # buying a 20x16x12 understated every rate on screen: five times the
+                # volume is roughly 28 lbs of dimensional weight against 5, so an
+                # $8 quote came back as a bill many times that. A quote has to
+                # describe the parcel that actually ships.
                 parcels=[_comp.ParcelCreateRequest(
-                    length="12", width="10", height="6",
+                    length=_BOX_L, width=_BOX_W, height=_BOX_H,
                     distance_unit=_comp.DistanceUnitEnum.IN,
                     weight=str(round(weight_lbs, 2)),
                     mass_unit=_comp.WeightUnitEnum.LB,

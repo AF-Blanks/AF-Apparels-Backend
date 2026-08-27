@@ -52,6 +52,7 @@ def is_test_mode() -> bool:
 
 
 async def create_label(order_id: str, to_address: dict, carrier_token: str, weight_oz: float = 16.0) -> dict:
+    from app.utils.box_calculator import BOX_LENGTH, BOX_WIDTH, BOX_HEIGHT
     try:
         client = get_client()
 
@@ -99,9 +100,12 @@ async def create_label(order_id: str, to_address: dict, carrier_token: str, weig
                     country=to_address.get("country", "US"),
                 ),
                 parcels=[components.ParcelCreateRequest(
-                    length="12",
-                    width="10",
-                    height="6",
+                    # One carton size across quoting and buying. This path used a
+                    # smaller box than the label it produced, so the carrier
+                    # re-measured the parcel and billed the difference.
+                    length=BOX_LENGTH,
+                    width=BOX_WIDTH,
+                    height=BOX_HEIGHT,
                     distance_unit=components.DistanceUnitEnum.IN,
                     weight=str(round(weight_oz, 2)),
                     mass_unit=components.WeightUnitEnum.OZ,
