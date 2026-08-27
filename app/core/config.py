@@ -140,7 +140,11 @@ class Settings(BaseSettings):
     ADMIN_NOTIFICATION_EMAIL: str = ""
     # Business inboxes that receive a copy of every new-order alert
     # (comma-separated, env-overridable). Customer still gets their own confirmation.
-    ORDER_ALERT_EMAILS: str = "info@afblanks.com,sales@afblanks.com,info.afapparel@gmail.com"
+    # Every notification that goes to the business rather than to a customer —
+    # a new order, a wholesale application, low stock, backorders now shippable.
+    # One list so they cannot drift: an alert arriving in one inbox and not
+    # another is how something ends up unattended.
+    ORDER_ALERT_EMAILS: str = "invoice@afblanks.com,info@afblanks.com"
     # Every customer-facing email is blind-copied here so the business keeps one
     # record of what customers were actually sent. Blank disables the copy.
     EMAIL_ARCHIVE_BCC: str = "invoice@afblanks.com"

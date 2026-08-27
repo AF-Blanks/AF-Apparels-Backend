@@ -514,6 +514,24 @@ class EmailService:
             attachments=attachments,
         )
 
+    @staticmethod
+    def _business_inboxes() -> list[str]:
+        """Where notifications meant for us — not the customer — are sent.
+
+        One place decides this. These alerts used to pick their own recipient:
+        some the whole ORDER_ALERT_EMAILS list, others a single
+        ADMIN_NOTIFICATION_EMAIL, so a wholesale application and a new order
+        landed in different inboxes and whoever watched one never saw the other.
+        """
+        from app.core.config import settings as _s
+        raw = f"{_s.ORDER_ALERT_EMAILS or ''},{_s.ADMIN_NOTIFICATION_EMAIL or ''}"
+        out: list[str] = []
+        for addr in raw.split(","):
+            addr = addr.strip()
+            if addr and "@" in addr and addr.lower() not in {o.lower() for o in out}:
+                out.append(addr)
+        return out
+
     def send_admin_new_order_alert(self, order: "Order") -> bool:  # type: ignore[name-defined]
         """Notify the business inboxes of a new order placement.
 
@@ -522,14 +540,7 @@ class EmailService:
         receives their own confirmation separately.
         """
         from app.core.config import settings as _s
-        _raw = (_s.ORDER_ALERT_EMAILS or "")
-        if _s.ADMIN_NOTIFICATION_EMAIL:
-            _raw = f"{_raw},{_s.ADMIN_NOTIFICATION_EMAIL}"
-        recipients: list[str] = []
-        for _addr in _raw.split(","):
-            _addr = _addr.strip()
-            if _addr and _addr not in recipients:
-                recipients.append(_addr)
+        recipients = self._business_inboxes()
         if not recipients:
             return False
         order_url = f"{_s.FRONTEND_URL}/admin/orders/{order.id}"
@@ -574,7 +585,7 @@ class EmailService:
     ) -> bool:
         """Notify admin when a SKU drops below LOW_STOCK_THRESHOLD."""
         from app.core.config import settings as _s
-        if not _s.ADMIN_NOTIFICATION_EMAIL:
+        if not self._business_inboxes():
             return False
         content_html = (
             f'<h2 style="color:#D97706;font-size:20px;font-weight:800;margin:0 0 8px">'
@@ -596,7 +607,7 @@ class EmailService:
             f'Manage Inventory →</a></p>'
         )
         return self._send_via_resend(
-            to_email=_s.ADMIN_NOTIFICATION_EMAIL,
+            to_email=",".join(self._business_inboxes()),
             subject=f"Low Stock: {sku} ({qty} left) | AF Apparels",
             body_html=self._base_template(content_html),
         )
@@ -642,7 +653,7 @@ class EmailService:
             f'Open the backorder queue &rarr;</a></p>'
         )
         return self._send_via_resend(
-            to_email=_s.ADMIN_NOTIFICATION_EMAIL,
+            to_email=",".join(self._business_inboxes()),
             subject=f"Backorders ready to ship: {order_count} order{'' if order_count == 1 else 's'} | AF Apparels",
             body_html=self._base_template(content_html),
         )

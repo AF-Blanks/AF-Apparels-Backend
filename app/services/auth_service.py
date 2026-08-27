@@ -251,10 +251,13 @@ class AuthService:
             pass
 
         # ✅ Admin notification
-        if settings.ADMIN_NOTIFICATION_EMAIL:
+        # Same inboxes as every other business notification — an application
+        # landing somewhere the new-order alerts don't is how one goes unread.
+        _inboxes = email_svc._business_inboxes()
+        if _inboxes:
             try:
                 email_svc.send_raw(
-                    to_email=settings.ADMIN_NOTIFICATION_EMAIL,
+                    to_email=",".join(_inboxes),
                     subject=f"New Wholesale Application — {data.company_name}",
                     body_html=f"""
                         <h2>New Wholesale Application</h2>
