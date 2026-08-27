@@ -2977,3 +2977,115 @@ async def download_admin_invoice_pdf(order_id: UUID, db: AsyncSession = Depends(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ── Backorder queue ───────────────────────────────────────────────────────────
+
+# Once an order leaves the building the backorder is settled, whatever the line
+# still says. Anything before that is still owed.
+_BACKORDER_OPEN_STATUSES = ("pending", "confirmed", "processing", "ready_for_pickup")
+
+
+@router.get("/backorders", response_model=dict)
+async def list_backorders(
+    only_ready: bool = Query(False, description="Only lines whose stock has since arrived"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Orders taken while stock was short, and whether they can go out yet.
+
+    Selling past zero is only safe if somebody can see what is owed. A line is
+    listed from the moment it is sold short until the order ships — the flag on
+    the line records how it was sold, and the variant's stock says whether the
+    goods have since arrived.
+
+    "Ready" means the shelf now holds enough for that line. Stock is a shared
+    pool, so two backorders on the same variant can both look ready when only one
+    can actually ship; oldest first is the order they should be filled in.
+    """
+    from sqlalchemy.orm import selectinload
+    from app.models.inventory import InventoryRecord as _IR
+    from app.models.product import ProductVariant as _PV
+    from app.models.purchase_order import POLineItem as _POLI, PurchaseOrder as _PO
+
+    rows = (await db.execute(
+        select(OrderItem, Order)
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(OrderItem.is_backordered.is_(True))
+        .where(Order.status.in_(_BACKORDER_OPEN_STATUSES))
+        .options(selectinload(Order.company))
+        .order_by(Order.created_at.asc())
+    )).all()
+
+    if not rows:
+        return {"summary": {"lines": 0, "units": 0, "ready_lines": 0, "orders": 0}, "items": []}
+
+    variant_ids = [oi.variant_id for oi, _ in rows if oi.variant_id]
+
+    stock = {
+        vid: int(q or 0)
+        for vid, q in (await db.execute(
+            select(_IR.variant_id, func.coalesce(func.sum(_IR.quantity), 0))
+            .where(_IR.variant_id.in_(variant_ids))
+            .group_by(_IR.variant_id)
+        )).all()
+    } if variant_ids else {}
+
+    # When the next unreceived purchase order carrying this variant is due.
+    due = {
+        vid: d
+        for vid, d in (await db.execute(
+            select(_POLI.product_variant_id, func.min(_PO.expected_delivery))
+            .join(_PO, _PO.id == _POLI.po_id)
+            .where(_POLI.product_variant_id.in_(variant_ids))
+            .where(_PO.expected_delivery.isnot(None))
+            .where(_PO.status.notin_(["cancelled", "received"]))
+            .group_by(_POLI.product_variant_id)
+        )).all()
+    } if variant_ids else {}
+
+    still_allowed = {
+        vid: bool(f)
+        for vid, f in (await db.execute(
+            select(_PV.id, _PV.allow_backorder).where(_PV.id.in_(variant_ids))
+        )).all()
+    } if variant_ids else {}
+
+    items: list[dict] = []
+    ready_lines = 0
+    for oi, order in rows:
+        on_hand = stock.get(oi.variant_id, 0)
+        ready = on_hand >= int(oi.quantity or 0)
+        if only_ready and not ready:
+            continue
+        if ready:
+            ready_lines += 1
+        items.append({
+            "order_id": str(order.id),
+            "order_number": order.order_number,
+            "order_date": order.created_at.isoformat() if order.created_at else None,
+            "order_status": order.status,
+            "payment_status": order.payment_status,
+            "company_name": order.company.name if order.company else (order.guest_name or "—"),
+            "product_name": oi.product_name,
+            "sku": oi.sku,
+            "color": oi.color,
+            "size": oi.size,
+            "quantity": int(oi.quantity or 0),
+            "stock_on_hand": on_hand,
+            # Negative stock is the shortfall across every order waiting on this
+            # variant, not just this line.
+            "shortfall": max(0, -on_hand),
+            "expected_restock_date": due.get(oi.variant_id).isoformat() if due.get(oi.variant_id) else None,
+            "still_backorderable": still_allowed.get(oi.variant_id, False),
+            "ready": ready,
+        })
+
+    return {
+        "summary": {
+            "lines": len(items),
+            "units": sum(i["quantity"] for i in items),
+            "ready_lines": ready_lines,
+            "orders": len({i["order_number"] for i in items}),
+        },
+        "items": items,
+    }

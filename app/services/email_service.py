@@ -576,6 +576,52 @@ class EmailService:
             body_html=self._base_template(content_html),
         )
 
+    def send_backorder_ready_alert(self, lines: list[dict]) -> bool:
+        """Tell the warehouse that goods just received clear waiting orders.
+
+        A backorder is invisible once it is taken — the order sits in the queue and
+        nothing announces the day it becomes shippable. Without this the goods land
+        and sit while a customer who paid weeks ago goes on waiting.
+        """
+        from app.core.config import settings as _s
+        if not _s.ADMIN_NOTIFICATION_EMAIL or not lines:
+            return False
+
+        rows = "".join(
+            f'<tr>'
+            f'<td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:13px;color:#1B3A5C;font-weight:700">{l["order_number"]}</td>'
+            f'<td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:13px;color:#374151">{l["company_name"]}</td>'
+            f'<td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:13px;color:#374151">'
+            f'{l["product_name"]}<br><span style="font-size:11px;color:#6b7280">{l.get("detail") or ""}</span></td>'
+            f'<td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:13px;color:#374151;text-align:right">{l["quantity"]}</td>'
+            f'</tr>'
+            for l in lines
+        )
+        order_count = len({l["order_number"] for l in lines})
+        content_html = (
+            f'<h2 style="color:#059669;font-size:20px;font-weight:800;margin:0 0 8px">'
+            f'Stock arrived &mdash; {order_count} order{"" if order_count == 1 else "s"} can now ship</h2>'
+            f'<p style="color:#374151;margin:0 0 20px">These lines were sold on backorder. '
+            f'The goods they were waiting for have just been received.</p>'
+            f'<table width="100%" cellpadding="0" cellspacing="0" '
+            f'style="border-collapse:collapse;border:1px solid #e5e7eb;margin-bottom:20px">'
+            f'<tr style="background:#f9fafb">'
+            f'<th style="padding:8px 12px;text-align:left;font-size:11px;color:#6b7280;text-transform:uppercase">Order</th>'
+            f'<th style="padding:8px 12px;text-align:left;font-size:11px;color:#6b7280;text-transform:uppercase">Customer</th>'
+            f'<th style="padding:8px 12px;text-align:left;font-size:11px;color:#6b7280;text-transform:uppercase">Item</th>'
+            f'<th style="padding:8px 12px;text-align:right;font-size:11px;color:#6b7280;text-transform:uppercase">Qty</th>'
+            f'</tr>{rows}</table>'
+            f'<p style="margin:0"><a href="{_s.FRONTEND_URL}/admin/orders/backorders" '
+            f'style="background:#059669;color:#fff;padding:12px 24px;border-radius:6px;'
+            f'font-weight:700;text-decoration:none;font-size:14px;display:inline-block">'
+            f'Open the backorder queue &rarr;</a></p>'
+        )
+        return self._send_via_resend(
+            to_email=_s.ADMIN_NOTIFICATION_EMAIL,
+            subject=f"Backorders ready to ship: {order_count} order{'' if order_count == 1 else 's'} | AF Apparels",
+            body_html=self._base_template(content_html),
+        )
+
     def send_application_approved(
         self, to_email: str, first_name: str, company_name: str
     ) -> bool:

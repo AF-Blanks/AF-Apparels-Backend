@@ -566,7 +566,71 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
         context=f"PO {po_id} receive", push_quantity=False,
     )
 
+    # A backorder announces itself when it is taken and then goes quiet. Nothing
+    # marks the day the goods land, so without this the stock arrives and sits
+    # while a customer who paid weeks ago carries on waiting. Best effort: a
+    # failed notification must never fail the receipt itself.
+    try:
+        await _notify_ready_backorders(variants_received, db)
+    except Exception as _bo_exc:
+        logger.warning("Backorder-ready notification failed for PO %s: %s", po_id, _bo_exc)
+
     return {"success": True, "receiving_id": str(receiving.id)}
+
+
+async def _notify_ready_backorders(variant_ids: list, db: AsyncSession) -> None:
+    """Email the warehouse about backordered lines these goods now cover."""
+    if not variant_ids:
+        return
+    from sqlalchemy.orm import selectinload
+    from app.models.order import Order as _Order, OrderItem as _OI
+    from app.models.inventory import InventoryRecord as _IR
+    from app.services.email_service import EmailService as _Email
+
+    ids = [str(v) for v in variant_ids]
+    rows = (await db.execute(
+        select(_OI, _Order)
+        .join(_Order, _Order.id == _OI.order_id)
+        .where(_OI.is_backordered.is_(True))
+        .where(_OI.variant_id.in_(ids))
+        .where(_Order.status.in_(("pending", "confirmed", "processing", "ready_for_pickup")))
+        .options(selectinload(_Order.company))
+        .order_by(_Order.created_at.asc())
+    )).all()
+    if not rows:
+        return
+
+    on_hand = {
+        vid: int(q or 0)
+        for vid, q in (await db.execute(
+            select(_IR.variant_id, func.coalesce(func.sum(_IR.quantity), 0))
+            .where(_IR.variant_id.in_(ids))
+            .group_by(_IR.variant_id)
+        )).all()
+    }
+
+    # Stock is a shared pool: two orders waiting on the same variant cannot both
+    # be filled from one delivery. Walk oldest first and spend the shelf down, so
+    # the list names orders that can genuinely go out rather than every order that
+    # happens to be waiting.
+    ready: list[dict] = []
+    for oi, order in rows:
+        qty = int(oi.quantity or 0)
+        left = on_hand.get(oi.variant_id, 0)
+        if left < qty:
+            continue
+        on_hand[oi.variant_id] = left - qty
+        ready.append({
+            "order_number": order.order_number,
+            "company_name": order.company.name if order.company else (order.guest_name or "—"),
+            "product_name": oi.product_name,
+            "detail": " / ".join(x for x in (oi.color, oi.size) if x),
+            "quantity": qty,
+        })
+
+    if ready:
+        _Email(db).send_backorder_ready_alert(ready)
+        logger.info("Backorder alert sent for %d line(s)", len(ready))
 
 
 # ─── QB sync ──────────────────────────────────────────────────────────────────
