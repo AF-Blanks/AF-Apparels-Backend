@@ -777,6 +777,7 @@ async def add_order_item(
         order_id=order_id,
         variant_id=variant_id,
         quantity=quantity,
+        is_backordered=await _is_short_stock(variant, quantity, db),
         unit_price=unit_price,
         line_total=line_total,
         product_name=product.name if product else "Unknown",
@@ -869,6 +870,7 @@ async def add_order_items_bulk(
         )).scalar_one_or_none()
         item = OrderItem(
             order_id=order_id, variant_id=variant.id, quantity=qty,
+            is_backordered=await _is_short_stock(variant, qty, db),
             unit_price=unit_price, line_total=line_total,
             product_name=product.name if product else "Unknown",
             sku=variant.sku or "", color=variant.color, size=variant.size,
@@ -2328,6 +2330,27 @@ async def list_admin_rma(
         }
         for r in rmas
     ]
+
+
+async def _is_short_stock(variant, quantity: int, db: AsyncSession) -> bool:
+    """True when this line is being sold for more than the shelf holds.
+
+    An order an admin builds by hand never passed through the checkout's stock
+    check, so nothing recorded that it was sold short — and the backorder queue,
+    which is meant to show everything owed, silently missed every hand-built
+    order. Same rule as checkout: a variant nobody tracks is not a backorder,
+    only one that is genuinely short.
+    """
+    from app.models.inventory import InventoryRecord as _IRec
+    if not getattr(variant, "allow_backorder", False):
+        return False
+    available, records = (await db.execute(
+        select(
+            func.coalesce(func.sum(_IRec.quantity), 0),
+            func.count(_IRec.id),
+        ).where(_IRec.variant_id == variant.id)
+    )).one()
+    return int(records or 0) > 0 and int(available or 0) < quantity
 
 
 def _recalc_order_total(order: Order) -> None:
