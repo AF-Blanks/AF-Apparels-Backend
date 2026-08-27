@@ -473,7 +473,7 @@ async def guest_checkout(
         from app.services.email_service import EmailService
         from app.core.config import get_settings as _get_settings
         _email_svc = EmailService(db)
-        _email_svc.send_order_confirmation(order, order.guest_email)
+        _email_svc.send_order_confirmation(order, order.guest_email, restock_dates=await _restock_dates_for_order(order, db))
         _email_svc.send_admin_new_order_alert(order)
         if _activation_token:
             _cfg = _get_settings()
@@ -615,3 +615,35 @@ async def track_guest_order(
             for i in order.items
         ],
     }
+
+
+async def _restock_dates_for_order(order, db) -> dict:
+    """When the next purchase order covering each backordered line is due.
+
+    Read here rather than inside the email service, which is synchronous and
+    cannot query. Returns {} on any failure — a confirmation email must go out
+    even if the date cannot be found, since the alternative is the customer
+    hearing nothing at all.
+    """
+    try:
+        from sqlalchemy import func as _f, select as _s
+        from app.models.purchase_order import POLineItem as _L, PurchaseOrder as _P
+        ids = [
+            str(i.variant_id) for i in (getattr(order, "items", []) or [])
+            if getattr(i, "is_backordered", False) and getattr(i, "variant_id", None)
+        ]
+        if not ids:
+            return {}
+        return {
+            str(vid): d
+            for vid, d in (await db.execute(
+                _s(_L.product_variant_id, _f.min(_P.expected_delivery))
+                .join(_P, _P.id == _L.po_id)
+                .where(_L.product_variant_id.in_(ids))
+                .where(_P.expected_delivery.isnot(None))
+                .where(_P.status.notin_(["cancelled", "received"]))
+                .group_by(_L.product_variant_id)
+            )).all()
+        }
+    except Exception:
+        return {}

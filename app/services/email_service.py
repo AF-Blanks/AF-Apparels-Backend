@@ -274,7 +274,12 @@ class EmailService:
 
     # ── High-level transactional senders ──────────────────────────────────────
 
-    def send_order_confirmation(self, order: "Order", to_email: str) -> bool:  # type: ignore[name-defined]
+    def send_order_confirmation(
+        self,
+        order: "Order",  # type: ignore[name-defined]
+        to_email: str,
+        restock_dates: dict | None = None,
+    ) -> bool:
         """Order confirmation using order_received.html file template with PDF attached."""
         import json as _json
         from app.core.config import settings as _s
@@ -293,6 +298,25 @@ class EmailService:
             desc = f"{name} ({detail})" if detail else name
             items_parts.append(f"{desc} — Qty: {qty}")
         items_ordered = " | ".join(items_parts)
+
+        # Lines sold while stock was short. The customer has paid in full and the
+        # goods are on their way in, but nothing on the confirmation said so —
+        # they would simply wait, then ring up asking where the order was. Say it
+        # here, with the date when we have one.
+        backordered = []
+        for item in (getattr(order, "items", []) or []):
+            if not getattr(item, "is_backordered", False):
+                continue
+            _detail = " / ".join(filter(None, [
+                getattr(item, "color", "") or "", getattr(item, "size", "") or ""
+            ]))
+            _due = (restock_dates or {}).get(str(getattr(item, "variant_id", "") or ""))
+            backordered.append({
+                "name": getattr(item, "product_name", "") or "Item",
+                "detail": _detail,
+                "quantity": getattr(item, "quantity", 1),
+                "expected": _due.strftime("%B %d, %Y") if _due else None,
+            })
 
         # Payment method display
         pm_map = {"card": "Credit Card", "ach": "ACH / Bank Transfer",
@@ -334,6 +358,7 @@ class EmailService:
                 "order_total": f"${float(order.total):.2f}",
                 "order_url": order_url if not getattr(order, "is_guest_order", False) else "",
                 "items_ordered": items_ordered,
+                "backordered_items": backordered,
                 "payment_method": payment_method,
                 "shipping_address": shipping_address,
             },

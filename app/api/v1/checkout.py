@@ -407,7 +407,7 @@ async def _confirm_checkout_inner(
             )).scalar_one_or_none()
             if _user:
                 _email_svc = _EmailSvc(db)
-                _email_svc.send_order_confirmation(_order_full, _user.email)
+                _email_svc.send_order_confirmation(_order_full, _user.email, restock_dates=await _restock_dates_for_order(_order_full, db))
                 _email_svc.send_admin_new_order_alert(_order_full)
     except Exception as _exc:
         _log.warning("Order confirmation email failed: %s", _exc)
@@ -431,3 +431,35 @@ async def _confirm_checkout_inner(
         _log.warning("QB invoice sync dispatch failed: %s", _exc)
 
     return order
+
+
+async def _restock_dates_for_order(order, db) -> dict:
+    """When the next purchase order covering each backordered line is due.
+
+    Read here rather than inside the email service, which is synchronous and
+    cannot query. Returns {} on any failure — a confirmation email must go out
+    even if the date cannot be found, since the alternative is the customer
+    hearing nothing at all.
+    """
+    try:
+        from sqlalchemy import func as _f, select as _s
+        from app.models.purchase_order import POLineItem as _L, PurchaseOrder as _P
+        ids = [
+            str(i.variant_id) for i in (getattr(order, "items", []) or [])
+            if getattr(i, "is_backordered", False) and getattr(i, "variant_id", None)
+        ]
+        if not ids:
+            return {}
+        return {
+            str(vid): d
+            for vid, d in (await db.execute(
+                _s(_L.product_variant_id, _f.min(_P.expected_delivery))
+                .join(_P, _P.id == _L.po_id)
+                .where(_L.product_variant_id.in_(ids))
+                .where(_P.expected_delivery.isnot(None))
+                .where(_P.status.notin_(["cancelled", "received"]))
+                .group_by(_L.product_variant_id)
+            )).all()
+        }
+    except Exception:
+        return {}

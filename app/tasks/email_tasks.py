@@ -70,6 +70,42 @@ def send_order_confirmation_email(self, order_id: str) -> dict:
                     items_parts.append(f"{desc} — Qty: {qty}")
                 items_ordered = "\n".join(items_parts)
 
+                # Lines sold while stock was short. This task renders the same
+                # template as the direct send, so without this the notice would
+                # appear or not depending on which route confirmed the order.
+                backordered_items = []
+                _bo = [
+                    i for i in (order.items or [])
+                    if getattr(i, "is_backordered", False) and getattr(i, "variant_id", None)
+                ]
+                if _bo:
+                    _due = {}
+                    try:
+                        from sqlalchemy import func as _func
+                        from app.models.purchase_order import POLineItem as _L, PurchaseOrder as _P
+                        _due = {
+                            str(vid): d
+                            for vid, d in (await session.execute(
+                                select(_L.product_variant_id, _func.min(_P.expected_delivery))
+                                .join(_P, _P.id == _L.po_id)
+                                .where(_L.product_variant_id.in_([str(i.variant_id) for i in _bo]))
+                                .where(_P.expected_delivery.isnot(None))
+                                .where(_P.status.notin_(["cancelled", "received"]))
+                                .group_by(_L.product_variant_id)
+                            )).all()
+                        }
+                    except Exception as _due_exc:
+                        # No date is survivable; no email is not.
+                        logger.warning("Backorder restock dates unavailable: %s", _due_exc)
+                    for i in _bo:
+                        _d = _due.get(str(i.variant_id))
+                        backordered_items.append({
+                            "name": i.product_name or "Item",
+                            "detail": " / ".join(filter(None, [i.color or "", i.size or ""])),
+                            "quantity": i.quantity,
+                            "expected": _d.strftime("%B %d, %Y") if _d else None,
+                        })
+
                 # Payment method display
                 pm_map = {"card": "Credit Card", "ach": "ACH / Bank Transfer",
                           "net30": "Net 30", "net60": "Net 60", "wire": "Wire Transfer"}
@@ -102,6 +138,7 @@ def send_order_confirmation_email(self, order_id: str) -> dict:
                             "order_total": f"${float(order.total):.2f}",
                             "order_url": order_url,
                             "items_ordered": items_ordered,
+                            "backordered_items": backordered_items,
                             "payment_method": payment_method,
                             "shipping_address": shipping_address,
                         },
