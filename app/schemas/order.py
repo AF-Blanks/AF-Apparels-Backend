@@ -91,6 +91,9 @@ class OrderItemOut(BaseModel):
     color: str | None
     size: str | None
     quantity: int
+    # Sold while stock was short. Shown on the order so nobody picks a line that
+    # has nothing behind it and wonders where the goods went.
+    is_backordered: bool = False
     unit_price: Decimal
     line_total: Decimal
 

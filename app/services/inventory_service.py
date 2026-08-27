@@ -137,8 +137,17 @@ class InventoryService:
         adjusted_by: UUID | None = None,
         notes: str | None = None,
         sync_qb: bool = True,
+        allow_negative: bool = False,
     ) -> InventoryRecord:
-        """Adjust stock by delta (positive = add, negative = remove). Creates adjustment log."""
+        """Adjust stock by delta (positive = add, negative = remove). Creates adjustment log.
+
+        allow_negative lets the count fall below zero, which only a backorder
+        should do. Everywhere else the floor is deliberate: a miscount or a double
+        deduction quietly turning stock negative would make every stock figure
+        suspect, so it is clamped and the discrepancy stays visible as a zero.
+        A backorder is the opposite case — the negative IS the record of what is
+        owed, and clamping it would erase the debt.
+        """
         # Get or create inventory record
         result = await self.db.execute(
             select(InventoryRecord).where(
@@ -158,7 +167,8 @@ class InventoryService:
             await self.db.flush()
 
         quantity_before = record.quantity
-        quantity_after = max(0, quantity_before + quantity_delta)
+        _raw_after = quantity_before + quantity_delta
+        quantity_after = _raw_after if allow_negative else max(0, _raw_after)
         record.quantity = quantity_after
 
         # Low stock alert — only fires when qty CROSSES below threshold (not on every low-stock adjustment)

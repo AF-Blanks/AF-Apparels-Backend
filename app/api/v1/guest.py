@@ -203,13 +203,24 @@ async def guest_checkout(
             )
             raise ValidationError(f"SKU {variant.sku} is no longer available")
 
-        # Stock check — 0 means unlimited
+        # Stock check — 0 with no records at all means untracked, not sold out
         stock_result = await db.execute(
-            select(func.coalesce(func.sum(InventoryRecord.quantity), 0))
-            .where(InventoryRecord.variant_id == variant.id)
+            select(
+                func.coalesce(func.sum(InventoryRecord.quantity), 0),
+                func.count(InventoryRecord.id),
+            ).where(InventoryRecord.variant_id == variant.id)
         )
-        available = stock_result.scalar_one()
-        if available > 0 and available < cart_item.quantity:
+        available, _rec_count = stock_result.one()
+        # Guests buy the same goods off the same shelf, so a variant marked for
+        # backorder is sellable here too. Refusing them while accepting the same
+        # line at wholesale checkout would be an accident of which door they came
+        # through, not a decision anyone made.
+        _backordered = (
+            bool(getattr(variant, "allow_backorder", False))
+            and int(_rec_count or 0) > 0
+            and available < cart_item.quantity
+        )
+        if not _backordered and available > 0 and available < cart_item.quantity:
             raise InsufficientStockError(
                 f"Only {available} units available for {variant.sku}"
             )
@@ -221,6 +232,7 @@ async def guest_checkout(
 
         order_items_data.append({
             "variant_id": variant.id,
+            "is_backordered": _backordered,
             "product_name": product.name,
             "sku": variant.sku,
             "color": variant.color,
@@ -388,6 +400,21 @@ async def guest_checkout(
                     .values(quantity=int(record.quantity) - deduct)
                 )
                 qty_to_deduct -= deduct
+
+        # Whatever the shelves could not cover stays owed, written as negative
+        # stock so the shortfall is visible and the next receipt pays it down.
+        if qty_to_deduct > 0 and item_data.get("is_backordered"):
+            _recs = (await db.execute(
+                select(InventoryRecord)
+                .where(InventoryRecord.variant_id == item_data["variant_id"])
+                .order_by(InventoryRecord.quantity.desc())
+            )).scalars().all()
+            if _recs:
+                await db.execute(
+                    _update(InventoryRecord)
+                    .where(InventoryRecord.id == _recs[0].id)
+                    .values(quantity=InventoryRecord.quantity - qty_to_deduct)
+                )
 
         # Collect this variant for a single batched QB sync after the loop
         # (dedup so a variant is never synced twice within one order).

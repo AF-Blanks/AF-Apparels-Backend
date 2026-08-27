@@ -2504,6 +2504,11 @@ async def _deduct_order_inventory(order: Order, db: AsyncSession, note: str) -> 
             reason="sold",
             notes=note,
             sync_qb=False,  # QB moves this stock via the invoice/void, not a push
+            # A line sold short must take the count below zero. Clamping it at
+            # zero would erase the debt: stock would read "none left" whether one
+            # unit was owed or a thousand, and the next delivery would look like
+            # free stock rather than goods already spoken for.
+            allow_negative=bool(getattr(it, "is_backordered", False)),
         )
         if str(it.variant_id) not in deducted_ids:
             deducted_ids.append(str(it.variant_id))

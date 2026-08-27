@@ -397,9 +397,15 @@ async def update_variant(
     # Handle stock_quantity: update inventory record in default warehouse
     if "stock_quantity" in payload:
         try:
-            requested_qty = max(0, int(payload["stock_quantity"]))
+            requested_qty = int(payload["stock_quantity"])
         except (TypeError, ValueError):
             requested_qty = 0
+        # A backorder variant sits at a negative while goods are owed, and the
+        # edit form posts back whatever the field holds. Clamping here would let
+        # an unrelated save — a price change, a weight — silently write that debt
+        # off and make the next delivery look like free stock.
+        if not bool(getattr(variant, "allow_backorder", False)):
+            requested_qty = max(0, requested_qty)
 
         from app.models.inventory import InventoryRecord, Warehouse
         from app.services.inventory_service import InventoryService
@@ -433,6 +439,7 @@ async def update_variant(
                 variant_id=variant_id,
                 warehouse_id=warehouse.id,
                 quantity_delta=delta if rec is not None else requested_qty,
+                allow_negative=bool(getattr(variant, "allow_backorder", False)),
                 reason="correction",
                 notes="Updated via admin product edit",
             )

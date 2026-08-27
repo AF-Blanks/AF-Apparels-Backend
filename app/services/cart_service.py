@@ -213,7 +213,10 @@ class CartService:
             )
             stock = stock_result.scalar_one()
 
-            if stock < qty:
+            # A backorder variant being short is expected, not a problem to report:
+            # flagging it here would have the cart refuse a line the checkout is
+            # perfectly willing to take.
+            if stock < qty and not getattr(variant, "allow_backorder", False):
                 insufficient.append({
                     "sku": sku,
                     "quantity": qty,
