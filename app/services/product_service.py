@@ -367,6 +367,33 @@ class ProductService:
                 qty = stock_map.get(variant.id)
                 variant.stock_quantity = qty if qty is not None else 0
 
+        # For anything sellable past zero and currently short, look up when the
+        # next purchase order is due. A shopper facing "out of stock" will leave;
+        # facing a date, they can decide — which is the whole point of accepting
+        # the order at all.
+        _short = [
+            v for p_ in products for v in (p_.variants or [])
+            if getattr(v, "allow_backorder", False) and (v.stock_quantity or 0) <= 0
+        ]
+        if _short:
+            from app.models.purchase_order import POLineItem, PurchaseOrder
+            _due = {
+                vid: d
+                for vid, d in (await self.db.execute(
+                    select(
+                        POLineItem.product_variant_id,
+                        func.min(PurchaseOrder.expected_delivery),
+                    )
+                    .join(PurchaseOrder, PurchaseOrder.id == POLineItem.po_id)
+                    .where(POLineItem.product_variant_id.in_([v.id for v in _short]))
+                    .where(PurchaseOrder.expected_delivery.isnot(None))
+                    .where(PurchaseOrder.status.notin_(["cancelled", "received"]))
+                    .group_by(POLineItem.product_variant_id)
+                )).all()
+            }
+            for v in _short:
+                v.expected_restock_date = _due.get(v.id)
+
         return products
 
     async def invalidate_product_cache(self, slug: str | None = None) -> None:

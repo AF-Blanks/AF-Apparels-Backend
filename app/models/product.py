@@ -137,6 +137,10 @@ class ProductVariant(BaseModel):
         nullable=False,
     )
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Let this variant be sold past zero. Stock then runs negative, which is the
+    # honest record: it is what we owe customers, and the next receipt pays it
+    # down before anything is free to sell.
+    allow_backorder: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     qb_item_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     product: Mapped["Product"] = relationship("Product", back_populates="variants")

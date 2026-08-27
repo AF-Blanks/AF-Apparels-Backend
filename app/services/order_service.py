@@ -152,12 +152,25 @@ class OrderService:
             # Stock check — only enforce when inventory records exist.
             # COALESCE returns 0 when no records found; treat 0 as unlimited.
             stock_result = await self.db.execute(
-                select(func.coalesce(func.sum(InventoryRecord.quantity), 0)).where(
-                    InventoryRecord.variant_id == variant.id
-                )
+                select(
+                    func.coalesce(func.sum(InventoryRecord.quantity), 0),
+                    func.count(InventoryRecord.id),
+                ).where(InventoryRecord.variant_id == variant.id)
             )
-            available = stock_result.scalar_one()
-            if available > 0 and available < cart_item.quantity:
+            available, _record_count = stock_result.one()
+            # A sum of zero means two different things: a variant nobody tracks
+            # (no records at all, historically treated as unlimited) and one that
+            # is genuinely sold out. Only the second is a backorder.
+            _tracked = int(_record_count or 0) > 0
+            # A variant marked for backorder is deliberately sellable past zero:
+            # the shortfall becomes negative stock, which is what we owe, and the
+            # next receipt pays it down before anything is free to sell again.
+            _backordered = (
+                bool(getattr(variant, "allow_backorder", False))
+                and _tracked
+                and available < cart_item.quantity
+            )
+            if not _backordered and available > 0 and available < cart_item.quantity:
                 raise InsufficientStockError(
                     f"Insufficient stock for {variant.sku}: {available} available"
                 )
@@ -171,6 +184,7 @@ class OrderService:
 
             order_items_data.append({
                 "variant_id": variant.id,
+                "is_backordered": _backordered,
                 "product_name": product.name,
                 "sku": variant.sku,
                 "color": variant.color,
@@ -390,6 +404,22 @@ class OrderService:
                         .values(quantity=current_qty - deduct)
                     )
                     qty_to_deduct -= deduct
+
+            # Whatever the shelves could not cover stays owed. On a backorder
+            # variant it is written as negative stock rather than quietly dropped,
+            # so the shortfall is visible and the next receipt pays it down before
+            # anything counts as sellable again.
+            if qty_to_deduct > 0 and item_data.get("is_backordered") and inv_records:
+                _first = inv_records[0]
+                await self.db.execute(
+                    _update(InventoryRecord)
+                    .where(InventoryRecord.id == _first.id)
+                    .values(quantity=InventoryRecord.quantity - qty_to_deduct)
+                )
+                logger.info(
+                    "Backorder: %s short by %d — stock taken negative",
+                    item_data.get("sku"), qty_to_deduct,
+                )
 
             # Deliberately NOT pushing QtyOnHand to QuickBooks here. This order's
             # QB invoice carries Inventory-type items, so QB reduces the quantity

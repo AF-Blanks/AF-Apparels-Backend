@@ -180,6 +180,10 @@ class OrderItem(BaseModel):
         UUID(as_uuid=True), ForeignKey("product_variants.id", ondelete="SET NULL"), nullable=True
     )
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Sold while stock was short, so this line is owed rather than held. Recorded
+    # at the moment of sale: stock moves constantly afterwards, and asking later
+    # whether a line was ever backordered would give a different answer each time.
+    is_backordered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     unit_price: Mapped[float] = mapped_column(
         Numeric(10, 2), nullable=False, comment="Price snapshotted at time of order"
     )

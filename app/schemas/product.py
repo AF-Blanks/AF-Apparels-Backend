@@ -1,7 +1,7 @@
 # backend/app/schemas/product.py
 from uuid import UUID
 from decimal import Decimal
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from pydantic import BaseModel, Field
 
@@ -73,6 +73,13 @@ class VariantOut(BaseModel):
     weight_grams: float | None = None
     effective_price: Decimal | None = None  # populated by pricing layer
     stock_quantity: int = 0               # summed across warehouses
+    # Sellable past zero. Stock then runs negative — that figure is what is owed,
+    # not what is on the shelf, so the storefront shows a date instead of a count.
+    allow_backorder: bool = False
+    # When the next purchase order for this variant is due in. Populated only for
+    # backorder variants that are short, since that is the only time it answers a
+    # question the shopper is actually asking.
+    expected_restock_date: date | None = None
     status: str
 
     model_config = {"from_attributes": True}

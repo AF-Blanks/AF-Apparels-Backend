@@ -693,6 +693,10 @@ async def _ensure_columns() -> None:
          "ALTER TABLE orders ADD COLUMN IF NOT EXISTS manual_box_count INTEGER"),
         ("users.is_staff",
          "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_staff BOOLEAN NOT NULL DEFAULT false"),
+        ("product_variants.allow_backorder",
+         "ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS allow_backorder BOOLEAN NOT NULL DEFAULT false"),
+        ("order_items.is_backordered",
+         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS is_backordered BOOLEAN NOT NULL DEFAULT false"),
         # New column only - existing rows keep the default. Older drafts stay
         # recognisable by their "DRAFT-" order number and are never rewritten.
         ("orders.is_draft",
