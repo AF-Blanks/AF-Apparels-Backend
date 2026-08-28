@@ -1510,15 +1510,23 @@ _CHARGEBACK_LOOKBACK_DAYS = 120
 # card sweep, for the same reason: this must never become an API storm.
 _ECHECK_MAX_ORDERS_PER_RUN = 100
 _ECHECK_PAUSE_BETWEEN_CALLS_SEC = 0.5
-_ECHECK_LOOKBACK_DAYS = 30
-#: A bank debit clears in one to five business days. Past this it is not slow,
-#: something is wrong — and the likeliest something is a status word we do not
-#: recognise, which would otherwise leave the order quietly unpaid forever.
-_ECHECK_STALE_DAYS = 7
-#: QuickBooks has taken the money.
+#: A settled debit can still be returned afterwards — an unpaid item comes back
+#: days or weeks later and Intuit charges a fee for it. So orders are watched on
+#: past the point they were marked paid, not only until.
+_ECHECK_LOOKBACK_DAYS = 60
+#: Intuit documents three to six *business* days, which is eight or nine on a
+#: calendar. Alerting at seven would cry wolf over transfers that are simply
+#: still on their way.
+_ECHECK_STALE_DAYS = 10
+#: QuickBooks has taken the money. SUCCEEDED is the documented one for an
+#: eCheck; the rest are card wording, kept as a net in case an account or an
+#: API version answers in them.
 _ECHECK_SETTLED_STATUSES = {"SUCCEEDED", "SETTLED", "CAPTURED", "PAID"}
-#: The money is not coming — the account was closed, empty, or refused it.
-_ECHECK_RETURNED_STATUSES = {"FAILED", "DECLINED", "VOIDED", "RETURNED", "CANCELLED", "REJECTED"}
+#: The money is not coming, or has gone back. REFUNDED belongs here for the
+#: same reason as the rest: whatever the cause, this order is not paid.
+_ECHECK_RETURNED_STATUSES = {
+    "FAILED", "DECLINED", "VOIDED", "RETURNED", "CANCELLED", "REJECTED", "REFUNDED",
+}
 
 
 @celery_app.task(bind=True, max_retries=1)
@@ -1554,14 +1562,21 @@ def settle_pending_echecks(self):
             cutoff = datetime.now(timezone.utc) - timedelta(days=_ECHECK_LOOKBACK_DAYS)
 
             async with _TaskSession() as session:
+                # Paid ones are looked at too. A bank can pull the money back
+                # after it has landed, and an order that stopped being watched
+                # the moment it was marked paid would never hear about it.
                 orders = (await session.execute(
                     select(Order)
                     .where(
                         Order.qb_echeck_id.isnot(None),
-                        Order.payment_status != "paid",
+                        Order.payment_status != "refunded",
                         Order.created_at >= cutoff,
                     )
-                    .order_by(Order.created_at.asc())
+                    # Unsettled first. Widening this to paid orders put sixty
+                    # days of settled ones at the front of an oldest-first queue,
+                    # where they would eat the whole run's budget and starve the
+                    # debits still waiting on an answer.
+                    .order_by((Order.payment_status == "paid").asc(), Order.created_at.asc())
                     .limit(_ECHECK_MAX_ORDERS_PER_RUN)
                 )).scalars().all()
 
@@ -1586,7 +1601,12 @@ def settle_pending_echecks(self):
                     await asyncio.sleep(_ECHECK_PAUSE_BETWEEN_CALLS_SEC)
                     continue
 
+                _already_paid = order.payment_status == "paid"
+
                 if status in _ECHECK_SETTLED_STATUSES:
+                    if _already_paid:
+                        await asyncio.sleep(_ECHECK_PAUSE_BETWEEN_CALLS_SEC)
+                        continue
                     settled += 1
                     logger.info(
                         "settle_pending_echecks: order %s settled (%s)", order.order_number, status
@@ -1627,6 +1647,45 @@ def settle_pending_echecks(self):
                             "settle_pending_echecks: QB payment sync dispatch failed for %s: %s",
                             order.order_number, exc,
                         )
+
+                elif status in _ECHECK_RETURNED_STATUSES and _already_paid:
+                    # Money that had arrived and then went back. The order still
+                    # says paid, and it is not for a scheduled job to decide it
+                    # is not — the goods may be gone and someone has to choose
+                    # what happens next. It is told loudly instead.
+                    returned += 1
+                    logger.error(
+                        "settle_pending_echecks: order %s was PAID but the debit came"
+                        " back (%s)", order.order_number, status,
+                    )
+                    async with _TaskSession() as sess:
+                        try:
+                            await sess.execute(
+                                _sql("UPDATE orders SET qb_echeck_status = :st WHERE id = :oid"),
+                                {"st": status, "oid": str(order.id)},
+                            )
+                            await sess.commit()
+                            svc = EmailService(sess)
+                            for to in svc._business_inboxes():
+                                svc.send_raw(
+                                    to_email=to,
+                                    subject=f"PAID order's bank transfer came back — {order.order_number}",
+                                    body_html=(
+                                        f"<p>Order <strong>{order.order_number}</strong> "
+                                        f"(<strong>${float(order.total or 0):.2f}</strong>) was marked paid, "
+                                        f"but its bank transfer has since come back marked "
+                                        f"<strong>{status}</strong>.</p>"
+                                        f"<p>The money is no longer here, and the goods may already have "
+                                        f"shipped. The order has been left as paid — please decide what "
+                                        f"should happen and update it by hand.</p>"
+                                    ),
+                                )
+                        except Exception as exc:
+                            await sess.rollback()
+                            logger.error(
+                                "settle_pending_echecks: could not record post-settlement return"
+                                " for %s: %s", order.order_number, exc, exc_info=True,
+                            )
 
                 elif status in _ECHECK_RETURNED_STATUSES:
                     returned += 1
