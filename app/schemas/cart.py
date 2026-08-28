@@ -35,6 +35,8 @@ class CartItemOut(BaseModel):
     moq: int
     moq_satisfied: bool
     stock_quantity: int
+    # Sold past what the shelf holds — the goods are owed, not waiting to be picked.
+    is_backordered: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -47,6 +49,10 @@ class CartValidation(BaseModel):
     mov_current: Decimal
     estimated_shipping: Decimal
     has_shipping_tier: bool = False  # False = no tier assigned; True = tier calculated (even if $0)
+    # Both in-stock and backordered lines are in the cart. They cannot ship as one
+    # order, so checkout will refuse it — said here so the customer hears it while
+    # they can still act on it.
+    mixed_backorder: bool = False
 
 
 class CartResponse(BaseModel):
@@ -80,6 +86,7 @@ class ValidationResultItem(BaseModel):
     product_name: str | None = None
     variant_id: UUID | None = None
     available_quantity: int | None = None
+    is_backordered: bool = False
 
 
 class QuickOrderResult(BaseModel):

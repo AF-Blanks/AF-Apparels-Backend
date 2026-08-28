@@ -232,6 +232,18 @@ class CartService:
                     "variant_id": str(variant.id),
                 })
 
+        # Which of the accepted lines are actually being sold short. The loop above
+        # only had to decide whether to accept them; the caller still needs to know
+        # what it accepted, because a list mixing in-stock and backordered SKUs
+        # cannot become one order.
+        from app.services.backorder_rules import backorder_flags
+        from uuid import UUID as _UUID
+        _flags = await backorder_flags(
+            self.db, {_UUID(str(v["variant_id"])): v["quantity"] for v in valid}
+        )
+        for v in valid:
+            v["is_backordered"] = _flags.get(_UUID(str(v["variant_id"])), False)
+
         return {"valid": valid, "invalid": invalid, "insufficient_stock": insufficient}
 
     async def bulk_add_validated_items(
@@ -330,6 +342,13 @@ class CartService:
         )
         raw_items = result.scalars().all()
 
+        # Asked once for the whole cart, by the same rule the checkout will apply,
+        # so the badge on screen and the answer at the till cannot disagree.
+        from app.services.backorder_rules import backorder_flags
+        backorder = await backorder_flags(
+            self.db, {i.variant_id: i.quantity for i in raw_items if i.variant_id}
+        )
+
         items: list[CartItemOut] = []
         for item in raw_items:
             # Load variant + product info
@@ -409,6 +428,7 @@ class CartService:
                     moq=product.moq,
                     moq_satisfied=moq_satisfied,
                     stock_quantity=stock,
+                    is_backordered=backorder.get(item.variant_id, False),
                 )
             )
         return items
@@ -549,6 +569,10 @@ class CartService:
 
         return CartValidation(
             is_valid=True,
+            mixed_backorder=(
+                any(i.is_backordered for i in items)
+                and any(not i.is_backordered for i in items)
+            ),
             moq_violations=moq_violations,
             mov_violation=mov_violation,
             mov_required=mov_required,

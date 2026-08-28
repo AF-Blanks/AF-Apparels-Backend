@@ -15,6 +15,10 @@ from app.core.database import get_db
 from app.core.exceptions import (
     NotFoundError, PaymentError, ValidationError, InsufficientStockError, WholesaleAccountExistsError,
 )
+from app.services.backorder_rules import (
+    check_not_mixed as _check_not_mixed,
+    describe_line as _describe_line,
+)
 from app.models.inventory import InventoryRecord
 from app.models.order import Order, OrderItem
 from app.models.user import User
@@ -251,6 +255,17 @@ async def guest_checkout(
             "unit_price": unit_price,
             "line_total": line_total,
         })
+
+    # A guest's order is filled off the same shelf as anyone else's, so the same
+    # rule holds: one order, one shipment. Part in stock and part owed cannot be
+    # both, and the customer should hear that here, not after paying.
+    _check_not_mixed([
+        {
+            "label": _describe_line(d["product_name"], d["color"], d["size"], d["sku"]),
+            "backordered": d["is_backordered"],
+        }
+        for d in order_items_data
+    ])
 
     # 2. Shipping cost — client value is authoritative when provided
     method = payload.shipping_method or "standard"
@@ -602,6 +617,37 @@ async def guest_checkout(
 # ---------------------------------------------------------------------------
 # GET /api/v1/guest/shipping-estimate
 # ---------------------------------------------------------------------------
+
+@router.post("/stock-check")
+async def guest_stock_check(payload: dict, db: AsyncSession = Depends(get_db)) -> dict:
+    """Which lines in a basket are being sold past what the shelf holds.
+
+    A guest's basket lives in their browser, so the cart screen has no server
+    record to read a backorder flag off. It asks here instead, and gets the same
+    answer the checkout would give — which is the point: the customer should
+    learn their basket cannot ship as one order while they are still on the cart
+    page, not after they have filled in an address and a card.
+    """
+    from uuid import UUID as _UUID
+    from app.services.backorder_rules import backorder_flags as _flags
+
+    wants: dict = {}
+    for entry in (payload.get("items") or []):
+        try:
+            vid = _UUID(str(entry.get("variant_id")))
+            qty = int(entry.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+        if qty > 0:
+            wants[vid] = wants.get(vid, 0) + qty
+
+    flags = await _flags(db, wants)
+    backordered = [str(v) for v, f in flags.items() if f]
+    return {
+        "backordered_variant_ids": backordered,
+        "mixed": bool(backordered) and len(backordered) < len(flags),
+    }
+
 
 @router.get("/shipping-estimate")
 async def guest_shipping_estimate(

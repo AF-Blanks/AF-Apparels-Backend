@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.exceptions import ForbiddenError, PaymentError, ValidationError
 from app.schemas.order import CheckoutConfirmRequest, CreatePaymentIntentRequest, OrderOut
+from app.services.backorder_rules import MixedOrderError
 from app.services.cart_service import CartService
 from app.services.order_service import OrderService
 from app.services.payment_service import PaymentService
@@ -143,7 +144,7 @@ async def confirm_checkout(
     """
     try:
         return await _confirm_checkout_inner(payload, request, db)
-    except (ForbiddenError, PaymentError, ValidationError, HTTPException):
+    except (ForbiddenError, PaymentError, ValidationError, MixedOrderError, HTTPException):
         raise  # let framework handle these as-is
     except Exception as exc:
         _log.exception("confirm_checkout UNHANDLED ERROR — payload fields: %s", getattr(payload, "__fields_set__", None))
@@ -225,6 +226,35 @@ async def _confirm_checkout_inner(
 
     discount_percent = getattr(request.state, "tier_discount_percent", Decimal("0"))
     group_id = getattr(request.state, "discount_group_id", None)
+
+    # An order ships once, so it cannot be part on the shelf and part owed. The
+    # order writer refuses such a basket too, and is the last word on it — but by
+    # then the card has been charged, so it is asked here first, while nothing has
+    # been taken. Every payment method passes through this point.
+    from sqlalchemy import select as _sel_bo
+    from app.models.order import CartItem as _CartItem_bo
+    from app.models.product import Product as _Product_bo, ProductVariant as _Variant_bo
+    from app.services.backorder_rules import (
+        backorder_flags as _bo_flags,
+        check_not_mixed as _bo_check,
+        describe_line as _bo_label,
+    )
+
+    _bo_rows = (await db.execute(
+        _sel_bo(_CartItem_bo, _Variant_bo, _Product_bo)
+        .join(_Variant_bo, _Variant_bo.id == _CartItem_bo.variant_id)
+        .join(_Product_bo, _Product_bo.id == _Variant_bo.product_id)
+        .where(_CartItem_bo.company_id == company_id)
+    )).all()
+    if _bo_rows:
+        _bo_map = await _bo_flags(db, {ci.variant_id: ci.quantity for ci, _v, _p in _bo_rows})
+        _bo_check([
+            {
+                "label": _bo_label(prod.name, var.color, var.size, var.sku),
+                "backordered": _bo_map.get(ci.variant_id, False),
+            }
+            for ci, var, prod in _bo_rows
+        ])
 
     # ── QB Payments flow ──────────────────────────────────────────────────────
     qb_charge_id: str | None = None

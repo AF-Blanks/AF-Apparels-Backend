@@ -18,6 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.exceptions import ConflictError, NotFoundError
 from app.models.company import Company
+from app.services.backorder_rules import (
+    check_not_mixed as _check_not_mixed,
+    describe_line as _describe_line,
+)
 from app.models.order import Order, OrderItem
 from app.models.user import User
 from app.models.rma import RMAItem, RMARequest
@@ -816,11 +820,23 @@ async def add_order_item(
         select(Product).where(Product.id == variant.product_id)
     )).scalar_one_or_none()
 
+    _backordered = await _is_short_stock(variant, quantity, db)
+    await _assert_uniform_order(
+        order_id,
+        [{
+            "label": _describe_line(
+                product.name if product else None, variant.color, variant.size, variant.sku
+            ),
+            "backordered": _backordered,
+        }],
+        db,
+    )
+
     item = OrderItem(
         order_id=order_id,
         variant_id=variant_id,
         quantity=quantity,
-        is_backordered=await _is_short_stock(variant, quantity, db),
+        is_backordered=_backordered,
         unit_price=unit_price,
         line_total=line_total,
         product_name=product.name if product else "Unknown",
@@ -920,12 +936,27 @@ async def add_order_items_bulk(
             product_name=product.name if product else "Unknown",
             sku=variant.sku or "", color=variant.color, size=variant.size,
         )
-        db.add(item)
         created.append((item, product.name if product else "Unknown", variant, qty, unit_price, line_total))
         added_subtotal += line_total
 
     if not created:
         raise HTTPException(status_code=422, detail="No valid items to add")
+
+    # Checked before anything is staged, so a size run that would leave the order
+    # half owed is turned away whole rather than partly written.
+    await _assert_uniform_order(
+        order_id,
+        [
+            {
+                "label": _describe_line(pname, var.color, var.size, var.sku),
+                "backordered": bool(it.is_backordered),
+            }
+            for it, pname, var, _q, _up, _lt in created
+        ],
+        db,
+    )
+    for _it, *_rest in created:
+        db.add(_it)
 
     await db.flush()  # assign item ids before the session is committed/expired
     resp_items = [{
@@ -1015,6 +1046,39 @@ async def update_order_item(
         if new_qty < 1:
             raise HTTPException(status_code=422, detail="quantity must be at least 1")
         item.quantity = new_qty
+
+        # Raising the quantity can push a line past what the shelf holds, which
+        # makes it a backorder it was not a moment ago. Only worth re-asking
+        # while the order still has to take its stock: once inventory has been
+        # deducted the shelf reads low *because of this order*, and asking again
+        # would call a line owed that was filled in full.
+        if not getattr(order, "inventory_deducted", False):
+            from app.models.product import ProductVariant as _PVar
+            _variant = (await db.execute(
+                select(_PVar).where(_PVar.id == item.variant_id)
+            )).scalar_one_or_none() if item.variant_id else None
+            if _variant is not None:
+                _now_short = await _is_short_stock(_variant, new_qty, db)
+                if _now_short != bool(item.is_backordered):
+                    _others = (await db.execute(
+                        select(OrderItem).where(
+                            OrderItem.order_id == order_id, OrderItem.id != item_id
+                        )
+                    )).scalars().all()
+                    _check_not_mixed(
+                        [
+                            {
+                                "label": _describe_line(o.product_name, o.color, o.size, o.sku),
+                                "backordered": bool(getattr(o, "is_backordered", False)),
+                            }
+                            for o in _others
+                        ]
+                        + [{
+                            "label": _describe_line(item.product_name, item.color, item.size, item.sku),
+                            "backordered": _now_short,
+                        }]
+                    )
+                    item.is_backordered = _now_short
 
     item.line_total = round(float(item.unit_price or 0) * int(item.quantity or 0), 2)
 
@@ -2175,6 +2239,7 @@ async def sync_order_to_quickbooks(order_id: UUID, db: AsyncSession = Depends(ge
     order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
     if not order:
         raise NotFoundError(f"Order {order_id} not found")
+
     if order.qb_invoice_id:
         # An invoice existing is not the same as the order being settled in
         # QuickBooks. This used to report "already in QuickBooks" and stop there,
@@ -2379,6 +2444,30 @@ async def _is_short_stock(variant, quantity: int, db: AsyncSession) -> bool:
         ).where(_IRec.variant_id == variant.id)
     )).one()
     return int(records or 0) > 0 and int(available or 0) < quantity
+
+
+async def _assert_uniform_order(order_id: UUID, new_lines: list[dict], db: AsyncSession) -> None:
+    """Refuse to leave an order part in stock and part on backorder.
+
+    An order an admin builds by hand goes out of the same door as one a customer
+    places, so it lives under the same rule: everything on it has to be
+    shippable together. Lines already on the order are judged by the flag
+    recorded when they were added — that is how they were sold, and a delivery
+    arriving since does not change it.
+    """
+    existing = (await db.execute(
+        select(OrderItem).where(OrderItem.order_id == order_id)
+    )).scalars().all()
+    _check_not_mixed(
+        [
+            {
+                "label": _describe_line(i.product_name, i.color, i.size, i.sku),
+                "backordered": bool(getattr(i, "is_backordered", False)),
+            }
+            for i in existing
+        ]
+        + new_lines
+    )
 
 
 async def _ship_to_address(order, db: AsyncSession) -> dict:

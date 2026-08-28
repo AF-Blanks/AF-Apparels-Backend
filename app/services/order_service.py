@@ -10,6 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.exceptions import NotFoundError, ValidationError, InsufficientStockError
+from app.services.backorder_rules import (
+    check_not_mixed as _check_not_mixed,
+    describe_line as _describe_line,
+)
 from app.models.company import Company, UserAddress
 from app.models.inventory import InventoryRecord
 from app.models.order import CartItem, Order, OrderItem, OrderTemplate
@@ -193,6 +197,17 @@ class OrderService:
                 "unit_price": unit_price,
                 "line_total": line_total,
             })
+
+        # An order ships once, so it cannot be part on the shelf and part owed.
+        # Refusing here rather than at the payment step means the customer is told
+        # while they can still act on it.
+        _check_not_mixed([
+            {
+                "label": _describe_line(d["product_name"], d["color"], d["size"], d["sku"]),
+                "backordered": d["is_backordered"],
+            }
+            for d in order_items_data
+        ])
 
         # 5. Calculate shipping
         shipping_method = confirm.shipping_method or "standard"
