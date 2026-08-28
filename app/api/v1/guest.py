@@ -126,6 +126,14 @@ class GuestCheckoutRequest(BaseModel):
     ach_routing_number: str | None = None
     ach_account_last4: str | None = None
     ach_account_type: str | None = None
+    # Passed straight to QuickBooks to raise the debit and never written down;
+    # only the last four digits are kept.
+    ach_account_number: str | None = None
+    ach_first_name: str | None = None
+    ach_last_name: str | None = None
+    ach_phone: str | None = None
+    ach_account_ownership: str | None = None   # "personal" | "business"
+    ach_authorized: bool = False
     order_notes: str | None = None
     discount_code: str | None = None
     tax_amount: Decimal | None = None
@@ -278,11 +286,28 @@ async def guest_checkout(
     net_subtotal = max(Decimal("0"), subtotal - coupon_discount)
     total = net_subtotal + shipping_cost + tax_amount_val + convenience_fee
 
-    # 3. Charge card via QB Payments (skip for ACH — collected manually)
+    # 3. Take the money. A card is charged here and either works or does not; a
+    #    bank debit is raised after the order exists, because it clears over days
+    #    and there is nothing to wait for at this point.
     if payload.payment_method == "ach":
+        from app.services.qb_payments_service import QBPaymentsService as _QBPaySvc
+
+        # Checked before the order is written, so a mistyped routing number is
+        # something the customer can still fix.
+        if not payload.ach_authorized:
+            raise ValidationError("Please authorise the bank transfer before placing the order.")
+        if len("".join(c for c in (payload.ach_account_number or "") if c.isdigit())) < 4:
+            raise ValidationError("Please enter your full bank account number.")
+        if not _QBPaySvc.routing_number_is_valid(payload.ach_routing_number):
+            raise ValidationError("That routing number doesn't look right — please check the nine digits.")
+        if not (payload.ach_first_name or "").strip() or not (payload.ach_last_name or "").strip():
+            raise ValidationError("Please enter the first and last name on the bank account.")
+
         qb_charge_id = None
         qb_payment_status = "ACH_PENDING"
-        _payment_status = "paid"  # ACH / bank transfer treated as immediately paid
+        # Not paid: the money is still in the customer's bank. It settles when
+        # the debit clears, which settle_pending_echecks watches for.
+        _payment_status = "unpaid"
     else:
         if not payload.qb_token:
             raise ValidationError("Card token is required for card payments")
@@ -375,6 +400,47 @@ async def guest_checkout(
             )
         except Exception as _exc:
             logger.warning("Could not save convenience_fee on guest order %s: %s", order.id, _exc)
+
+    # ── Bank debit ────────────────────────────────────────────────────────────
+    # Raised against the order's own total so what leaves the customer's bank is
+    # exactly what the invoice says. A failure here does not undo the order —
+    # the customer has placed it and nothing about it is wrong — it is recorded
+    # and the office is told, because collecting is then somebody's job here.
+    if payload.payment_method == "ach":
+        from app.services.qb_payments_service import QBPaymentsService as _QBPaySvc
+
+        try:
+            _echeck = _QBPaySvc().charge_echeck(
+                amount=float(order.total),
+                routing_number=payload.ach_routing_number or "",
+                account_number=payload.ach_account_number or "",
+                account_type=_QBPaySvc.echeck_account_type(
+                    payload.ach_account_ownership, payload.ach_account_type
+                ),
+                first_name=payload.ach_first_name or "",
+                last_name=payload.ach_last_name or "",
+                phone=payload.ach_phone,
+                description=f"AF Apparels order {order.order_number}",
+            )
+            _echeck_id = str(_echeck.get("id") or "")
+            _echeck_status = str(_echeck.get("status") or "PENDING").upper()
+            logger.info(
+                "Guest eCheck raised for order %s — id=%s status=%s",
+                order.order_number, _echeck_id, _echeck_status,
+            )
+        except Exception as _ach_exc:
+            _echeck_id, _echeck_status = "", "FAILED_TO_RAISE"
+            logger.error(
+                "Guest eCheck FAILED to raise for order %s (%.2f): %s",
+                order.order_number, float(order.total), _ach_exc, exc_info=True,
+            )
+        try:
+            await db.execute(
+                _text("UPDATE orders SET qb_echeck_id=:eid, qb_echeck_status=:est WHERE id=:oid"),
+                {"eid": _echeck_id or None, "est": _echeck_status, "oid": str(order.id)},
+            )
+        except Exception as _save_exc:
+            logger.warning("Could not save eCheck state on guest order %s: %s", order.order_number, _save_exc)
 
     # 6. Create OrderItem records + deduct inventory
     from sqlalchemy import update as _update

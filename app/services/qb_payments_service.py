@@ -189,6 +189,107 @@ class QBPaymentsService:
             payload["description"] = description
         return self._request("POST", "charges", json=payload)
 
+    # ── eCheck (ACH bank debit) ──────────────────────────────────────────────
+
+    #: How a customer describes their account, mapped to what QuickBooks calls it.
+    #: QuickBooks shows these as "Consumer Checking" and so on; the API has
+    #: always taken PERSONAL_*. charge_echeck falls back to the other spelling
+    #: if the endpoint disagrees.
+    _ECHECK_ACCOUNT_TYPES = {
+        ("personal", "checking"): "PERSONAL_CHECKING",
+        ("personal", "savings"): "PERSONAL_SAVINGS",
+        ("business", "checking"): "BUSINESS_CHECKING",
+        ("business", "savings"): "BUSINESS_SAVINGS",
+    }
+
+    @classmethod
+    def echeck_account_type(cls, ownership: str | None, kind: str | None) -> str:
+        """QuickBooks' name for an account described as personal/business + checking/savings.
+
+        Defaults to a personal checking account, which is what the great majority
+        of the bank details customers enter turn out to be.
+        """
+        key = ((ownership or "personal").strip().lower(), (kind or "checking").strip().lower())
+        return cls._ECHECK_ACCOUNT_TYPES.get(key, "PERSONAL_CHECKING")
+
+    @staticmethod
+    def routing_number_is_valid(routing: str | None) -> bool:
+        """Whether this could be a real US routing number.
+
+        Every ABA routing number carries a check digit, so a mistyped one can be
+        caught here rather than by QuickBooks after an order already exists. It
+        proves the number is well-formed, not that the bank is the right one.
+        """
+        digits = "".join(c for c in (routing or "") if c.isdigit())
+        if len(digits) != 9:
+            return False
+        weights = (3, 7, 1, 3, 7, 1, 3, 7, 1)
+        return sum(int(d) * w for d, w in zip(digits, weights)) % 10 == 0
+
+    def charge_echeck(
+        self,
+        amount: float,
+        routing_number: str,
+        account_number: str,
+        account_type: str,
+        first_name: str,
+        last_name: str,
+        phone: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Debit a customer's bank account for an amount they have authorised.
+
+        Unlike a card, this is not money in hand when it returns. QuickBooks
+        accepts the request and answers with a status that usually reads
+        PENDING; the funds move over the following days and can still be
+        returned after that, so the caller has to follow the eCheck up rather
+        than treat a successful call as payment.
+
+        paymentMode WEB records that the authorisation was given online, which
+        is what NACHA requires us to state for an order placed on a website.
+        """
+        payload: dict[str, Any] = {
+            "amount": f"{amount:.2f}",
+            "paymentMode": "WEB",
+            "bankAccount": {
+                "name": f"{(first_name or '').strip()} {(last_name or '').strip()}".strip(),
+                "routingNumber": "".join(c for c in routing_number if c.isdigit()),
+                "accountNumber": "".join(c for c in account_number if c.isdigit()),
+                "accountType": account_type,
+            },
+        }
+        if phone:
+            payload["bankAccount"]["phone"] = "".join(c for c in phone if c.isdigit())
+        if description:
+            payload["description"] = description
+
+        # QuickBooks' own screen calls these accounts "Consumer Checking" while
+        # its API has always named them PERSONAL_CHECKING. Which of the two the
+        # endpoint will accept is not worth being wrong about on a real order —
+        # a rejected debit means an order placed and no money asked for — so if
+        # the account type is what it objects to, the other name is tried once.
+        try:
+            return self._request("POST", "echecks", json=payload)
+        except Exception as exc:
+            if "account" not in str(exc).lower() and "type" not in str(exc).lower():
+                raise
+            alt = (
+                account_type.replace("PERSONAL_", "CONSUMER_")
+                if account_type.startswith("PERSONAL_")
+                else account_type.replace("CONSUMER_", "PERSONAL_")
+            )
+            if alt == account_type:
+                raise
+            logger.warning(
+                "eCheck rejected with accountType=%s — retrying once as %s", account_type, alt
+            )
+            payload["bankAccount"]["accountType"] = alt
+            return self._request("POST", "echecks", json=payload)
+
+    def get_echeck(self, echeck_id: str) -> dict[str, Any]:
+        """Where an eCheck has got to. Used to find out whether the money arrived."""
+        return self._request("GET", f"echecks/{echeck_id}")
+
     def get_charge(self, charge_id: str) -> dict[str, Any]:
         """Retrieve a charge by ID."""
         return self._request("GET", f"charges/{charge_id}")

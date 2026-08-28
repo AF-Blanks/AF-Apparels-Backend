@@ -114,6 +114,11 @@ class Order(BaseModel):
     ach_account_last4: Mapped[str | None] = mapped_column(String(4), nullable=True)
     ach_account_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     ach_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
+    # The bank debit raised with QuickBooks, and where it has got to. Money moves
+    # over days here rather than at once, so an order carries the debit's
+    # identity until it either settles or comes back.
+    qb_echeck_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    qb_echeck_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     # Invoice & payment tracking
     payment_terms: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, default='net_30')

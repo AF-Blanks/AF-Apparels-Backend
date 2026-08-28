@@ -52,6 +52,13 @@ beat_schedule = {
         "task": "app.tasks.quickbooks_tasks.check_card_payment_chargebacks",
         "schedule": crontab(hour="7", minute="0"),  # daily at 7am UTC — staggered from other daily jobs
     },
+    "settle-pending-echecks": {
+        "task": "app.tasks.quickbooks_tasks.settle_pending_echecks",
+        # Twice a day rather than once: a bank debit that lands in the morning
+        # should not wait until tomorrow to show as paid. Staggered away from
+        # the other jobs so the QuickBooks calls never bunch up.
+        "schedule": crontab(hour="8,20", minute="30"),
+    },
 }
 
 # ── RedBeat scheduler ─────────────────────────────────────────────────────────

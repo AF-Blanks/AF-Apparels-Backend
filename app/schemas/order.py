@@ -72,6 +72,19 @@ class CheckoutConfirmRequest(BaseModel):
     ach_routing_number: str | None = None
     ach_account_last4: str | None = None
     ach_account_type: str | None = None
+    # The full account number, sent so the bank debit can be raised — passed
+    # straight to QuickBooks and never written down. Only the last four digits
+    # are kept, which is all anyone here needs to recognise the account by.
+    ach_account_number: str | None = None
+    # QuickBooks debits a named person, not a free-text "account holder", and
+    # wants a contact number with it.
+    ach_first_name: str | None = None
+    ach_last_name: str | None = None
+    ach_phone: str | None = None
+    ach_account_ownership: str | None = None   # "personal" | "business"
+    # The customer's explicit consent to the debit. Taking money out of someone's
+    # bank without it is not allowed, so the order is refused without it.
+    ach_authorized: bool = False
     # Live Shippo rate selected at checkout
     shipping_rate_id: str | None = None
     shipping_carrier: str | None = None
@@ -194,6 +207,9 @@ class AdminOrderDetail(OrderOut):
     # An invoice in QuickBooks does not mean the money was recorded against it.
     # Empty on a paid order means the payment never reached the books.
     qb_payment_id: str | None = None
+    # Where a bank debit has got to. Money moves over days here, so this is the
+    # difference between "asked for" and "arrived".
+    qb_echeck_status: str | None = None
     # Customer contact (enriched from User record or guest fields)
     customer_name: str | None = None
     customer_email: str | None = None

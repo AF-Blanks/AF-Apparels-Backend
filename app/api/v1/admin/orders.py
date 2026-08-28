@@ -637,6 +637,7 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
             shipped_at=order.shipped_at,
             qb_invoice_id=order.qb_invoice_id,
             qb_payment_id=getattr(order, "qb_payment_id", None),
+            qb_echeck_status=getattr(order, "qb_echeck_status", None),
             created_at=order.created_at,
             updated_at=order.updated_at,
             items=[

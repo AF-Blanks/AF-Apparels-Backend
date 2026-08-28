@@ -697,6 +697,13 @@ async def _ensure_columns() -> None:
          "ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS allow_backorder BOOLEAN NOT NULL DEFAULT false"),
         ("order_items.is_backordered",
          "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS is_backordered BOOLEAN NOT NULL DEFAULT false"),
+        # A bank debit is not money in hand the way a card is — it clears over
+        # days and can still be returned — so the order keeps the debit's id and
+        # its last known state, and is settled only once QuickBooks says so.
+        ("orders.qb_echeck_id",
+         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS qb_echeck_id VARCHAR(255)"),
+        ("orders.qb_echeck_status",
+         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS qb_echeck_status VARCHAR(32)"),
         # New column only - existing rows keep the default. Older drafts stay
         # recognisable by their "DRAFT-" order number and are never rewritten.
         ("orders.is_draft",

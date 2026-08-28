@@ -1505,14 +1505,189 @@ _CHARGEBACK_PAUSE_BETWEEN_CALLS_SEC = 0.5
 _CHARGEBACK_LOOKBACK_DAYS = 120
 
 
+# A bank debit clears over one to five business days and can be returned after
+# that, so it is followed for a while and then let go. The same hard caps as the
+# card sweep, for the same reason: this must never become an API storm.
+_ECHECK_MAX_ORDERS_PER_RUN = 100
+_ECHECK_PAUSE_BETWEEN_CALLS_SEC = 0.5
+_ECHECK_LOOKBACK_DAYS = 30
+#: QuickBooks has taken the money.
+_ECHECK_SETTLED_STATUSES = {"SUCCEEDED", "SETTLED", "CAPTURED", "PAID"}
+#: The money is not coming — the account was closed, empty, or refused it.
+_ECHECK_RETURNED_STATUSES = {"FAILED", "DECLINED", "VOIDED", "RETURNED", "CANCELLED", "REJECTED"}
+
+
+@celery_app.task(bind=True, max_retries=1)
+def settle_pending_echecks(self):
+    """Daily sweep — ask QuickBooks whether each outstanding bank debit landed.
+
+    A card either works or it does not, and you know within a second. A bank
+    debit is a request that clears over days, so the order it belongs to cannot
+    be settled at checkout — somebody has to come back and look. This is that
+    somebody.
+
+    A debit that has landed settles the order and records the payment against
+    its QuickBooks invoice, which is the same thing "mark as paid" does by hand.
+    One that has come back leaves the order unpaid, marked with what happened,
+    and tells the office — the goods may already have gone out.
+    """
+
+    async def _run_all():
+        from datetime import datetime, timedelta, timezone
+
+        from sqlalchemy import select, text as _sql
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from app.models.order import Order
+        from app.services.email_service import EmailService
+        from app.services.qb_payments_service import QBPaymentsService
+
+        # Own engine for this run — same reasoning as the card sweep above.
+        _task_engine = create_async_engine(settings.DATABASE_URL, pool_size=2, max_overflow=2)
+        _TaskSession = async_sessionmaker(bind=_task_engine, expire_on_commit=False)
+
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=_ECHECK_LOOKBACK_DAYS)
+
+            async with _TaskSession() as session:
+                orders = (await session.execute(
+                    select(Order)
+                    .where(
+                        Order.qb_echeck_id.isnot(None),
+                        Order.payment_status != "paid",
+                        Order.created_at >= cutoff,
+                    )
+                    .order_by(Order.created_at.asc())
+                    .limit(_ECHECK_MAX_ORDERS_PER_RUN)
+                )).scalars().all()
+
+            if not orders:
+                logger.info("settle_pending_echecks: nothing outstanding")
+                return {"checked": 0, "settled": 0, "returned": 0}
+
+            logger.info("settle_pending_echecks: checking %d debit(s)", len(orders))
+
+            qb_pay = QBPaymentsService()
+            settled = returned = 0
+
+            for order in orders:
+                try:
+                    echeck = await asyncio.to_thread(qb_pay.get_echeck, order.qb_echeck_id)
+                    status = str(echeck.get("status", "")).upper()
+                except Exception as exc:
+                    logger.warning(
+                        "settle_pending_echecks: could not read eCheck %s for order %s: %s",
+                        order.qb_echeck_id, order.order_number, exc,
+                    )
+                    await asyncio.sleep(_ECHECK_PAUSE_BETWEEN_CALLS_SEC)
+                    continue
+
+                if status in _ECHECK_SETTLED_STATUSES:
+                    settled += 1
+                    logger.info(
+                        "settle_pending_echecks: order %s settled (%s)", order.order_number, status
+                    )
+                    async with _TaskSession() as sess:
+                        try:
+                            await sess.execute(
+                                _sql("""
+                                    UPDATE orders
+                                    SET payment_status   = 'paid',
+                                        qb_echeck_status = :st,
+                                        marked_paid_at   = COALESCE(marked_paid_at, now()),
+                                        amount_paid      = COALESCE(total, 0)
+                                    WHERE id = :oid
+                                """),
+                                {"st": status, "oid": str(order.id)},
+                            )
+                            await sess.commit()
+                        except Exception as exc:
+                            await sess.rollback()
+                            logger.error(
+                                "settle_pending_echecks: could not settle order %s: %s",
+                                order.order_number, exc, exc_info=True,
+                            )
+                            await asyncio.sleep(_ECHECK_PAUSE_BETWEEN_CALLS_SEC)
+                            continue
+                    # Now that the money is in, the invoice in QuickBooks has to
+                    # show it. force_payment because the order may have been
+                    # invoiced on net terms, which the sync leaves open by design.
+                    try:
+                        sync_order_invoice_to_qb.delay(str(order.id), force_payment=True)
+                    except Exception as exc:
+                        logger.warning(
+                            "settle_pending_echecks: QB payment sync dispatch failed for %s: %s",
+                            order.order_number, exc,
+                        )
+
+                elif status in _ECHECK_RETURNED_STATUSES:
+                    returned += 1
+                    logger.warning(
+                        "settle_pending_echecks: order %s RETURNED (%s)", order.order_number, status
+                    )
+                    async with _TaskSession() as sess:
+                        try:
+                            await sess.execute(
+                                _sql("UPDATE orders SET qb_echeck_status = :st WHERE id = :oid"),
+                                {"st": status, "oid": str(order.id)},
+                            )
+                            await sess.commit()
+                            svc = EmailService(sess)
+                            for to in svc._business_inboxes():
+                                svc.send_raw(
+                                    to_email=to,
+                                    subject=f"Bank transfer returned — order {order.order_number}",
+                                    body_html=(
+                                        f"<p>The bank transfer for order "
+                                        f"<strong>{order.order_number}</strong> "
+                                        f"(<strong>${float(order.total or 0):.2f}</strong>) came back "
+                                        f"marked <strong>{status}</strong>.</p>"
+                                        f"<p>The money has not been collected. If the goods have "
+                                        f"already shipped, this needs chasing.</p>"
+                                    ),
+                                )
+                        except Exception as exc:
+                            await sess.rollback()
+                            logger.error(
+                                "settle_pending_echecks: could not record return for %s: %s",
+                                order.order_number, exc, exc_info=True,
+                            )
+                else:
+                    # Still in flight — leave it alone and look again tomorrow.
+                    async with _TaskSession() as sess:
+                        try:
+                            await sess.execute(
+                                _sql("UPDATE orders SET qb_echeck_status = :st WHERE id = :oid"),
+                                {"st": status or "PENDING", "oid": str(order.id)},
+                            )
+                            await sess.commit()
+                        except Exception:
+                            await sess.rollback()
+
+                await asyncio.sleep(_ECHECK_PAUSE_BETWEEN_CALLS_SEC)
+
+            logger.info(
+                "settle_pending_echecks: done — checked=%d settled=%d returned=%d",
+                len(orders), settled, returned,
+            )
+            return {"checked": len(orders), "settled": settled, "returned": returned}
+        finally:
+            await _task_engine.dispose()
+
+    # One attempt per scheduled run. Anything missed is picked up tomorrow,
+    # rather than retried in a loop that would multiply the QuickBooks calls.
+    return _run_async(_run_all())
+
+
 @celery_app.task(bind=True, max_retries=1)
 def check_card_payment_chargebacks(self):
     """Daily sweep — re-checks recent *card* orders against QuickBooks Payments
     to detect chargebacks/refunds/reversals that happened after the fact.
 
-    ACH/bank-transfer orders are intentionally excluded: they never create a
-    QuickBooks Payments transaction in this system (admin verifies them
-    manually against the bank statement), so there is nothing in QB to poll.
+    ACH/bank-transfer orders are excluded here because they are followed
+    separately, by settle_pending_echecks below: a bank debit has its own
+    lifecycle — it clears over days and is returned rather than charged back —
+    and QuickBooks answers for it on a different endpoint.
 
     On detecting a reversed payment: suspends the company (existing
     CompanyService.suspend) and emails the admin. Never re-processes an

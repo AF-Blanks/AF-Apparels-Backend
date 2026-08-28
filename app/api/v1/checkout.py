@@ -200,6 +200,29 @@ async def _confirm_checkout_inner(
         if not _company or not getattr(_company, _term_field, False):
             raise ValidationError(f"{_term_name} payment terms are not available for your account. Contact AF Apparels to request it.")
 
+    # Bank details are checked before anything is written down. A mistyped
+    # routing number is the common failure, and catching it here means the
+    # customer is told to fix it rather than ending up with an order whose
+    # payment could never have been raised.
+    if has_ach:
+        from app.services.qb_payments_service import QBPaymentsService as _QBPaySvc
+
+        if not payload.ach_authorized:
+            raise ValidationError(
+                "Please authorise the bank transfer before placing the order."
+            )
+        _ach_acct = "".join(c for c in (payload.ach_account_number or "") if c.isdigit())
+        if len(_ach_acct) < 4:
+            raise ValidationError("Please enter your full bank account number.")
+        if not _QBPaySvc.routing_number_is_valid(payload.ach_routing_number):
+            raise ValidationError(
+                "That routing number doesn't look right — please check the nine digits."
+            )
+        if not (payload.ach_first_name or "").strip() or not (payload.ach_last_name or "").strip():
+            raise ValidationError(
+                "Please enter the first and last name on the bank account."
+            )
+
     discount_percent = getattr(request.state, "tier_discount_percent", Decimal("0"))
     group_id = getattr(request.state, "discount_group_id", None)
 
@@ -352,6 +375,77 @@ async def _confirm_checkout_inner(
         group_id=group_id,
         is_wholesale=_account_type == "wholesale",
     )
+
+    # ── Bank debit ────────────────────────────────────────────────────────────
+    # Raised against the order's own total rather than a figure worked out again
+    # here, so what leaves the customer's bank is always exactly what the invoice
+    # says. A card is charged before the order exists because the money is either
+    # there or it is not; a bank debit clears over days and can still be returned,
+    # so there is nothing to wait for and no reason to hold the order back.
+    if has_ach:
+        from app.services.qb_payments_service import QBPaymentsService as _QBPaySvc
+
+        try:
+            _echeck = _QBPaySvc().charge_echeck(
+                amount=float(order.total),
+                routing_number=payload.ach_routing_number or "",
+                account_number=payload.ach_account_number or "",
+                account_type=_QBPaySvc.echeck_account_type(
+                    payload.ach_account_ownership, payload.ach_account_type
+                ),
+                first_name=payload.ach_first_name or "",
+                last_name=payload.ach_last_name or "",
+                phone=payload.ach_phone,
+                description=f"AF Apparels order {order.order_number}",
+            )
+            _echeck_id = str(_echeck.get("id") or "")
+            _echeck_status = str(_echeck.get("status") or "PENDING").upper()
+            _log.info(
+                "eCheck raised for order %s — id=%s status=%s amount=%.2f",
+                order.order_number, _echeck_id, _echeck_status, float(order.total),
+            )
+        except Exception as _ach_exc:
+            # The order stands: the customer has placed it and nothing about it
+            # is wrong. What failed is our attempt to collect, which somebody
+            # here has to pick up — so it is recorded on the order and the
+            # business is told, rather than shown to the customer as a failure
+            # they cannot act on.
+            _echeck_id, _echeck_status = "", "FAILED_TO_RAISE"
+            _log.error(
+                "eCheck FAILED to raise for order %s (%.2f): %s",
+                order.order_number, float(order.total), _ach_exc, exc_info=True,
+            )
+
+        try:
+            from sqlalchemy import text as _t_ach
+            await db.execute(
+                _t_ach(
+                    "UPDATE orders SET qb_echeck_id = :eid, qb_echeck_status = :est"
+                    " WHERE id = :oid"
+                ),
+                {"eid": _echeck_id or None, "est": _echeck_status, "oid": str(order.id)},
+            )
+        except Exception as _save_exc:
+            _log.warning("Could not save eCheck state on order %s: %s", order.order_number, _save_exc)
+
+        if _echeck_status == "FAILED_TO_RAISE":
+            try:
+                from app.services.email_service import EmailService as _ES
+                _svc = _ES(db)
+                for _to in _svc._business_inboxes():
+                    _svc.send_raw(
+                        to_email=_to,
+                        subject=f"Bank transfer could not be started — order {order.order_number}",
+                        body_html=(
+                            f"<p>Order <strong>{order.order_number}</strong> for "
+                            f"<strong>${float(order.total):.2f}</strong> was placed by bank transfer, "
+                            f"but QuickBooks would not accept the debit.</p>"
+                            f"<p>The order is fine — nothing has been collected. "
+                            f"Please contact the customer to arrange payment.</p>"
+                        ),
+                    )
+            except Exception as _mail_exc:
+                _log.warning("Could not alert the office about the failed eCheck: %s", _mail_exc)
 
     # Record coupon usage after order is created
     if coupon_discount_dc is not None and coupon_discount_amount > 0:
