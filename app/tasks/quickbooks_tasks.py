@@ -1511,6 +1511,10 @@ _CHARGEBACK_LOOKBACK_DAYS = 120
 _ECHECK_MAX_ORDERS_PER_RUN = 100
 _ECHECK_PAUSE_BETWEEN_CALLS_SEC = 0.5
 _ECHECK_LOOKBACK_DAYS = 30
+#: A bank debit clears in one to five business days. Past this it is not slow,
+#: something is wrong — and the likeliest something is a status word we do not
+#: recognise, which would otherwise leave the order quietly unpaid forever.
+_ECHECK_STALE_DAYS = 7
 #: QuickBooks has taken the money.
 _ECHECK_SETTLED_STATUSES = {"SUCCEEDED", "SETTLED", "CAPTURED", "PAID"}
 #: The money is not coming — the account was closed, empty, or refused it.
@@ -1657,6 +1661,47 @@ def settle_pending_echecks(self):
                                 order.order_number, exc, exc_info=True,
                             )
                 else:
+                    # Not a word we know. Say so loudly: every status QuickBooks
+                    # can return has to land in one of the two sets above, and one
+                    # that does not is how an order stays unpaid without anybody
+                    # being told.
+                    if status and status not in ("PENDING", "SUBMITTED", "IN_PROCESS", "PROCESSING"):
+                        logger.warning(
+                            "settle_pending_echecks: UNRECOGNISED status %r on order %s —"
+                            " it belongs in _ECHECK_SETTLED_STATUSES or"
+                            " _ECHECK_RETURNED_STATUSES", status, order.order_number,
+                        )
+
+                    # Overdue is worth an email whatever the reason: an unknown
+                    # status, a debit stuck at the bank, or one QuickBooks has
+                    # simply stopped talking about. Sent on the day it crosses the
+                    # line rather than every day after, so it is a warning and not
+                    # a drip.
+                    _age = (datetime.now(timezone.utc) - order.created_at).days if order.created_at else 0
+                    if _ECHECK_STALE_DAYS <= _age < _ECHECK_STALE_DAYS + 1:
+                        try:
+                            async with _TaskSession() as sess:
+                                svc = EmailService(sess)
+                                for to in svc._business_inboxes():
+                                    svc.send_raw(
+                                        to_email=to,
+                                        subject=f"Bank transfer still not settled — order {order.order_number}",
+                                        body_html=(
+                                            f"<p>The bank transfer for order "
+                                            f"<strong>{order.order_number}</strong> "
+                                            f"(<strong>${float(order.total or 0):.2f}</strong>) was raised "
+                                            f"{_age} days ago and QuickBooks still reports it as "
+                                            f"<strong>{status or 'PENDING'}</strong>.</p>"
+                                            f"<p>A transfer normally clears in 1-5 business days. "
+                                            f"Please check it in QuickBooks.</p>"
+                                        ),
+                                    )
+                        except Exception as exc:
+                            logger.warning(
+                                "settle_pending_echecks: stale alert failed for %s: %s",
+                                order.order_number, exc,
+                            )
+
                     # Still in flight — leave it alone and look again tomorrow.
                     async with _TaskSession() as sess:
                         try:
