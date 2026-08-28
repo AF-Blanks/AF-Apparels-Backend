@@ -448,6 +448,26 @@ async def guest_checkout(
         except Exception as _save_exc:
             logger.warning("Could not save eCheck state on guest order %s: %s", order.order_number, _save_exc)
 
+        from app.services.qb_payments_service import ECHECK_NOT_COLLECTED as _NOT_COLLECTED
+        if _echeck_status in _NOT_COLLECTED:
+            try:
+                from app.services.email_service import EmailService as _ES
+                _svc = _ES(db)
+                for _to in _svc._business_inboxes():
+                    _svc.send_raw(
+                        to_email=_to,
+                        subject=f"Bank transfer not collected — order {order.order_number}",
+                        body_html=(
+                            f"<p>Guest order <strong>{order.order_number}</strong> for "
+                            f"<strong>${float(order.total):.2f}</strong> was placed by bank "
+                            f"transfer, but no money is being collected — QuickBooks reported "
+                            f"<strong>{_echeck_status}</strong>.</p>"
+                            f"<p>The order is fine. Please contact the customer to arrange payment.</p>"
+                        ),
+                    )
+            except Exception as _mail_exc:
+                logger.warning("Could not alert the office about the failed guest eCheck: %s", _mail_exc)
+
     # 6. Create OrderItem records + deduct inventory
     from sqlalchemy import update as _update
 

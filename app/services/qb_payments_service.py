@@ -28,6 +28,17 @@ QB_CUSTOMERS_BASE = {
 }
 
 
+#: A debit QuickBooks answered 201 to but will never collect. It says so in the
+#: body, not the status line, so a raise that "worked" can still have taken
+#: nothing — worth knowing at checkout rather than half a day later.
+ECHECK_NOT_COLLECTED = {
+    "FAILED_TO_RAISE", "DECLINED", "FAILED", "REJECTED", "CANCELLED", "VOIDED", "ERROR",
+}
+
+#: A refund QuickBooks answered 201 to but will not actually make.
+_ECHECK_REFUND_REFUSED = {"DECLINED", "FAILED", "REJECTED", "ERROR", "CANCELLED"}
+
+
 class QBPaymentsService:
     """Stateless service — reuses OAuth tokens from QuickBooksService."""
 
@@ -297,7 +308,20 @@ class QBPaymentsService:
         payload: dict[str, Any] = {}
         if amount is not None:
             payload["amount"] = f"{amount:.2f}"
-        return self._request("POST", f"echecks/{echeck_id}/refunds", json=payload)
+        resp = self._request("POST", f"echecks/{echeck_id}/refunds", json=payload)
+
+        # QuickBooks answers 201 whether or not it agreed to send the money
+        # back: a refund it will not make comes back as a perfectly successful
+        # response carrying status DECLINED. Read as HTTP alone, a customer
+        # would be recorded as refunded while their money stayed here.
+        status = str(resp.get("status") or "").upper()
+        if status in _ECHECK_REFUND_REFUSED:
+            raise RuntimeError(
+                f"QuickBooks declined the refund (status {status}). A bank transfer "
+                "cannot be sent back until the original has cleared, which takes about "
+                "five business days."
+            )
+        return resp
 
     def get_echeck(self, echeck_id: str) -> dict[str, Any]:
         """Where an eCheck has got to. Used to find out whether the money arrived."""

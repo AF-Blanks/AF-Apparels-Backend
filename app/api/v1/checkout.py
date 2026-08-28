@@ -433,7 +433,11 @@ async def _confirm_checkout_inner(
         except Exception as _save_exc:
             _log.warning("Could not save eCheck state on order %s: %s", order.order_number, _save_exc)
 
-        if _echeck_status == "FAILED_TO_RAISE":
+        # Raised and refused are both "no money is coming", and both need
+        # somebody here to pick it up. QuickBooks reports the second as a
+        # perfectly successful call, so it has to be read out of the body.
+        from app.services.qb_payments_service import ECHECK_NOT_COLLECTED as _NOT_COLLECTED
+        if _echeck_status in _NOT_COLLECTED:
             try:
                 from app.services.email_service import EmailService as _ES
                 _svc = _ES(db)
@@ -444,7 +448,8 @@ async def _confirm_checkout_inner(
                         body_html=(
                             f"<p>Order <strong>{order.order_number}</strong> for "
                             f"<strong>${float(order.total):.2f}</strong> was placed by bank transfer, "
-                            f"but QuickBooks would not accept the debit.</p>"
+                            f"but no money is being collected — QuickBooks reported "
+                            f"<strong>{_echeck_status}</strong>.</p>"
                             f"<p>The order is fine — nothing has been collected. "
                             f"Please contact the customer to arrange payment.</p>"
                         ),
