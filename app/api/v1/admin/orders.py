@@ -727,10 +727,9 @@ async def verify_ach_payment(order_id: UUID, db: AsyncSession = Depends(get_db))
         sync_order_invoice_to_qb.delay(str(order_id), force_payment=True)
         logger.info("verify_ach_payment: QB payment sync queued for order %s", order_id)
     else:
-        logger.warning(
-            "verify_ach_payment: order %s has no QB invoice yet — payment will be"
-            " recorded when the invoice syncs", order_id,
-        )
+        # No invoice yet — raise one and settle it in the same run, rather than
+        # waiting for a fulfilment step that may never come.
+        _ensure_qb_invoice(order, force_payment=True)
 
     return {"status": "verified", "order_id": str(order_id)}
 
@@ -2144,11 +2143,17 @@ async def mark_order_paid(
     )
     await db.commit()
 
-    # If invoice already exists in QB, record payment now (Net-30 / mark-paid flow)
+    # Settling an order is the point at which QuickBooks has to know about it —
+    # both that it exists and that it has been paid. This used to send the
+    # payment only when an invoice was already there, so an order built by hand
+    # and marked paid without first being confirmed left nothing in the books at
+    # all: no invoice to pay, and no later step that would have raised one.
+    from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
     if order.qb_invoice_id:
-        from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
         sync_order_invoice_to_qb.delay(str(order_id), force_payment=True)
         logger.info("mark_order_paid: QB payment sync queued for order %s", order_id)
+    else:
+        _ensure_qb_invoice(order, force_payment=True)
 
     return {"message": "Order marked as paid"}
 
@@ -2475,7 +2480,7 @@ async def _resolve_warehouse_for_variant(variant_id: UUID, db: AsyncSession) -> 
 _FULFILLMENT_STATUSES = ("confirmed", "processing", "ready_for_pickup", "shipped", "delivered")
 
 
-def _ensure_qb_invoice(order: Order) -> None:
+def _ensure_qb_invoice(order: Order, force_payment: bool = False) -> None:
     """Make sure an order entering fulfilment has an invoice in QuickBooks.
 
     Orders placed through checkout raise their invoice at payment time, but an
@@ -2488,6 +2493,11 @@ def _ensure_qb_invoice(order: Order) -> None:
     every status change: it returns immediately once an invoice exists, and a
     short-lived Redis key stops two triggers (e.g. a status change and a label)
     queueing the same sync twice.
+
+    Pass force_payment when the money is already in hand. An order on net terms
+    is invoiced unpaid by design, so the same run that raises the invoice will
+    not settle it unless told to — and an order settled before it was ever
+    invoiced has no later trigger that would.
     """
     if getattr(order, "qb_invoice_id", None):
         return  # already in QuickBooks — the sync task would skip creation anyway
@@ -2512,8 +2522,13 @@ def _ensure_qb_invoice(order: Order) -> None:
         logger.warning("QB invoice dedup check failed (%s) — dispatching anyway", _e)
     try:
         from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
-        sync_order_invoice_to_qb.apply_async(args=[str(order.id)], countdown=10)
-        logger.info("QB invoice sync queued for order %s (entered fulfilment)", order.order_number)
+        sync_order_invoice_to_qb.apply_async(
+            args=[str(order.id)], kwargs={"force_payment": force_payment}, countdown=10
+        )
+        logger.info(
+            "QB invoice sync queued for order %s (force_payment=%s)",
+            order.order_number, force_payment,
+        )
     except Exception as _e:
         logger.warning("QB invoice sync dispatch failed for order %s: %s", order.order_number, _e)
 
