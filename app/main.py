@@ -704,6 +704,15 @@ async def _ensure_columns() -> None:
          "ALTER TABLE orders ADD COLUMN IF NOT EXISTS qb_echeck_id VARCHAR(255)"),
         ("orders.qb_echeck_status",
          "ALTER TABLE orders ADD COLUMN IF NOT EXISTS qb_echeck_status VARCHAR(32)"),
+        # A bank can be told up to two years later that a debit was never
+        # authorised. What answers that is not a yes/no flag but what the
+        # customer was shown, when they agreed, and from where.
+        ("orders.ach_authorized_at",
+         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS ach_authorized_at TIMESTAMPTZ"),
+        ("orders.ach_authorized_ip",
+         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS ach_authorized_ip VARCHAR(64)"),
+        ("orders.ach_authorization_text",
+         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS ach_authorization_text TEXT"),
         # New column only - existing rows keep the default. Older drafts stay
         # recognisable by their "DRAFT-" order number and are never rewritten.
         ("orders.is_draft",

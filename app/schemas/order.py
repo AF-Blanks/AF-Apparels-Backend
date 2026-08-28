@@ -85,6 +85,9 @@ class CheckoutConfirmRequest(BaseModel):
     # The customer's explicit consent to the debit. Taking money out of someone's
     # bank without it is not allowed, so the order is refused without it.
     ach_authorized: bool = False
+    # The wording actually shown above the box, recorded verbatim — what matters
+    # in a dispute is what the customer read, not what we meant to show them.
+    ach_authorization_text: str | None = None
     # Live Shippo rate selected at checkout
     shipping_rate_id: str | None = None
     shipping_carrier: str | None = None
@@ -210,6 +213,11 @@ class AdminOrderDetail(OrderOut):
     # Where a bank debit has got to. Money moves over days here, so this is the
     # difference between "asked for" and "arrived".
     qb_echeck_status: str | None = None
+    # Evidence that the debit was allowed. Shown on the order so it can be
+    # produced without anyone going near the database.
+    ach_authorized_at: datetime | None = None
+    ach_authorized_ip: str | None = None
+    ach_authorization_text: str | None = None
     # Customer contact (enriched from User record or guest fields)
     customer_name: str | None = None
     customer_email: str | None = None

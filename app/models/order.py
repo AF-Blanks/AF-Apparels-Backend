@@ -119,6 +119,12 @@ class Order(BaseModel):
     # identity until it either settles or comes back.
     qb_echeck_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     qb_echeck_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The customer's permission to take the money, kept as evidence rather than
+    # as a flag: the wording they agreed to, the moment, and the address it came
+    # from. A debit disputed later is answered with these three.
+    ach_authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ach_authorized_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ach_authorization_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Invoice & payment tracking
     payment_terms: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, default='net_30')

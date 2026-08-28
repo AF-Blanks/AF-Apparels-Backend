@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -134,6 +134,7 @@ class GuestCheckoutRequest(BaseModel):
     ach_phone: str | None = None
     ach_account_ownership: str | None = None   # "personal" | "business"
     ach_authorized: bool = False
+    ach_authorization_text: str | None = None
     order_notes: str | None = None
     discount_code: str | None = None
     tax_amount: Decimal | None = None
@@ -159,6 +160,7 @@ class GuestOrderOut(BaseModel):
 @router.post("/checkout", status_code=201)
 async def guest_checkout(
     payload: GuestCheckoutRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> GuestOrderOut:
     """Place an order as a guest (retail pricing, no account required)."""
@@ -407,7 +409,11 @@ async def guest_checkout(
     # the customer has placed it and nothing about it is wrong — it is recorded
     # and the office is told, because collecting is then somebody's job here.
     if payload.payment_method == "ach":
+        from app.services.ach_authorization import record_authorization as _record_auth
         from app.services.qb_payments_service import QBPaymentsService as _QBPaySvc
+
+        # Filed before the debit is raised — see the wholesale checkout.
+        await _record_auth(db, order.id, request, payload.ach_authorization_text)
 
         try:
             _echeck = _QBPaySvc().charge_echeck(

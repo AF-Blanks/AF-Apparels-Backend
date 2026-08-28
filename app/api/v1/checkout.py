@@ -383,7 +383,12 @@ async def _confirm_checkout_inner(
     # there or it is not; a bank debit clears over days and can still be returned,
     # so there is nothing to wait for and no reason to hold the order back.
     if has_ach:
+        from app.services.ach_authorization import record_authorization as _record_auth
         from app.services.qb_payments_service import QBPaymentsService as _QBPaySvc
+
+        # Filed before the debit is raised: the permission is what makes raising
+        # it lawful, so it should not depend on the debit succeeding.
+        await _record_auth(db, order.id, request, payload.ach_authorization_text)
 
         try:
             _echeck = _QBPaySvc().charge_echeck(
