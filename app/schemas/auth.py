@@ -34,7 +34,11 @@ class RegisterWholesaleRequest(BaseModel):
     state_province: str | None = Field(None, max_length=100)
     postal_code: str | None = Field(None, max_length=20)
     country: str | None = Field(None, max_length=100)
-    how_heard: str | None = Field(None, max_length=100)
+    # Asked of every applicant, and enforced here as well as on the form: the
+    # browser's own check is the first thing skipped by anything posting
+    # straight to the API, and an application that arrives without it cannot be
+    # chased for it afterwards. min_length so an empty answer is not an answer.
+    how_heard: str = Field(..., min_length=1, max_length=100)
 
     # Extra mailboxes that should also receive this customer's order paperwork
     # (a buyer, an accounts inbox, a warehouse). The direct and company emails
