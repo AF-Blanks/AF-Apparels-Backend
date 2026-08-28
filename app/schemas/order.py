@@ -191,6 +191,9 @@ class AdminOrderDetail(OrderOut):
     shipping_rate_id: str | None = None
     shipped_at: datetime | None = None
     qb_invoice_id: str | None
+    # An invoice in QuickBooks does not mean the money was recorded against it.
+    # Empty on a paid order means the payment never reached the books.
+    qb_payment_id: str | None = None
     # Customer contact (enriched from User record or guest fields)
     customer_name: str | None = None
     customer_email: str | None = None

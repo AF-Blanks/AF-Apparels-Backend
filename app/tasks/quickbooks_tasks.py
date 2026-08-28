@@ -620,6 +620,7 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
             # ── 5b. If order is paid (card/ACH), record QB payment on the invoice ──
             # Applies to all non-net_30 paid orders (card, qb_payments, ach, bank_transfer).
             # payment_method="" (None column) also passes != "net_30" so older orders are covered.
+            _payment_error: str | None = None
             _pmt_method = order_data.get("payment_method") or ""
             _is_paid = order_data.get("payment_status") == "paid"
             _is_net30 = _pmt_method.lower() in ("net_30", "net30")
@@ -663,6 +664,13 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                             )
                             await _psession.commit()
                 except Exception as _pay_exc:
+                    # Kept non-fatal on purpose: the invoice is already in
+                    # QuickBooks and raising here would retry the whole
+                    # conversation. But it must not be reported as a success —
+                    # it was recorded as one for months, so an order could show a
+                    # green sync while its payment had never reached the books,
+                    # and nobody had any way to see it.
+                    _payment_error = f"payment not recorded: {_pay_exc}"
                     logger.error(
                         "QB create_payment_for_invoice FAILED — order=%s invoice=%s"
                         " method=%s total=%.2f error=%s",
@@ -679,8 +687,16 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                     _pmt_method,
                 )
 
-            # ── 6. Log success ────────────────────────────────────────────────
-            await _log_attempt("order", order_id, "success", None, qb_entity_id=qb_invoice_id)
+            # ── 6. Log the outcome ────────────────────────────────────────────
+            # The invoice landing and the payment landing are two separate
+            # promises. Reporting only the first hid every missed payment.
+            await _log_attempt(
+                "order",
+                order_id,
+                "success" if _payment_error is None else "failed",
+                _payment_error,
+                qb_entity_id=qb_invoice_id,
+            )
 
             # ── 7. Follow-up "invoice ready" email with the real QB PDF ────────
             # Only on the run that actually created the invoice — not on retries

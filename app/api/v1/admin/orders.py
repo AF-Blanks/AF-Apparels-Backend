@@ -636,6 +636,7 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
             courier_service=order.courier_service,
             shipped_at=order.shipped_at,
             qb_invoice_id=order.qb_invoice_id,
+            qb_payment_id=getattr(order, "qb_payment_id", None),
             created_at=order.created_at,
             updated_at=order.updated_at,
             items=[
@@ -680,20 +681,57 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.post("/orders/{order_id}/verify-ach", status_code=200)
 async def verify_ach_payment(order_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
-    """Mark an ACH order as payment verified (admin confirms bank transfer received)."""
+    """Confirm the bank transfer landed, and settle the order everywhere.
+
+    This is the moment an ACH order is actually paid, so it has to do everything
+    "mark as paid" does — record who settled it and when, and tell QuickBooks the
+    invoice has been covered. It used to write nothing but two columns, so the
+    payment never reached the books: the invoice sat open in QuickBooks while our
+    own screen showed it settled, and nothing anywhere said the two disagreed.
+    """
     from sqlalchemy import text as _text
     result = await db.execute(select(Order).where(Order.id == order_id))
     order = result.scalar_one_or_none()
     if not order:
         raise NotFoundError(f"Order {order_id} not found")
+
+    _timeline = list(order.timeline or [])
+    _timeline.append({
+        "status": "paid",
+        "message": f"ACH transfer verified — payment received (${float(order.total or 0):.2f})",
+        "created_by": "Admin",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
     try:
         await db.execute(
-            _text("UPDATE orders SET ach_verified=true, payment_status='paid' WHERE id=:oid"),
-            {"oid": str(order_id)},
+            _text("""
+                UPDATE orders
+                SET ach_verified   = true,
+                    payment_status = 'paid',
+                    marked_paid_at = COALESCE(marked_paid_at, now()),
+                    amount_paid    = COALESCE(total, 0),
+                    timeline       = CAST(:tl AS jsonb)
+                WHERE id = :oid
+            """),
+            {"tl": _json.dumps(_timeline), "oid": str(order_id)},
         )
         await db.commit()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # force_payment so the payment is recorded even on an order QuickBooks was
+    # invoiced under net terms. Recording it twice is not a risk: the task skips
+    # anything that already carries a qb_payment_id.
+    if order.qb_invoice_id:
+        from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+        sync_order_invoice_to_qb.delay(str(order_id), force_payment=True)
+        logger.info("verify_ach_payment: QB payment sync queued for order %s", order_id)
+    else:
+        logger.warning(
+            "verify_ach_payment: order %s has no QB invoice yet — payment will be"
+            " recorded when the invoice syncs", order_id,
+        )
+
     return {"status": "verified", "order_id": str(order_id)}
 
 
@@ -2124,9 +2162,28 @@ async def sync_order_to_quickbooks(order_id: UUID, db: AsyncSession = Depends(ge
     if not order:
         raise NotFoundError(f"Order {order_id} not found")
     if order.qb_invoice_id:
-        return {"message": "Already in QuickBooks", "order_id": str(order_id)}
+        # An invoice existing is not the same as the order being settled in
+        # QuickBooks. This used to report "already in QuickBooks" and stop there,
+        # which meant an order whose invoice went over but whose payment never
+        # did had no way back — the one repair path refused to run precisely
+        # when it was needed. Send the payment now if it is genuinely missing.
+        if order.payment_status == "paid" and not getattr(order, "qb_payment_id", None):
+            from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+            sync_order_invoice_to_qb.delay(str(order_id), force_payment=True)
+            logger.info("sync_order_to_quickbooks: missing payment queued for order %s", order_id)
+            return {
+                "message": "Recording the payment in QuickBooks — refresh in a moment.",
+                "order_id": str(order_id),
+                "action": "payment_queued",
+            }
+        return {
+            "message": "Already in QuickBooks",
+            "order_id": str(order_id),
+            "action": "none",
+        }
+
     _ensure_qb_invoice(order)
-    return {"message": "QuickBooks sync queued", "order_id": str(order_id)}
+    return {"message": "QuickBooks sync queued", "order_id": str(order_id), "action": "invoice_queued"}
 
 
 @router.post("/orders/{order_id}/reset-label", response_model=dict)

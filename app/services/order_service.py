@@ -280,10 +280,17 @@ class OrderService:
 
         # 8. Create Order record
         import json as _json
-        # Determine payment_status based on payment method:
-        # Net 30 = unpaid (pay later via invoice), all other methods (card/ach/bank) = paid immediately.
+        # What makes an order paid is money that has actually arrived. A card is
+        # captured during checkout, so it has. Net terms and a bank transfer have
+        # not — the invoice goes out and the money follows — so both start unpaid
+        # and settle when it lands: ACH the moment the transfer is verified.
+        #
+        # ACH used to be born "paid" while the money was still in the customer's
+        # bank. That put it past the only button that pushes a payment into
+        # QuickBooks (which appears solely on unpaid orders), so no ACH payment
+        # ever reached the books, and the dashboard counted takings nobody had.
         _pm = getattr(confirm, "payment_method", None) or ""
-        if _pm in ("net_30", "net_7"):
+        if _pm in ("net_30", "net_7", "ach"):
             _payment_status = "unpaid"
         else:
             _payment_status = "paid"
