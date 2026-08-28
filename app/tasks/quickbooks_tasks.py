@@ -1594,6 +1594,10 @@ def settle_pending_echecks(self):
                                     UPDATE orders
                                     SET payment_status   = 'paid',
                                         qb_echeck_status = :st,
+                                        -- The money arriving is the verification.
+                                        -- Left unset, the order read "paid" while
+                                        -- still offering to verify the payment.
+                                        ach_verified     = true,
                                         marked_paid_at   = COALESCE(marked_paid_at, now()),
                                         amount_paid      = COALESCE(total, 0)
                                     WHERE id = :oid

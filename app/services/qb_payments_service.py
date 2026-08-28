@@ -286,6 +286,19 @@ class QBPaymentsService:
             payload["bankAccount"]["accountType"] = alt
             return self._request("POST", "echecks", json=payload)
 
+    def refund_echeck(self, echeck_id: str, amount: float | None = None) -> dict[str, Any]:
+        """Send money back down a bank debit.
+
+        Only possible once the original has cleared the bank — about five
+        business days, because transactions batch daily and a refund cannot
+        chase money that has not landed yet. Before then QuickBooks refuses,
+        which is worth telling whoever asked rather than swallowing.
+        """
+        payload: dict[str, Any] = {}
+        if amount is not None:
+            payload["amount"] = f"{amount:.2f}"
+        return self._request("POST", f"echecks/{echeck_id}/refunds", json=payload)
+
     def get_echeck(self, echeck_id: str) -> dict[str, Any]:
         """Where an eCheck has got to. Used to find out whether the money arrived."""
         return self._request("GET", f"echecks/{echeck_id}")

@@ -789,6 +789,8 @@ async def add_order_item(
     if order.status in ("delivered", "cancelled", "refunded"):
         raise HTTPException(status_code=422, detail="Cannot add items to a completed or cancelled order")
 
+    _assert_no_debit_in_flight(order)
+
     variant_id_str = payload.get("variant_id")
     quantity = int(payload.get("quantity", 1))
     if not variant_id_str or quantity < 1:
@@ -888,6 +890,8 @@ async def add_order_items_bulk(
         raise HTTPException(status_code=404, detail="Order not found")
     if order.status in ("delivered", "cancelled", "refunded"):
         raise HTTPException(status_code=422, detail="Cannot add items to a completed or cancelled order")
+
+    _assert_no_debit_in_flight(order)
 
     created: list = []  # (item, product_name, variant, qty, unit_price, line_total)
     added_subtotal = 0.0
@@ -992,6 +996,7 @@ async def update_order_item(
         raise HTTPException(status_code=404, detail="Order not found")
     if order.status in ("delivered", "cancelled", "refunded"):
         raise HTTPException(status_code=422, detail="Cannot edit items on a completed or cancelled order")
+    _assert_no_debit_in_flight(order)
 
     if "unit_price" in payload and payload["unit_price"] is not None:
         try:
@@ -2484,6 +2489,33 @@ async def _resolve_warehouse_for_variant(variant_id: UUID, db: AsyncSession) -> 
 _FULFILLMENT_STATUSES = ("confirmed", "processing", "ready_for_pickup", "shipped", "delivered")
 
 
+_ECHECK_IN_FLIGHT = {"PENDING", "SUBMITTED", "IN_PROCESS", "PROCESSING", ""}
+
+
+def _assert_no_debit_in_flight(order: Order) -> None:
+    """Refuse to change what an order costs while its bank is being debited.
+
+    A bank debit is raised for the order's total and then takes days to clear.
+    Change the total in that window and the two no longer agree: the customer
+    is billed one amount and charged another, with nothing to reconcile them.
+    A card cannot drift this way — it is charged and done — so this is asked
+    only of orders whose money is still moving.
+    """
+    echeck_id = getattr(order, "qb_echeck_id", None)
+    if not echeck_id:
+        return
+    status = (getattr(order, "qb_echeck_status", None) or "").upper()
+    if status in _ECHECK_IN_FLIGHT:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A bank transfer for ${float(order.total or 0):.2f} is still clearing on "
+                "this order, so its total can't be changed yet. Wait until it shows as paid "
+                "(about 1-5 business days), then edit and the invoice will follow."
+            ),
+        )
+
+
 def _ensure_qb_invoice(order: Order, force_payment: bool = False) -> None:
     """Make sure an order entering fulfilment has an invoice in QuickBooks.
 
@@ -2716,16 +2748,36 @@ async def update_rma(
             if item.order_item
         )
 
-        # ── Refund via QuickBooks Payments (the actual card charge) ────────
+        # ── Refund through QuickBooks Payments ─────────────────────────────
+        # Whichever way the money came in is the way it goes back. A bank debit
+        # used to fall through to "not applicable" here, which was true while
+        # nothing was ever collected through it — now that money does move, a
+        # return with no refund would simply keep the customer's money.
         refund_error: str | None = None
         refund_failed = False
-        if order.payment_status == "paid" and order.qb_payment_charge_id:
+        _echeck_id = getattr(order, "qb_echeck_id", None)
+        _echeck_status = (getattr(order, "qb_echeck_status", None) or "").upper()
+        if order.payment_status == "paid" and (order.qb_payment_charge_id or _echeck_id):
             try:
                 from app.services.qb_payments_service import QBPaymentsService
                 qb_pay = QBPaymentsService()
-                refund_resp = await asyncio.to_thread(
-                    qb_pay.refund_charge, order.qb_payment_charge_id, refund_amount
-                )
+                if order.qb_payment_charge_id:
+                    refund_resp = await asyncio.to_thread(
+                        qb_pay.refund_charge, order.qb_payment_charge_id, refund_amount
+                    )
+                else:
+                    # A debit cannot be reversed before it has cleared — about
+                    # five business days. Saying so beats a bare failure that
+                    # reads as if something is broken.
+                    if _echeck_status not in ("SUCCEEDED", "SETTLED", "CAPTURED", "PAID"):
+                        raise RuntimeError(
+                            "The bank transfer hasn't cleared yet — it can't be refunded "
+                            "until it does, which takes about five business days. Try again "
+                            "once the order shows as paid."
+                        )
+                    refund_resp = await asyncio.to_thread(
+                        qb_pay.refund_echeck, _echeck_id, refund_amount
+                    )
                 rma.refund_status = "refunded"
                 rma.qb_refund_id = str(refund_resp.get("id") or "")
                 rma.refund_amount = refund_amount
@@ -2741,8 +2793,9 @@ async def update_rma(
                 refund_error = str(exc)
                 refund_failed = True
         else:
-            # Net-30/unpaid/manual-ACH order — no card charge exists to refund
-            # via QB Payments; admin handles any repayment outside this flow.
+            # Net terms, or unpaid — no money came through QuickBooks Payments,
+            # so there is nothing here to send back. Any repayment is arranged
+            # outside this flow.
             rma.refund_status = "not_applicable"
             rma.refund_amount = refund_amount
 
