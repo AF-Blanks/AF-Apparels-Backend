@@ -435,10 +435,25 @@ async def _confirm_checkout_inner(
             )
             _echeck_id = str(_echeck.get("id") or "")
             _echeck_status = str(_echeck.get("status") or "PENDING").upper()
-            _log.info(
-                "eCheck raised for order %s — id=%s status=%s amount=%.2f",
-                order.order_number, _echeck_id, _echeck_status, float(order.total),
-            )
+            from app.services.qb_payments_service import ECHECK_NOT_COLLECTED as _NC
+            if _echeck_status in _NC:
+                # QuickBooks answers 201 for a debit it has refused, so nothing
+                # here counts as an error and the body was never written down —
+                # which left the one place a decline reason could have been
+                # found empty. Whatever it sends is logged verbatim now, minus
+                # the account number, which is nobody's business in a log file.
+                _safe = {k: v for k, v in _echeck.items() if k != "bankAccount"}
+                _log.error(
+                    "eCheck NOT COLLECTED for order %s — id=%s status=%s amount=%.2f"
+                    " — QuickBooks said: %s",
+                    order.order_number, _echeck_id, _echeck_status, float(order.total),
+                    _safe,
+                )
+            else:
+                _log.info(
+                    "eCheck raised for order %s — id=%s status=%s amount=%.2f",
+                    order.order_number, _echeck_id, _echeck_status, float(order.total),
+                )
         except Exception as _ach_exc:
             # The order stands: the customer has placed it and nothing about it
             # is wrong. What failed is our attempt to collect, which somebody
@@ -480,7 +495,14 @@ async def _confirm_checkout_inner(
                             f"<strong>${float(order.total):.2f}</strong> was placed by bank transfer, "
                             f"but no money is being collected — QuickBooks reported "
                             f"<strong>{_echeck_status}</strong>.</p>"
-                            f"<p>The order is fine — nothing has been collected. "
+                            + (
+                                f"<p>QuickBooks transaction ID: <strong>{_echeck_id}</strong><br>"
+                                f"Look it up in Merchant Center &rarr; Activity &amp; Reports &rarr; "
+                                f"Transactions, or quote it to Intuit support — they can give the "
+                                f"decline reason, which QuickBooks does not return to us.</p>"
+                                if _echeck_id else ""
+                            )
+                            + f"<p>The order is fine — nothing has been collected. "
                             f"Please contact the customer to arrange payment.</p>"
                         ),
                     )

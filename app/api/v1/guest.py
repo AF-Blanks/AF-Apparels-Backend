@@ -445,10 +445,22 @@ async def guest_checkout(
             )
             _echeck_id = str(_echeck.get("id") or "")
             _echeck_status = str(_echeck.get("status") or "PENDING").upper()
-            logger.info(
-                "Guest eCheck raised for order %s — id=%s status=%s",
-                order.order_number, _echeck_id, _echeck_status,
-            )
+            from app.services.qb_payments_service import ECHECK_NOT_COLLECTED as _NC
+            if _echeck_status in _NC:
+                # See the wholesale checkout: a refused debit comes back as a
+                # successful call, so the body has to be written down here or
+                # the reason is lost for good.
+                _safe = {k: v for k, v in _echeck.items() if k != "bankAccount"}
+                logger.error(
+                    "Guest eCheck NOT COLLECTED for order %s — id=%s status=%s"
+                    " — QuickBooks said: %s",
+                    order.order_number, _echeck_id, _echeck_status, _safe,
+                )
+            else:
+                logger.info(
+                    "Guest eCheck raised for order %s — id=%s status=%s",
+                    order.order_number, _echeck_id, _echeck_status,
+                )
         except Exception as _ach_exc:
             _echeck_id, _echeck_status = "", "FAILED_TO_RAISE"
             logger.error(
@@ -477,7 +489,14 @@ async def guest_checkout(
                             f"<strong>${float(order.total):.2f}</strong> was placed by bank "
                             f"transfer, but no money is being collected — QuickBooks reported "
                             f"<strong>{_echeck_status}</strong>.</p>"
-                            f"<p>The order is fine. Please contact the customer to arrange payment.</p>"
+                            + (
+                                f"<p>QuickBooks transaction ID: <strong>{_echeck_id}</strong><br>"
+                                f"Look it up in Merchant Center &rarr; Activity &amp; Reports &rarr; "
+                                f"Transactions, or quote it to Intuit support — they can give the "
+                                f"decline reason, which QuickBooks does not return to us.</p>"
+                                if _echeck_id else ""
+                            )
+                            + f"<p>The order is fine. Please contact the customer to arrange payment.</p>"
                         ),
                     )
             except Exception as _mail_exc:
