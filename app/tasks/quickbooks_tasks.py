@@ -1593,6 +1593,13 @@ def settle_pending_echecks(self):
                 try:
                     echeck = await asyncio.to_thread(qb_pay.get_echeck, order.qb_echeck_id)
                     status = str(echeck.get("status", "")).upper()
+                    # Everything QuickBooks returned, kept for when the answer is
+                    # bad. The status word alone was all that was written down,
+                    # so whatever else the response carried — a code, a reason —
+                    # was read and thrown away on the one call that would have
+                    # explained the decline. Minus the bank account: that does
+                    # not belong in a log.
+                    _body = {k: v for k, v in echeck.items() if k != "bankAccount"}
                 except Exception as exc:
                     logger.warning(
                         "settle_pending_echecks: could not read eCheck %s for order %s: %s",
@@ -1602,6 +1609,10 @@ def settle_pending_echecks(self):
                     continue
 
                 _already_paid = order.payment_status == "paid"
+                # Whether this is news. A returned debit is re-read on every run
+                # for sixty days, and an alert repeated twice a day stops being
+                # an alert — it becomes something people filter.
+                _already_told = (getattr(order, "qb_echeck_status", None) or "").upper() == status
 
                 if status in _ECHECK_SETTLED_STATUSES:
                     if _already_paid:
@@ -1653,11 +1664,15 @@ def settle_pending_echecks(self):
                     # says paid, and it is not for a scheduled job to decide it
                     # is not — the goods may be gone and someone has to choose
                     # what happens next. It is told loudly instead.
-                    returned += 1
                     logger.error(
                         "settle_pending_echecks: order %s was PAID but the debit came"
-                        " back (%s)", order.order_number, status,
+                        " back (%s) — QuickBooks said: %s",
+                        order.order_number, status, _body,
                     )
+                    if _already_told:
+                        await asyncio.sleep(_ECHECK_PAUSE_BETWEEN_CALLS_SEC)
+                        continue
+                    returned += 1
                     async with _TaskSession() as sess:
                         try:
                             await sess.execute(
@@ -1688,10 +1703,14 @@ def settle_pending_echecks(self):
                             )
 
                 elif status in _ECHECK_RETURNED_STATUSES:
-                    returned += 1
                     logger.warning(
-                        "settle_pending_echecks: order %s RETURNED (%s)", order.order_number, status
+                        "settle_pending_echecks: order %s RETURNED (%s) — QuickBooks said: %s",
+                        order.order_number, status, _body,
                     )
+                    if _already_told:
+                        await asyncio.sleep(_ECHECK_PAUSE_BETWEEN_CALLS_SEC)
+                        continue
+                    returned += 1
                     async with _TaskSession() as sess:
                         try:
                             await sess.execute(
@@ -1728,7 +1747,8 @@ def settle_pending_echecks(self):
                         logger.warning(
                             "settle_pending_echecks: UNRECOGNISED status %r on order %s —"
                             " it belongs in _ECHECK_SETTLED_STATUSES or"
-                            " _ECHECK_RETURNED_STATUSES", status, order.order_number,
+                            " _ECHECK_RETURNED_STATUSES — QuickBooks said: %s",
+                            status, order.order_number, _body,
                         )
 
                     # Overdue is worth an email whatever the reason: an unknown
