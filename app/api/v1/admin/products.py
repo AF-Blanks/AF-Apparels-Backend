@@ -946,6 +946,19 @@ async def _process_and_upload_image(
     content: bytes, product_id: UUID, filename: str
 ) -> dict:
     """Resize to 150/400/800px + WebP. Uploads to S3 if configured, else saves locally."""
+    import re as _re
+
+    def _safe_key_part(name: str) -> str:
+        """A file name that can sit in a URL without being escaped.
+
+        Letters, digits, dot, dash and underscore survive; everything else —
+        spaces, commas, brackets — becomes a dash. Runs collapse, so
+        "ChatGPT Image Aug 31, 2026, 07_03_11 PM" reads as one name rather than
+        a row of dashes.
+        """
+        cleaned = _re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "").strip())
+        return cleaned.strip("-") or "image"
+
     from PIL import Image as PILImage
     import io as _io
     import os
@@ -958,7 +971,11 @@ async def _process_and_upload_image(
     sizes = {"thumbnail": 150, "medium": 400, "large": 800}
     urls: dict[str, str] = {}
 
-    base_name = filename.rsplit(".", 1)[0]
+    # The uploaded name becomes part of a URL, so anything that has to be
+    # escaped to survive there does not belong in it. A screenshot arrives
+    # called "Screenshot 2026-08-28 at 10.26.22 AM.png" and its spaces used to
+    # go straight into the key.
+    base_name = _safe_key_part(filename.rsplit(".", 1)[0])
     base_key = f"products/{product_id}/{base_name}"
 
     if use_s3:

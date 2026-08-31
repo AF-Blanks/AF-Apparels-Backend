@@ -3,7 +3,7 @@ from uuid import UUID
 from decimal import Decimal
 from datetime import date, datetime
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +53,37 @@ class ProductImageOut(BaseModel):
     position: int
 
     model_config = {"from_attributes": True}
+
+    @field_validator(
+        "url_thumbnail", "url_medium", "url_large",
+        "url_thumbnail_webp", "url_medium_webp", "url_large_webp",
+        mode="after",
+    )
+    @classmethod
+    def _encode_url(cls, v: str | None) -> str | None:
+        """Percent-encode a stored URL so a browser can actually fetch it.
+
+        Images uploaded straight from a phone or a chat window keep their given
+        name — "Screenshot 2026-08-28 at 10.26.22 AM.png" — and the spaces went
+        into the S3 key and out again in the src attribute, where they are not
+        valid. The picture was there all along; the address for it was not.
+
+        Encoding on the way out fixes every image already stored without
+        touching S3 or the database. Already-encoded URLs are left alone, so
+        running this over a %20 does not turn it into %2520.
+        """
+        if not v:
+            return v
+        from urllib.parse import quote, urlsplit, urlunsplit
+
+        parts = urlsplit(v)
+        if not parts.scheme:          # a relative /media/... path
+            return quote(v, safe="/%:")
+        return urlunsplit((
+            parts.scheme, parts.netloc,
+            quote(parts.path, safe="/%"),
+            parts.query, parts.fragment,
+        ))
 
 
 # ---------------------------------------------------------------------------
