@@ -532,8 +532,21 @@ class EmailService:
                 out.append(addr)
         return out
 
-    def send_admin_new_order_alert(self, order: "Order") -> bool:  # type: ignore[name-defined]
+    def send_admin_new_order_alert(  # type: ignore[name-defined]
+        self,
+        order: "Order",
+        customer_name: str | None = None,
+        contact_name: str | None = None,
+        contact_email: str | None = None,
+        contact_phone: str | None = None,
+    ) -> bool:
         """Notify the business inboxes of a new order placement.
+
+        Who the order is from has to be passed in. This runs synchronously from
+        an async request, so reaching for order.company here would lazy-load a
+        relationship on a session that cannot serve one — which is why a
+        wholesale alert used to read "Wholesale order" and name nobody at all,
+        leaving whoever read it to open the admin panel to find out whose it was.
 
         Sends to every address in ORDER_ALERT_EMAILS (plus the legacy single
         ADMIN_NOTIFICATION_EMAIL, if set), deduplicated. The customer still
@@ -545,10 +558,38 @@ class EmailService:
             return False
         order_url = f"{_s.FRONTEND_URL}/admin/orders/{order.id}"
         is_guest = getattr(order, "is_guest_order", False)
-        customer = (
-            f"{order.guest_name} ({order.guest_email})"
-            if is_guest
-            else f"Wholesale order"
+
+        # Whatever the caller knew, then the order's own guest fields, then an
+        # honest blank — never a placeholder that reads like an answer.
+        customer = ((customer_name or "").strip()
+                    or ((order.guest_name or "").strip() if is_guest else "")
+                    or "—")
+        _contact_bits = [
+            (contact_name or "").strip()
+            or ((order.guest_name or "").strip() if is_guest else ""),
+            (contact_email or "").strip()
+            or ((order.guest_email or "").strip() if is_guest else ""),
+        ]
+        contact = " · ".join(b for b in _contact_bits if b)
+        phone = ((contact_phone or "").strip()
+                 or ((getattr(order, "guest_phone", "") or "").strip() if is_guest else ""))
+
+        def _row(label: str, value: str, strong: bool = False) -> str:
+            """A table row, or nothing at all when there is no value to show."""
+            if not value:
+                return ""
+            weight = "font-weight:700;" if strong else ""
+            return (
+                f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">{label}</td>'
+                f'<td style="font-size:13px;{weight}color:#374151;text-align:right">{value}</td></tr>'
+            )
+
+        _items = list(getattr(order, "items", None) or [])
+        _units = sum(int(getattr(i, "quantity", 0) or 0) for i in _items)
+        _items_summary = (
+            f"{len(_items)} line{'' if len(_items) == 1 else 's'} · "
+            f"{_units} pc{'' if _units == 1 else 's'}"
+            if _items else ""
         )
         content_html = (
             f'<h2 style="color:#1B3A5C;font-size:20px;font-weight:800;margin:0 0 8px">'
@@ -558,21 +599,28 @@ class EmailService:
             f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Order</td>'
             f'<td style="font-size:13px;font-weight:700;color:#1B3A5C;text-align:right">'
             f'{order.order_number}</td></tr>'
-            f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Customer</td>'
-            f'<td style="font-size:13px;color:#374151;text-align:right">{customer}</td></tr>'
-            f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Total</td>'
+            + _row("Customer", customer, strong=True)
+            + _row("Contact", contact)
+            + _row("Phone", phone)
+            + _row("PO Number", (getattr(order, "po_number", "") or "").strip())
+            + _row("Items", _items_summary)
+            + f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Total</td>'
             f'<td style="font-size:16px;font-weight:800;color:#1B3A5C;text-align:right">'
             f'${float(order.total):.2f}</td></tr>'
-            f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Payment</td>'
-            f'<td style="font-size:13px;color:#374151;text-align:right">'
-            f'{getattr(order, "payment_method", "card").upper()}</td></tr>'
-            f'</table></div>'
+            + _row("Payment", str(getattr(order, "payment_method", None) or "card").upper())
+            + f'</table></div>'
             f'<p style="margin:0"><a href="{order_url}" '
             f'style="background:#1B3A5C;color:#fff;padding:12px 24px;border-radius:6px;'
             f'font-weight:700;text-decoration:none;font-size:14px;display:inline-block">'
             f'View Order →</a></p>'
         )
-        _subject = f"New Order {order.order_number} — ${float(order.total):.2f} | AF Apparels"
+        # The name belongs in the subject line: an inbox full of "New Order
+        # 1063" says nothing about which one needs looking at first.
+        _subject = (
+            f"New Order {order.order_number}"
+            + (f" — {customer}" if customer != "—" else "")
+            + f" — ${float(order.total):.2f} | AF Apparels"
+        )
         _body = self._base_template(content_html)
         sent_any = False
         for _to in recipients:

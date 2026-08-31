@@ -554,7 +554,9 @@ async def _confirm_checkout_inner(
         from app.services.email_service import EmailService as _EmailSvc
 
         _order_full = (await db.execute(
-            _sel(_Order).options(_sil(_Order.items)).where(_Order.id == order.id)
+            _sel(_Order)
+            .options(_sil(_Order.items), _sil(_Order.company))
+            .where(_Order.id == order.id)
         )).scalar_one_or_none()
 
         if _order_full and user_id:
@@ -567,7 +569,16 @@ async def _confirm_checkout_inner(
                 from app.core.config import settings as _cfg_email
                 if _cfg_email.SEND_ORDER_CONFIRMATION_EMAIL:
                     _email_svc.send_order_confirmation(_order_full, _user.email, restock_dates=await _restock_dates_for_order(_order_full, db))
-                _email_svc.send_admin_new_order_alert(_order_full)
+                # Handed over rather than looked up inside: the alert is sent
+                # synchronously and cannot load a relationship of its own.
+                _co = getattr(_order_full, "company", None)
+                _email_svc.send_admin_new_order_alert(
+                    _order_full,
+                    customer_name=(getattr(_co, "name", None) or "").strip() or None,
+                    contact_name=f"{_user.first_name or ''} {_user.last_name or ''}".strip() or None,
+                    contact_email=_user.email,
+                    contact_phone=(getattr(_co, "phone", None) or getattr(_user, "phone", None)),
+                )
     except Exception as _exc:
         _log.warning("Order confirmation email failed: %s", _exc)
 
