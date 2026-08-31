@@ -1650,16 +1650,22 @@ async def commission_report(
     """
     start, end = _date_range(period, date_from, date_to)
 
-    from app.models.pricing import PricingTier
+    from sqlalchemy import or_ as _or
 
-    # Which tiers these are is resolved first, by name rather than by id, so a
-    # tier renamed or recreated still earns.
+    from app.models.discount_group import DiscountGroup
+
+    # A customer's tier is a discount group reached through the tags on their
+    # company record — not the pricing_tiers table, which is a separate and
+    # largely unused idea. Resolved by name so a group renamed or recreated
+    # still earns.
     _wanted = {_tier_key(t) for t in COMMISSION_TIERS}
-    _tier_ids = [
-        tid for tid, tname in (await db.execute(select(PricingTier.id, PricingTier.name))).all()
-        if _tier_key(tname) in _wanted
+    _tags = [
+        tag for tag in (await db.execute(
+            select(DiscountGroup.customer_tag).where(DiscountGroup.status == "enabled")
+        )).scalars().all()
+        if _tier_key(tag) in _wanted
     ]
-    if not _tier_ids:
+    if not _tags:
         return {
             "period": {"from": start.date().isoformat(), "to": end.date().isoformat()},
             "rules": {
@@ -1674,9 +1680,9 @@ async def commission_report(
             # Said out loud rather than shown as an empty table: no matching tier
             # is a setup problem, not a quiet month.
             "warning": (
-                f"No pricing tier is named {' or '.join(COMMISSION_TIERS)}. "
-                "Check the tier names under Pricing Tiers — nothing can earn "
-                "commission until one of them matches."
+                f"No enabled discount group is named {' or '.join(COMMISSION_TIERS)}. "
+                "Check the names under Customers → Discount Groups — nothing can "
+                "earn commission until one of them matches."
             ),
         }
 
@@ -1684,7 +1690,7 @@ async def commission_report(
         select(
             Company.id.label("company_id"),
             Company.name.label("company_name"),
-            PricingTier.name.label("tier_name"),
+            Company.tags.label("company_tags"),
             Order.id.label("order_id"),
             Order.order_number,
             Order.created_at,
@@ -1696,11 +1702,11 @@ async def commission_report(
         .select_from(OrderItem)
         .join(Order, Order.id == OrderItem.order_id)
         .join(Company, Company.id == Order.company_id)
-        .join(PricingTier, PricingTier.id == Company.pricing_tier_id)
         .outerjoin(ProductVariant, ProductVariant.id == OrderItem.variant_id)
         .outerjoin(Product, Product.id == ProductVariant.product_id)
         .where(
-            Company.pricing_tier_id.in_(_tier_ids),
+            # JSONB containment: the company carries this tier as one of its tags.
+            _or(*[Company.tags.contains([t]) for t in _tags]),
             Order.payment_status == "paid",
             Order.status.notin_(["cancelled", "refunded"]),
             Order.created_at.between(start, end),
@@ -1716,7 +1722,10 @@ async def commission_report(
         cust = customers.setdefault(cid, {
             "company_id": cid,
             "company_name": r["company_name"],
-            "tier": r["tier_name"],
+            "tier": next(
+                (t for t in (r["company_tags"] or []) if _tier_key(t) in _wanted),
+                "—",
+            ),
             "special_base": 0.0, "special_commission": 0.0,
             "other_base": 0.0, "other_commission": 0.0,
             "total_commission": 0.0,
