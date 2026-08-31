@@ -1588,3 +1588,204 @@ async def profit_loss_report(
         },
         "products": products,
     }
+
+
+# ── Commission owed to tiered customers ───────────────────────────────────────
+
+#: Which tiers earn commission, and at what rate. Held here rather than spread
+#: through the query so the arrangement can be read — and changed — in one place
+#: when the client renegotiates it.
+COMMISSION_TIERS = ("Tier 4", "Tier 5")
+
+
+def _tier_key(name: str | None) -> str:
+    """A tier name reduced to what it actually says.
+
+    "Tier 4", "TIER 4", "tier-4" and "Tier4" are one tier written four ways, and
+    which of them is in the database is not worth a report quietly showing
+    nothing. Case, spaces and dashes are dropped before comparing.
+    """
+    return "".join(ch for ch in (name or "").upper() if ch.isalnum())
+#: Codes 1000 and 1001 are the value tee, sold at a thinner margin, so they earn
+#: less. Everything else earns the standard rate.
+COMMISSION_SPECIAL_CODES = ("1000", "1001")
+COMMISSION_SPECIAL_PERCENT = 10.0
+COMMISSION_DEFAULT_PERCENT = 18.0
+
+
+def _product_code_of(product_code: str | None, product_name: str | None) -> str:
+    """The catalogue number for a sold line.
+
+    Normally read straight off the product. An order keeps its own copy of the
+    name — "1000 Blended Unisex Tee" — which still carries the number at the
+    front, and that is what answers for a line whose product has since been
+    deleted or renamed. Guessing wrong here would put a line in the wrong
+    commission band, so it falls back to the name only when there is nothing
+    better.
+    """
+    code = (product_code or "").strip()
+    if code:
+        return code
+    lead = (product_name or "").strip().split(" ", 1)[0]
+    return lead if lead.isdigit() else ""
+
+
+@router.get("/reports/commission")
+async def commission_report(
+    date_from: date | None = Query(None, description="Start date (inclusive)"),
+    date_to: date | None = Query(None, description="End date (inclusive)"),
+    period: str = Query("month", description="Rolling period, used when no dates are given"),
+    _: None = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """What each tiered customer has earned in commission, and on what.
+
+    Commission is worked out on what the customer was actually billed for the
+    goods — the line price on their order — because those are the same figures
+    as the agreed rate card. Shipping, tax and the convenience fee are not goods
+    and earn nothing.
+
+    Only settled orders count. An order that has not been paid for has not
+    earned anyone anything yet, and a refunded one has un-earned it.
+    """
+    start, end = _date_range(period, date_from, date_to)
+
+    from app.models.pricing import PricingTier
+
+    # Which tiers these are is resolved first, by name rather than by id, so a
+    # tier renamed or recreated still earns.
+    _wanted = {_tier_key(t) for t in COMMISSION_TIERS}
+    _tier_ids = [
+        tid for tid, tname in (await db.execute(select(PricingTier.id, PricingTier.name))).all()
+        if _tier_key(tname) in _wanted
+    ]
+    if not _tier_ids:
+        return {
+            "period": {"from": start.date().isoformat(), "to": end.date().isoformat()},
+            "rules": {
+                "tiers": list(COMMISSION_TIERS),
+                "special_codes": list(COMMISSION_SPECIAL_CODES),
+                "special_percent": COMMISSION_SPECIAL_PERCENT,
+                "default_percent": COMMISSION_DEFAULT_PERCENT,
+            },
+            "totals": {"customers": 0, "special_base": 0.0, "special_commission": 0.0,
+                       "other_base": 0.0, "other_commission": 0.0, "total_commission": 0.0},
+            "customers": [],
+            # Said out loud rather than shown as an empty table: no matching tier
+            # is a setup problem, not a quiet month.
+            "warning": (
+                f"No pricing tier is named {' or '.join(COMMISSION_TIERS)}. "
+                "Check the tier names under Pricing Tiers — nothing can earn "
+                "commission until one of them matches."
+            ),
+        }
+
+    rows = (await db.execute(
+        select(
+            Company.id.label("company_id"),
+            Company.name.label("company_name"),
+            PricingTier.name.label("tier_name"),
+            Order.id.label("order_id"),
+            Order.order_number,
+            Order.created_at,
+            Product.product_code,
+            OrderItem.product_name,
+            OrderItem.quantity,
+            OrderItem.line_total,
+        )
+        .select_from(OrderItem)
+        .join(Order, Order.id == OrderItem.order_id)
+        .join(Company, Company.id == Order.company_id)
+        .join(PricingTier, PricingTier.id == Company.pricing_tier_id)
+        .outerjoin(ProductVariant, ProductVariant.id == OrderItem.variant_id)
+        .outerjoin(Product, Product.id == ProductVariant.product_id)
+        .where(
+            Company.pricing_tier_id.in_(_tier_ids),
+            Order.payment_status == "paid",
+            Order.status.notin_(["cancelled", "refunded"]),
+            Order.created_at.between(start, end),
+        )
+        .order_by(Company.name.asc(), Order.created_at.asc())
+    )).mappings().all()
+
+    # Built up per customer, and per order inside that, so the total on screen
+    # can be opened up and checked against the orders it came from.
+    customers: dict = {}
+    for r in rows:
+        cid = str(r["company_id"])
+        cust = customers.setdefault(cid, {
+            "company_id": cid,
+            "company_name": r["company_name"],
+            "tier": r["tier_name"],
+            "special_base": 0.0, "special_commission": 0.0,
+            "other_base": 0.0, "other_commission": 0.0,
+            "total_commission": 0.0,
+            "_orders": {},
+        })
+
+        code = _product_code_of(r["product_code"], r["product_name"])
+        is_special = code in COMMISSION_SPECIAL_CODES
+        base = float(r["line_total"] or 0)
+        rate = COMMISSION_SPECIAL_PERCENT if is_special else COMMISSION_DEFAULT_PERCENT
+        earned = round(base * rate / 100, 2)
+
+        if is_special:
+            cust["special_base"] += base
+            cust["special_commission"] += earned
+        else:
+            cust["other_base"] += base
+            cust["other_commission"] += earned
+        cust["total_commission"] += earned
+
+        o = cust["_orders"].setdefault(str(r["order_id"]), {
+            "order_id": str(r["order_id"]),
+            "order_number": r["order_number"],
+            "date": r["created_at"].isoformat() if r["created_at"] else None,
+            "special_base": 0.0, "special_commission": 0.0,
+            "other_base": 0.0, "other_commission": 0.0,
+            "total_commission": 0.0,
+            "units": 0,
+        })
+        o["units"] += int(r["quantity"] or 0)
+        if is_special:
+            o["special_base"] += base
+            o["special_commission"] += earned
+        else:
+            o["other_base"] += base
+            o["other_commission"] += earned
+        o["total_commission"] += earned
+
+    out = []
+    for c in customers.values():
+        orders = sorted(c.pop("_orders").values(), key=lambda o: o["date"] or "")
+        for o in orders:
+            for k in ("special_base", "special_commission", "other_base",
+                      "other_commission", "total_commission"):
+                o[k] = round(o[k], 2)
+        for k in ("special_base", "special_commission", "other_base",
+                  "other_commission", "total_commission"):
+            c[k] = round(c[k], 2)
+        c["order_count"] = len(orders)
+        c["orders"] = orders
+        out.append(c)
+
+    out.sort(key=lambda c: c["total_commission"], reverse=True)
+
+    return {
+        "period": {"from": start.date().isoformat(), "to": end.date().isoformat()},
+        "rules": {
+            "tiers": list(COMMISSION_TIERS),
+            "special_codes": list(COMMISSION_SPECIAL_CODES),
+            "special_percent": COMMISSION_SPECIAL_PERCENT,
+            "default_percent": COMMISSION_DEFAULT_PERCENT,
+        },
+        "totals": {
+            "customers": len(out),
+            "special_base": round(sum(c["special_base"] for c in out), 2),
+            "special_commission": round(sum(c["special_commission"] for c in out), 2),
+            "other_base": round(sum(c["other_base"] for c in out), 2),
+            "other_commission": round(sum(c["other_commission"] for c in out), 2),
+            "total_commission": round(sum(c["total_commission"] for c in out), 2),
+        },
+        "customers": out,
+    }
