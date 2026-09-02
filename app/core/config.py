@@ -114,11 +114,17 @@ class Settings(BaseSettings):
     QB_SHIPPING_ITEM_ID: str = ""       # QB item ID for Shipping & Handling line
     QB_CONVENIENCE_FEE_ITEM_ID: str = ""  # QB item ID for 3% Credit Card Convenience Fee
     # QB item ID for the "Sales Tax Collected" service item, mapped to the
-    # Sales Tax Payable *liability* account (id 30). Tax charged at checkout
+    # Sales Tax Payable *liability* account. Tax charged at checkout
     # (ZipTax/manual) is posted here as an explicit line so QB's Automated Sales
     # Tax never recalculates and the invoice total always equals the customer's
-    # charge. Default is this company's live item; override via env if it changes.
-    QB_TAX_ITEM_ID: str = "584"
+    # charge.
+    #
+    # No default. This used to carry 584, the live item in the company the books
+    # were kept in at the time — a number that means something entirely
+    # different in any other company, and would have quietly posted sales tax
+    # against whatever item happened to hold it there. Set it explicitly, per
+    # company, from Settings → QuickBooks.
+    QB_TAX_ITEM_ID: str = ""
     # Every sold line is billed against this one item. QuickBooks will not take
     # an invoice line without an item, but it does not need one per product to
     # keep books — the product is named in the line description, and the

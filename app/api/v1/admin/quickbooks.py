@@ -276,6 +276,55 @@ async def quickbooks_callback(
     return RedirectResponse(url=f"{frontend_url}/admin/settings/quickbooks?connected=true")
 
 
+@router.get("/quickbooks/items")
+async def quickbooks_items(
+    _: None = Depends(require_admin),
+):
+    """List the items in the connected QuickBooks company, with their ids.
+
+    Invoices bill against item ids — one for merchandise, one for shipping, one
+    for sales tax, one for the card convenience fee — and those ids are set as
+    environment variables. An id means nothing outside the company that issued
+    it, so after moving companies the four have to be found again. Reading them
+    off this list beats hunting through QuickBooks for four URLs.
+    """
+    import asyncio as _asyncio
+
+    from app.services.quickbooks_service import QuickBooksService
+
+    try:
+        svc = await QuickBooksService().initialize()
+        raw = await _asyncio.to_thread(
+            svc.query, "SELECT * FROM Item MAXRESULTS 1000"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not list QuickBooks items: %s", exc)
+        raise HTTPException(
+            status_code=502, detail=f"Could not read items from QuickBooks: {exc}"
+        ) from exc
+
+    items = (raw or {}).get("QueryResponse", {}).get("Item", [])
+    return {
+        "items": sorted(
+            (
+                {
+                    "id": it.get("Id"),
+                    "name": it.get("Name"),
+                    "type": it.get("Type"),
+                    "active": it.get("Active", True),
+                    "account": (
+                        (it.get("IncomeAccountRef") or {}).get("name")
+                        or (it.get("AssetAccountRef") or {}).get("name")
+                        or (it.get("ExpenseAccountRef") or {}).get("name")
+                    ),
+                }
+                for it in items
+            ),
+            key=lambda i: (i["name"] or "").lower(),
+        )
+    }
+
+
 @router.post("/quickbooks/adopt-company", response_model=dict)
 async def adopt_quickbooks_company(
     payload: dict,
