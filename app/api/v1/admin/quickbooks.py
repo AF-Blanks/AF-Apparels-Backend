@@ -69,13 +69,21 @@ async def quickbooks_status(
     from sqlalchemy import text as _t
 
     _realms = dict((await db.execute(_t(
-        "SELECT key, value FROM app_settings WHERE key IN ('qb_realm_id', 'qb_ids_realm')"
+        "SELECT key, value FROM app_settings WHERE key IN "
+        "('qb_realm_id', 'qb_ids_realm', 'qb_company_name', 'qb_company_name_realm')"
     ))).all())
     connected_realm = _realms.get("qb_realm_id")
     ids_realm = _realms.get("qb_ids_realm")
 
-    company_name: str | None = None
-    if connected_realm:
+    # The name, remembered against the realm it belongs to. A company does not
+    # rename itself between two page loads, and this page is refreshed plenty —
+    # asking QuickBooks every time spent a request from a limit shared with
+    # every sync, for an answer that was already known.
+    company_name = _realms.get("qb_company_name")
+    if _realms.get("qb_company_name_realm") != connected_realm:
+        company_name = None
+
+    if connected_realm and not company_name:
         # The realm id is a long number that means nothing to a person reading it.
         # Ask QuickBooks what the company is actually called. Failing is fine —
         # the id is still shown, and this must never take the page down.
@@ -96,6 +104,13 @@ async def quickbooks_status(
                     _rows[0].get("CompanyName")
                     or _rows[0].get("LegalName")
                 )
+            if company_name:
+                await db.execute(_t(
+                    "INSERT INTO app_settings (key, value) VALUES "
+                    "('qb_company_name', :n), ('qb_company_name_realm', :r) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+                ), {"n": company_name, "r": connected_realm})
+                await db.commit()
         except Exception as exc:  # noqa: BLE001 — informational only
             logger.warning("Could not read the QuickBooks company name: %s", exc)
 
