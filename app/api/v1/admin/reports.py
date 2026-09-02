@@ -752,11 +752,19 @@ async def customer_purchase_history(
 
 @router.get("/reports/{report_type}/export-csv")
 async def export_report_csv(
-    report_type: Literal["sales", "inventory", "customers"],
+    report_type: Literal["sales", "inventory", "customers", "commission"],
     period: str = Query("month"),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     _: None = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
+    # Commission is built elsewhere — it is per order inside per customer, and
+    # takes an explicit date range like the report it mirrors. Handed off here
+    # rather than given a route of its own, which this path would have shadowed.
+    if report_type == "commission":
+        return await _commission_csv(db, date_from, date_to, period)
+
     output = io.StringIO()
     writer = csv.writer(output)
     start, end = _date_range(period)
@@ -1676,6 +1684,71 @@ def _product_code_of(product_code: str | None, product_name: str | None) -> str:
     return lead if lead.isdigit() else ""
 
 
+async def _commission_csv(db: AsyncSession, date_from, date_to, period: str):
+    """The commission report as a spreadsheet, one row per order.
+
+    Per order rather than per customer: the customer totals on screen are a sum,
+    and a sum is not what gets checked against anything. A row per order is what
+    someone reconciles, sorts and hands to whoever is being paid.
+    """
+    data = await commission_report(
+        date_from=date_from, date_to=date_to, period=period, _=None, db=db
+    )
+
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Customer", "Tier", "Order #", "Date", "Paid",
+        f"{'/'.join(COMMISSION_SPECIAL_CODES)} sales",
+        f"{'/'.join(COMMISSION_SPECIAL_CODES)} commission ({COMMISSION_SPECIAL_PERCENT:g}%)",
+        "Other sales",
+        f"Other commission ({COMMISSION_DEFAULT_PERCENT:g}%)",
+        "Total commission",
+    ])
+    for c in data["customers"]:
+        for o in c["orders"]:
+            writer.writerow([
+                c["company_name"], c["tier"], o["order_number"],
+                (o["date"] or "")[:10],
+                "yes" if o.get("paid") else "no",
+                f"{o['special_base']:.2f}", f"{o['special_commission']:.2f}",
+                f"{o['other_base']:.2f}", f"{o['other_commission']:.2f}",
+                f"{o['total_commission']:.2f}",
+            ])
+        # A per-customer line after its orders, so the file reads the way the
+        # screen does and a spreadsheet total can be checked against it.
+        writer.writerow([
+            c["company_name"], c["tier"], "— customer total —", "", "",
+            f"{c['special_base']:.2f}", f"{c['special_commission']:.2f}",
+            f"{c['other_base']:.2f}", f"{c['other_commission']:.2f}",
+            f"{c['total_commission']:.2f}",
+        ])
+        writer.writerow([])
+
+    t = data["totals"]
+    writer.writerow([
+        "ALL CUSTOMERS", "", "", "", "",
+        f"{t['special_base']:.2f}", f"{t['special_commission']:.2f}",
+        f"{t['other_base']:.2f}", f"{t['other_commission']:.2f}",
+        f"{t['total_commission']:.2f}",
+    ])
+    if t.get("unpaid_commission"):
+        writer.writerow([
+            "of which on orders not yet paid", "", "", "", "",
+            "", "", "", "", f"{t['unpaid_commission']:.2f}",
+        ])
+
+    output.seek(0)
+    p = data["period"]
+    filename = f"commission-{p['from']}-to-{p['to']}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/reports/commission")
 async def commission_report(
     date_from: date | None = Query(None, description="Start date (inclusive)"),
@@ -1732,6 +1805,39 @@ async def commission_report(
             ),
         }
 
+    # Which companies actually carry one of those tiers.
+    #
+    # Resolved here rather than with JSONB containment in the query below. The
+    # tier names coming out of Discount Groups are compared loosely — case,
+    # spaces and dashes ignored — but containment is exact, so a company tagged
+    # "tier 4" or "Tier 4 " matched nothing and its owner simply did not appear
+    # in the report. No error, no empty row: absent.
+    _tagged = (await db.execute(
+        select(Company.id, Company.tags).where(Company.tags.isnot(None))
+    )).all()
+    _company_ids = [
+        cid for cid, tags in _tagged
+        if any(_tier_key(t) in _wanted for t in (tags or []) if isinstance(t, str))
+    ]
+    if not _company_ids:
+        return {
+            "period": {"from": start.date().isoformat(), "to": end.date().isoformat()},
+            "rules": {
+                "tiers": list(COMMISSION_TIERS),
+                "special_codes": list(COMMISSION_SPECIAL_CODES),
+                "special_percent": COMMISSION_SPECIAL_PERCENT,
+                "default_percent": COMMISSION_DEFAULT_PERCENT,
+            },
+            "totals": {"customers": 0, "special_base": 0.0, "special_commission": 0.0,
+                       "other_base": 0.0, "other_commission": 0.0, "total_commission": 0.0,
+                       "unpaid_commission": 0.0},
+            "customers": [],
+            "warning": (
+                f"No customer is tagged {' or '.join(COMMISSION_TIERS)}. The groups "
+                "exist, but no company is in them — check Customers → Discount Groups."
+            ),
+        }
+
     rows = (await db.execute(
         select(
             Company.id.label("company_id"),
@@ -1744,6 +1850,7 @@ async def commission_report(
             OrderItem.product_name,
             OrderItem.quantity,
             OrderItem.line_total,
+            Order.payment_status,
         )
         .select_from(OrderItem)
         .join(Order, Order.id == OrderItem.order_id)
@@ -1751,9 +1858,12 @@ async def commission_report(
         .outerjoin(ProductVariant, ProductVariant.id == OrderItem.variant_id)
         .outerjoin(Product, Product.id == ProductVariant.product_id)
         .where(
-            # JSONB containment: the company carries this tier as one of its tags.
-            _or(*[Company.tags.contains([t]) for t in _tags]),
-            Order.payment_status == "paid",
+            Company.id.in_(_company_ids),
+            # Orders on terms — Net 30, Net 7, a bank transfer still clearing —
+            # sit unpaid for weeks, and filtering them out made the customers who
+            # buy that way disappear from their own commission report. They are
+            # counted, and each one says whether the money has landed, so a total
+            # can still be split into earned and not-yet-collected.
             Order.status.notin_(["cancelled", "refunded"]),
             Order.created_at.between(start, end),
         )
@@ -1775,6 +1885,8 @@ async def commission_report(
             "special_base": 0.0, "special_commission": 0.0,
             "other_base": 0.0, "other_commission": 0.0,
             "total_commission": 0.0,
+            # The slice of the total that rests on orders not yet paid for.
+            "unpaid_commission": 0.0,
             "_orders": {},
         })
 
@@ -1784,6 +1896,8 @@ async def commission_report(
         rate = COMMISSION_SPECIAL_PERCENT if is_special else COMMISSION_DEFAULT_PERCENT
         earned = round(base * rate / 100, 2)
 
+        _paid = (r["payment_status"] or "").lower() == "paid"
+
         if is_special:
             cust["special_base"] += base
             cust["special_commission"] += earned
@@ -1791,6 +1905,8 @@ async def commission_report(
             cust["other_base"] += base
             cust["other_commission"] += earned
         cust["total_commission"] += earned
+        if not _paid:
+            cust["unpaid_commission"] += earned
 
         o = cust["_orders"].setdefault(str(r["order_id"]), {
             "order_id": str(r["order_id"]),
@@ -1800,6 +1916,8 @@ async def commission_report(
             "other_base": 0.0, "other_commission": 0.0,
             "total_commission": 0.0,
             "units": 0,
+            "payment_status": r["payment_status"] or "unpaid",
+            "paid": _paid,
         })
         o["units"] += int(r["quantity"] or 0)
         if is_special:
@@ -1818,7 +1936,7 @@ async def commission_report(
                       "other_commission", "total_commission"):
                 o[k] = round(o[k], 2)
         for k in ("special_base", "special_commission", "other_base",
-                  "other_commission", "total_commission"):
+                  "other_commission", "total_commission", "unpaid_commission"):
             c[k] = round(c[k], 2)
         c["order_count"] = len(orders)
         c["orders"] = orders
@@ -1841,6 +1959,7 @@ async def commission_report(
             "other_base": round(sum(c["other_base"] for c in out), 2),
             "other_commission": round(sum(c["other_commission"] for c in out), 2),
             "total_commission": round(sum(c["total_commission"] for c in out), 2),
+            "unpaid_commission": round(sum(c["unpaid_commission"] for c in out), 2),
         },
         "customers": out,
     }
