@@ -367,13 +367,18 @@ class ProductService:
                 qty = stock_map.get(variant.id)
                 variant.stock_quantity = qty if qty is not None else 0
 
-        # For anything sellable past zero and currently short, look up when the
-        # next purchase order is due. A shopper facing "out of stock" will leave;
-        # facing a date, they can decide — which is the whole point of accepting
-        # the order at all.
+        # When the next purchase orders are due in, for anything sellable past
+        # zero. A shopper facing "out of stock" will leave; facing a date they
+        # can decide, which is the whole point of taking the order at all.
+        #
+        # Not only for variants that have run out. Somebody buying five hundred
+        # against a shelf holding two hundred is in the same position as somebody
+        # facing an empty one — they need to know when the rest lands — and a
+        # date on something still in stock reads as reassurance rather than an
+        # apology.
         _short = [
             v for p_ in products for v in (p_.variants or [])
-            if getattr(v, "allow_backorder", False) and (v.stock_quantity or 0) <= 0
+            if getattr(v, "allow_backorder", False)
         ]
         if _short:
             from app.models.purchase_order import POLineItem, POReceivingItem, PurchaseOrder
