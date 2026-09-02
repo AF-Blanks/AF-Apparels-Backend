@@ -69,7 +69,7 @@ async def quickbooks_status(
     from sqlalchemy import text as _t
 
     _realms = dict((await db.execute(_t(
-        "SELECT key, value FROM settings WHERE key IN ('qb_realm_id', 'qb_ids_realm')"
+        "SELECT key, value FROM app_settings WHERE key IN ('qb_realm_id', 'qb_ids_realm')"
     ))).all())
     connected_realm = _realms.get("qb_realm_id")
     ids_realm = _realms.get("qb_ids_realm")
@@ -100,9 +100,10 @@ async def quickbooks_status(
         "connected_realm": connected_realm,
         "company_name": company_name,
         "ids_realm": ids_realm,
-        # True while we are connected to one company holding another's references:
-        # syncing is paused on purpose until someone adopts the new company.
-        "needs_switch": bool(connected_realm and ids_realm and connected_realm != ids_realm),
+        # True while syncing is paused: either our references belong to a
+        # different company, or nobody has said which company they belong to.
+        # Both are resolved the same way — adopt the company from this page.
+        "needs_switch": bool(connected_realm and connected_realm != ids_realm),
         "failed_syncs": [
             {
                 "id": str(log.id),
@@ -299,13 +300,13 @@ async def adopt_quickbooks_company(
         )
 
     connected = (await db.execute(
-        _t("SELECT value FROM settings WHERE key = 'qb_realm_id'")
+        _t("SELECT value FROM app_settings WHERE key = 'qb_realm_id'")
     )).scalar_one_or_none()
     if not connected:
         raise HTTPException(status_code=422, detail="Not connected to QuickBooks yet.")
 
     previous = (await db.execute(
-        _t("SELECT value FROM settings WHERE key = 'qb_ids_realm'")
+        _t("SELECT value FROM app_settings WHERE key = 'qb_ids_realm'")
     )).scalar_one_or_none()
     if previous == connected:
         return {
@@ -330,7 +331,7 @@ async def adopt_quickbooks_company(
         "WHERE qb_invoice_id IS NOT NULL AND qb_realm_id IS NULL"
     ), {"prev": previous or "unknown"})).rowcount or 0
     await db.execute(_t(
-        "INSERT INTO settings (key, value) VALUES ('qb_ids_realm', :v) "
+        "INSERT INTO app_settings (key, value) VALUES ('qb_ids_realm', :v) "
         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
     ), {"v": connected})
     await db.commit()

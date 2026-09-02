@@ -131,28 +131,27 @@ _QB_IDS_REALM_KEY = "qb_ids_realm"
 async def _realm_matches(session) -> tuple[bool, str | None, str | None]:
     """Whether our stored ids belong to the company we are connected to.
 
-    Returns (ok, connected_realm, ids_realm). Unknown ids_realm counts as a
-    match: it is the state every existing install is in, and the first sync
-    after this ships adopts whatever it is already connected to.
+    Returns (ok, connected_realm, ids_realm). An unknown ids_realm does not
+    count as a match. It used to adopt whatever company happened to be
+    connected, which is safe only if nothing has moved — and the moment it
+    matters is exactly the moment something has: connect to a second company
+    and the first sync would quietly declare the new one home while still
+    holding the old one's customer and item numbers. Adopting is a decision,
+    and it is made by hand from Settings.
     """
     from sqlalchemy import text as _t
 
     rows = dict((await session.execute(_t(
-        "SELECT key, value FROM settings WHERE key IN ('qb_realm_id', :k)"
+        "SELECT key, value FROM app_settings WHERE key IN ('qb_realm_id', :k)"
     ), {"k": _QB_IDS_REALM_KEY})).all())
     connected = rows.get("qb_realm_id")
     ids_realm = rows.get(_QB_IDS_REALM_KEY)
     if not connected:
         return True, connected, ids_realm      # not connected — nothing to guard
     if not ids_realm:
-        # First run since this guard existed. Adopt the company we are already
-        # talking to, so nothing changes for an install that never switched.
-        await session.execute(_t(
-            "INSERT INTO settings (key, value) VALUES (:k, :v) "
-            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
-        ), {"k": _QB_IDS_REALM_KEY, "v": connected})
-        await session.commit()
-        return True, connected, connected
+        # Connected, but nobody has said which company our stored ids belong to.
+        # Hold everything until someone does, from Settings → QuickBooks.
+        return False, connected, None
     return connected == ids_realm, connected, ids_realm
 
 
