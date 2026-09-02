@@ -62,9 +62,47 @@ async def quickbooks_status(
     )
     failed_logs = (await db.execute(failed_q)).scalars().all()
 
+    # Which QuickBooks company we are pointed at, and whether the references we
+    # hold were made there. Nobody should be asked to press "Switch to Connected
+    # Company" — which clears every customer reference — without first being able
+    # to read back, in words, which company they just connected to.
+    from sqlalchemy import text as _t
+
+    _realms = dict((await db.execute(_t(
+        "SELECT key, value FROM settings WHERE key IN ('qb_realm_id', 'qb_ids_realm')"
+    ))).all())
+    connected_realm = _realms.get("qb_realm_id")
+    ids_realm = _realms.get("qb_ids_realm")
+
+    company_name: str | None = None
+    if connected_realm:
+        # The realm id is a long number that means nothing to a person reading it.
+        # Ask QuickBooks what the company is actually called. Failing is fine —
+        # the id is still shown, and this must never take the page down.
+        try:
+            import asyncio as _asyncio
+
+            from app.services.quickbooks_service import QuickBooksService
+
+            _info = await _asyncio.to_thread(
+                QuickBooksService().query, "SELECT CompanyName FROM CompanyInfo"
+            )
+            _rows = (_info or {}).get("QueryResponse", {}).get("CompanyInfo", [])
+            if _rows:
+                company_name = _rows[0].get("CompanyName")
+        except Exception as exc:  # noqa: BLE001 — informational only
+            logger.warning("Could not read the QuickBooks company name: %s", exc)
+
     return {
         "last_sync_at": last_sync_at,
         "synced_today": synced_today,
+        "connected": bool(connected_realm),
+        "connected_realm": connected_realm,
+        "company_name": company_name,
+        "ids_realm": ids_realm,
+        # True while we are connected to one company holding another's references:
+        # syncing is paused on purpose until someone adopts the new company.
+        "needs_switch": bool(connected_realm and ids_realm and connected_realm != ids_realm),
         "failed_syncs": [
             {
                 "id": str(log.id),
