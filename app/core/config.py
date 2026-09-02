@@ -141,6 +141,19 @@ class Settings(BaseSettings):
     # through exactly when nobody is watching.
     MAINTENANCE_MODE: bool = False
 
+    # Let an order through on a card QuickBooks did not approve.
+    #
+    # Off, and it must stay off: a charge that comes back anything but CAPTURED
+    # collected nothing, and an order created on one is a shipment given away
+    # along with an invoice and a payment recorded in the books against money
+    # that never arrived.
+    #
+    # It exists for one thing — running a test card end to end against a live
+    # merchant account, which declines test numbers by design. Every order it
+    # lets through is logged at critical and marked unpaid, and it is turned
+    # back off the moment the test is over.
+    ALLOW_UNAPPROVED_CARD_CHARGES: bool = False
+
     QB_SYNC_CATALOG: bool = False      # per-variant items
     QB_SYNC_INVENTORY: bool = False    # quantity on hand
     # A receipt from a supplier creates a bill — money owed — so it belongs in

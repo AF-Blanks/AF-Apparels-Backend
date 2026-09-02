@@ -355,11 +355,17 @@ async def guest_checkout(
         # charge_card captures by default, so success returns "CAPTURED";
         # any other status aborts here before the order is created.
         if qb_payment_status != "CAPTURED":
-            raise PaymentError(
-                f"Payment was not approved (status: {qb_payment_status}). "
-                "Please check your card details or try a different payment method."
+            if not get_settings().ALLOW_UNAPPROVED_CARD_CHARGES:
+                raise PaymentError(
+                    f"Payment was not approved (status: {qb_payment_status}). "
+                    "Please check your card details or try a different payment method."
+                )
+            logger.critical(
+                "ALLOW_UNAPPROVED_CARD_CHARGES is on — letting an order through on a "
+                "card QuickBooks answered %s. No money was collected. Turn this off.",
+                qb_payment_status,
             )
-        _payment_status = "paid"
+        _payment_status = "paid" if qb_payment_status == "CAPTURED" else "unpaid"
 
     # 4. Generate order number — delegate to the single shared generator so
     #    retail/guest and wholesale order numbers form one sequential series.

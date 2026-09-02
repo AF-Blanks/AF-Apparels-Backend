@@ -395,9 +395,17 @@ async def _confirm_checkout_inner(
         # default, so a successful charge returns status "CAPTURED"; any other
         # status (DECLINED, etc.) aborts here before an order is created.
         if qb_payment_status != "CAPTURED":
-            raise PaymentError(
-                f"Payment was not approved (status: {qb_payment_status}). "
-                "Please check your card details or try a different payment method."
+            from app.core.config import settings as _cfg_card
+
+            if not _cfg_card.ALLOW_UNAPPROVED_CARD_CHARGES:
+                raise PaymentError(
+                    f"Payment was not approved (status: {qb_payment_status}). "
+                    "Please check your card details or try a different payment method."
+                )
+            logging.getLogger(__name__).critical(
+                "ALLOW_UNAPPROVED_CARD_CHARGES is on — letting an order through on a "
+                "card QuickBooks answered %s. No money was collected. Turn this off.",
+                qb_payment_status,
             )
 
     # ── Create order record ───────────────────────────────────────────────────

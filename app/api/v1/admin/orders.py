@@ -3205,8 +3205,21 @@ async def download_admin_invoice_pdf(order_id: UUID, db: AsyncSession = Depends(
 
     filename = f"invoice-{order.order_number}.pdf"
 
-    # Prefer the official QuickBooks invoice PDF when the order is synced there.
-    if order.qb_invoice_id:
+    # Prefer the official QuickBooks invoice PDF when the order is synced there —
+    # but only while that invoice is still in the company we are connected to.
+    # The id is looked up by number, so fetching one raised in a company we have
+    # moved away from would download whatever invoice holds that number here and
+    # hand it over as this order's: another customer's name, address and totals.
+    from sqlalchemy import text as _realm_text
+
+    _qb_realm_now = (await db.execute(
+        _realm_text("SELECT value FROM app_settings WHERE key = 'qb_realm_id'")
+    )).scalar_one_or_none() if order.qb_invoice_id else None
+    _invoice_is_here = bool(order.qb_invoice_id) and (
+        not order.qb_realm_id or order.qb_realm_id == _qb_realm_now
+    )
+
+    if _invoice_is_here:
         try:
             import httpx as _httpx
             from app.services.quickbooks_service import QuickBooksService

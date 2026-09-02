@@ -826,6 +826,30 @@ def void_order_invoice_in_qb(self, order_id: str):
                 if not order:
                     return None
                 invoice_id = order.qb_invoice_id
+                order_realm = order.qb_realm_id
+                order_number = order.order_number
+
+                _ok, _connected, _ids_realm = await _realm_matches(session)
+                if not _ok:
+                    logger.error(
+                        "void_order_invoice_in_qb: refusing to run — connected to "
+                        "QuickBooks company %s but our stored ids belong to %s.",
+                        _connected, _ids_realm,
+                    )
+                    return None
+
+            # Voiding is done by invoice number, and a number belongs to the books
+            # that issued it. Cancelling an order invoiced in a company we have
+            # moved away from would reach into the company we are in now and void
+            # whatever invoice happens to hold that number there — somebody else's.
+            if order_realm and _connected and order_realm != _connected:
+                logger.warning(
+                    "void_order_invoice_in_qb: leaving order %s alone — its invoice "
+                    "was raised in QuickBooks company %s and we are connected to %s.",
+                    order_number, order_realm, _connected,
+                )
+                return {"status": "skipped", "reason": "invoice belongs to another company"}
+
             if not invoice_id:
                 logger.info(
                     "void_order_invoice_in_qb: order %s has no qb_invoice_id — nothing to void",
@@ -914,6 +938,18 @@ def sync_rma_credit_memo_to_qb(self, rma_id: str):
                 )).scalar_one_or_none()
                 if not order:
                     logger.warning("sync_rma_credit_memo_to_qb: order for RMA %s not found", rma_id)
+                    return None
+
+                # A credit memo reverses an invoice, and that invoice lives in the
+                # company it was raised in. Crediting an order from the old books
+                # against the new ones puts a refund in a place the sale never
+                # happened, and leaves the sale itself standing where it did.
+                if order.qb_realm_id and _connected and order.qb_realm_id != _connected:
+                    logger.warning(
+                        "sync_rma_credit_memo_to_qb: leaving RMA %s alone — order %s was "
+                        "invoiced in QuickBooks company %s and we are connected to %s.",
+                        rma_id, order.order_number, order.qb_realm_id, _connected,
+                    )
                     return None
 
                 # ── Resolve QB customer id (same rules as invoice sync) ────────
