@@ -3351,3 +3351,215 @@ async def list_backorders(
         },
         "items": items,
     }
+
+
+# ── Payment reminders ─────────────────────────────────────────────────────────
+
+async def _reminder_context(order_id: UUID, db: AsyncSession) -> dict:
+    """Everything a reminder for this order needs, gathered once.
+
+    Both the draft and the send need the same three things — who to write to,
+    what is owed on this order, and what the customer owes altogether — so they
+    are worked out in one place and cannot disagree with each other.
+    """
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    due = round(float(order.total or 0) - float(order.amount_paid or 0), 2)
+    if due <= 0.005 or order.payment_status in ("paid", "refunded"):
+        raise HTTPException(
+            status_code=422,
+            detail="This order has nothing outstanding — there is nothing to remind about.",
+        )
+
+    # Who to write to. The person who placed it is the one expecting the
+    # invoice; a guest order only ever has the address given at checkout.
+    to_email: str | None = None
+    customer_name: str | None = None
+    company_name: str | None = None
+    if order.is_guest_order and order.guest_email:
+        to_email, customer_name = order.guest_email, order.guest_name
+    elif order.placed_by_id:
+        u = (await db.execute(select(User).where(User.id == order.placed_by_id))).scalar_one_or_none()
+        if u:
+            to_email = u.email
+            customer_name = f"{u.first_name or ''} {u.last_name or ''}".strip() or None
+    if order.company_id:
+        co = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
+        if co:
+            company_name = co.name
+            to_email = to_email or co.email
+
+    if not to_email:
+        raise HTTPException(status_code=422, detail="No customer email found for this order")
+
+    # What the customer owes across everything, so the reminder can say whether
+    # this order is the whole of it or only part.
+    account_due = 0.0
+    if order.company_id:
+        account_due = float((await db.execute(
+            select(func.coalesce(func.sum(
+                Order.total - func.coalesce(Order.amount_paid, 0)
+            ), 0))
+            .where(
+                Order.company_id == order.company_id,
+                Order.payment_status.notin_(["paid", "refunded"]),
+                Order.status.notin_(["cancelled"]),
+            )
+        )).scalar_one() or 0)
+
+    return {
+        "order": order,
+        "to_email": to_email,
+        "customer_name": customer_name,
+        "company_name": company_name,
+        "amount_due": due,
+        "account_due": round(account_due, 2),
+    }
+
+
+def _reminder_draft(ctx: dict) -> tuple[str, str]:
+    """The wording an admin starts from — theirs to change before it goes.
+
+    Written as a person would write it: what is owed, on which order, and one
+    line asking for it. No threat, because most of the time this is a customer
+    who simply has not got to it yet.
+    """
+    order = ctx["order"]
+    who = ctx["company_name"] or ctx["customer_name"] or "there"
+    lines = [
+        f"Hi {who},",
+        "",
+        f"This is a friendly reminder that ${ctx['amount_due']:.2f} is still "
+        f"outstanding on order {order.order_number}"
+        + (f", placed on {order.created_at.strftime('%d %B %Y')}" if order.created_at else "")
+        + ".",
+    ]
+    if ctx["account_due"] > ctx["amount_due"] + 0.005:
+        lines += [
+            "",
+            f"Your account balance across all open orders is "
+            f"${ctx['account_due']:.2f}.",
+        ]
+    lines += [
+        "",
+        "Could you arrange payment when you get a moment? If it has already "
+        "been sent, or if anything about the order needs looking at, just reply "
+        "to this email and we will sort it out.",
+        "",
+        "Thank you,",
+        "AF Apparels",
+    ]
+    subject = f"Payment reminder — order {order.order_number} (${ctx['amount_due']:.2f} outstanding)"
+    return subject, "\n".join(lines)
+
+
+@router.get("/orders/{order_id}/payment-reminder", response_model=dict)
+async def preview_payment_reminder(order_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """The reminder as it stands, before anyone edits it.
+
+    Returned rather than composed in the browser so the wording lives in one
+    place, and so what is previewed is what will actually be sent.
+    """
+    ctx = await _reminder_context(order_id, db)
+    subject, message = _reminder_draft(ctx)
+    return {
+        "to_email": ctx["to_email"],
+        "customer_name": ctx["customer_name"],
+        "company_name": ctx["company_name"],
+        "order_number": ctx["order"].order_number,
+        "amount_due": ctx["amount_due"],
+        "account_due": ctx["account_due"],
+        "subject": subject,
+        "message": message,
+    }
+
+
+@router.post("/orders/{order_id}/payment-reminder", response_model=dict)
+async def send_payment_reminder(
+    order_id: UUID,
+    payload: dict,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Send the reminder, in whatever words the admin settled on.
+
+    The message is taken as written. An admin who has rephrased it knows this
+    customer better than a template does, and silently reformatting what they
+    typed would be the surest way to make them stop trusting the box.
+    """
+    from html import escape as _html_escape
+    from sqlalchemy import text as _text
+    from app.core.config import get_settings as _get_settings
+    from app.services.email_service import EmailService
+
+    ctx = await _reminder_context(order_id, db)
+    order = ctx["order"]
+
+    _default_subject, _default_message = _reminder_draft(ctx)
+    subject = (payload.get("subject") or "").strip() or _default_subject
+    message = (payload.get("message") or "").strip() or _default_message
+    to_email = (payload.get("to_email") or "").strip() or ctx["to_email"]
+
+    # Plain text, kept as typed. Blank lines become paragraphs so the email
+    # reads the way it looked in the box.
+    _paras = "".join(
+        f'<p style="margin:0 0 12px;font-size:14px;color:#374151;line-height:1.6">'
+        f'{_html_escape(p).replace(chr(10), "<br>")}</p>'
+        for p in message.split("\n\n") if p.strip()
+    )
+    _invoice_url = f"{_get_settings().FRONTEND_URL}/checkout/invoice/{order.order_number}"
+    body_html = EmailService(db)._base_template(
+        f'<h2 style="color:#1B3A5C;font-size:20px;font-weight:800;margin:0 0 16px">'
+        f'Payment Reminder</h2>'
+        + _paras
+        + f'<div style="background:#F9F8F4;border-radius:8px;padding:16px 20px;margin:20px 0">'
+        f'<table style="width:100%">'
+        f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Order</td>'
+        f'<td style="font-size:13px;font-weight:700;color:#1B3A5C;text-align:right">'
+        f'{order.order_number}</td></tr>'
+        f'<tr><td style="font-size:12px;color:#6b7280;padding:3px 0">Amount outstanding</td>'
+        f'<td style="font-size:18px;font-weight:800;color:#B45309;text-align:right">'
+        f'${ctx["amount_due"]:.2f}</td></tr>'
+        f'</table></div>'
+        f'<p style="margin:0"><a href="{_invoice_url}" '
+        f'style="background:#1B3A5C;color:#fff;padding:12px 24px;border-radius:6px;'
+        f'font-weight:700;text-decoration:none;font-size:14px;display:inline-block">'
+        f'View Invoice →</a></p>'
+    )
+
+    ok = EmailService(db).send_raw(to_email=to_email, subject=subject, body_html=body_html)
+    if not ok:
+        raise HTTPException(status_code=502, detail="The reminder could not be sent — try again.")
+
+    # Written onto the order so the next person can see it has been chased, and
+    # when, rather than sending a second one a day later.
+    _admin = "Admin"
+    _uid = getattr(request.state, "user_id", None) if request else None
+    if _uid:
+        _u = (await db.execute(select(User).where(User.id == _uid))).scalar_one_or_none()
+        if _u:
+            _admin = f"{_u.first_name or ''} {_u.last_name or ''}".strip() or "Admin"
+    try:
+        _tl = list(order.timeline or [])
+        _tl.append({
+            "status": order.status,
+            "message": f"Payment reminder sent to {to_email} (${ctx['amount_due']:.2f} outstanding)",
+            "created_by": _admin,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        await db.execute(
+            _text("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
+            {"tl": _json.dumps(_tl), "oid": str(order_id)},
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.warning("Could not record reminder on order %s: %s", order.order_number, exc)
+
+    return {
+        "message": f"Reminder sent to {to_email}",
+        "to_email": to_email,
+        "amount_due": ctx["amount_due"],
+    }
