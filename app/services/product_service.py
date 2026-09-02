@@ -376,23 +376,54 @@ class ProductService:
             if getattr(v, "allow_backorder", False) and (v.stock_quantity or 0) <= 0
         ]
         if _short:
-            from app.models.purchase_order import POLineItem, PurchaseOrder
-            _due = {
-                vid: d
-                for vid, d in (await self.db.execute(
-                    select(
-                        POLineItem.product_variant_id,
-                        func.min(PurchaseOrder.expected_delivery),
-                    )
-                    .join(PurchaseOrder, PurchaseOrder.id == POLineItem.po_id)
-                    .where(POLineItem.product_variant_id.in_([v.id for v in _short]))
-                    .where(PurchaseOrder.expected_delivery.isnot(None))
-                    .where(PurchaseOrder.status.notin_(["cancelled", "received"]))
-                    .group_by(POLineItem.product_variant_id)
-                )).all()
-            }
+            from app.models.purchase_order import POLineItem, POReceivingItem, PurchaseOrder
+
+            # Every delivery still to come, not just the soonest. Two purchase
+            # orders for the same variant landing weeks apart are two different
+            # answers, and which one applies depends on how many are wanted —
+            # a shopper after 500 is not served by the date the first 100 arrive.
+            #
+            # Quantity is what is still outstanding: ordered less already
+            # received, so a part-delivered order stops promising what has
+            # already turned up.
+            _received = (
+                select(
+                    POReceivingItem.po_line_item_id.label("li"),
+                    func.coalesce(func.sum(POReceivingItem.qty_received), 0).label("got"),
+                )
+                .group_by(POReceivingItem.po_line_item_id)
+                .subquery()
+            )
+            _rows = (await self.db.execute(
+                select(
+                    POLineItem.product_variant_id,
+                    PurchaseOrder.expected_delivery,
+                    POLineItem.qty_ordered,
+                    func.coalesce(_received.c.got, 0),
+                )
+                .join(PurchaseOrder, PurchaseOrder.id == POLineItem.po_id)
+                .outerjoin(_received, _received.c.li == POLineItem.id)
+                .where(POLineItem.product_variant_id.in_([v.id for v in _short]))
+                .where(PurchaseOrder.expected_delivery.isnot(None))
+                .where(PurchaseOrder.status.notin_(["cancelled", "received"]))
+                .order_by(PurchaseOrder.expected_delivery.asc())
+            )).all()
+
+            _incoming: dict = {}
+            for vid, when, ordered_qty, got in _rows:
+                outstanding = int(ordered_qty or 0) - int(got or 0)
+                if outstanding <= 0:
+                    continue
+                # Two purchase orders due the same day read as one delivery.
+                _by_date = _incoming.setdefault(vid, {})
+                _by_date[when] = _by_date.get(when, 0) + outstanding
+
             for v in _short:
-                v.expected_restock_date = _due.get(v.id)
+                _dates = sorted((_incoming.get(v.id) or {}).items())
+                v.incoming = [
+                    {"expected_date": d, "quantity": q} for d, q in _dates
+                ]
+                v.expected_restock_date = _dates[0][0] if _dates else None
 
         return products
 

@@ -111,6 +111,11 @@ class VariantOut(BaseModel):
     # backorder variants that are short, since that is the only time it answers a
     # question the shopper is actually asking.
     expected_restock_date: date | None = None
+    # Every purchase order still to arrive, soonest first. Two deliveries of the
+    # same thing three weeks apart are two different answers to "when can I have
+    # it" — and which one applies depends on how many the shopper wants, so both
+    # are shown rather than only the earliest.
+    incoming: list["IncomingStock"] = []
     status: str
 
     model_config = {"from_attributes": True}
@@ -119,6 +124,19 @@ class VariantOut(BaseModel):
 # ---------------------------------------------------------------------------
 # Product list item (compact)
 # ---------------------------------------------------------------------------
+
+class IncomingStock(BaseModel):
+    """A delivery of this variant that has been ordered but has not arrived."""
+
+    #: What the supplier has been told, not a promise — labelled as expected
+    #: everywhere it is shown.
+    expected_date: date
+    #: Still outstanding on that purchase order: ordered less already received.
+    quantity: int
+
+
+VariantOut.model_rebuild()
+
 
 class ProductListItem(BaseModel):
     id: UUID
