@@ -510,7 +510,12 @@ class QuickBooksService:
             # way. The product is named in the description, which is what a
             # reader of the invoice actually goes by; a QuickBooks item per
             # variant only ever existed to satisfy the API.
-            _qb_item_id = _merch or item.get("qb_item_id")
+            #
+            # A line that names its own item means it: shipping, the card fee and
+            # sales tax each bill against an account of their own. Letting the
+            # merchandise item win over them put collected sales tax into sales
+            # income — the one thing the tax item exists to prevent.
+            _qb_item_id = item.get("qb_item_id") or _merch
             if not _qb_item_id:
                 logger.critical(
                     "QB invoice line has no item to bill against — neither "
@@ -1136,8 +1141,11 @@ class QuickBooksService:
         lines = []
         for item in line_items:
             # The same item the sale was billed against, so a return lands back
-            # on the account the money came in on rather than somewhere else.
-            _qb_item_id = _merch or item.get("qb_item_id")
+            # on the account the money came in on rather than somewhere else —
+            # which means honouring a line's own item before the catch-all, or a
+            # refunded tax would come out of sales income instead of the tax
+            # account it went into.
+            _qb_item_id = item.get("qb_item_id") or _merch
             if not _qb_item_id:
                 logger.critical(
                     "QB credit memo line has no item to credit against — neither "
