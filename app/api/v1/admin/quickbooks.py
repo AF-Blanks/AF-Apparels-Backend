@@ -4,6 +4,7 @@ T195: GET /admin/quickbooks/status, POST /admin/quickbooks/retry/{log_id}
       GET /admin/quickbooks/connect, GET /admin/quickbooks/callback
 """
 import base64
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -20,6 +21,8 @@ from app.middleware.auth_middleware import require_admin
 from app.models.system import QBSyncLog
 
 router = APIRouter(prefix="/admin", tags=["Admin — QuickBooks"])
+
+logger = logging.getLogger(__name__)
 
 
 @router.get("/quickbooks/status")
@@ -223,3 +226,77 @@ async def quickbooks_callback(
     await db.commit()
 
     return RedirectResponse(url=f"{frontend_url}/admin/quickbooks?connected=true")
+
+
+@router.post("/quickbooks/adopt-company", response_model=dict)
+async def adopt_quickbooks_company(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Accept the QuickBooks company we are now connected to, and forget the old one.
+
+    A customer id, an item id, an invoice id — each is a number that means
+    something only inside the company it was created in. Connect the app to a
+    different company and those numbers refer to whatever happens to hold them
+    there, which is how an invoice ends up billed to a stranger. So syncing
+    refuses to run while the two disagree, and this is the deliberate act that
+    resolves it.
+
+    What it clears is only what would be read back and reused: the customer and
+    item references. Invoices and payments already raised keep their numbers —
+    they are a record of what was done in the old company, and they are not
+    going to be sent anywhere again.
+
+    Pass confirm=true. Nothing happens without it.
+    """
+    from sqlalchemy import text as _t
+
+    if not payload.get("confirm"):
+        raise HTTPException(
+            status_code=422,
+            detail="Pass confirm=true — this clears the QuickBooks references on every customer.",
+        )
+
+    connected = (await db.execute(
+        _t("SELECT value FROM settings WHERE key = 'qb_realm_id'")
+    )).scalar_one_or_none()
+    if not connected:
+        raise HTTPException(status_code=422, detail="Not connected to QuickBooks yet.")
+
+    previous = (await db.execute(
+        _t("SELECT value FROM settings WHERE key = 'qb_ids_realm'")
+    )).scalar_one_or_none()
+    if previous == connected:
+        return {
+            "message": "Already set up for this QuickBooks company — nothing to do.",
+            "company": connected,
+            "cleared": {"customers": 0, "variants": 0},
+        }
+
+    customers = (await db.execute(_t(
+        "UPDATE companies SET qb_customer_id = NULL WHERE qb_customer_id IS NOT NULL"
+    ))).rowcount or 0
+    variants = (await db.execute(_t(
+        "UPDATE product_variants SET qb_item_id = NULL WHERE qb_item_id IS NOT NULL"
+    ))).rowcount or 0
+    await db.execute(_t(
+        "INSERT INTO settings (key, value) VALUES ('qb_ids_realm', :v) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+    ), {"v": connected})
+    await db.commit()
+
+    logger.warning(
+        "QuickBooks company adopted: %s (was %s) — cleared %d customer and %d item references",
+        connected, previous or "none", customers, variants,
+    )
+    return {
+        "message": (
+            f"Now set up for QuickBooks company {connected}. "
+            f"{customers} customer and {variants} item references from the previous "
+            "company were cleared; customers will be created fresh as orders come in. "
+            "Invoices already raised were left untouched."
+        ),
+        "company": connected,
+        "previous_company": previous,
+        "cleared": {"customers": customers, "variants": variants},
+    }

@@ -501,13 +501,22 @@ class QuickBooksService:
         it would have been billed first time round - same item refs, same tax
         treatment, same discount handling.
         """
+        from app.core.config import get_settings as _cfg
+        _merch = (_cfg().QB_MERCHANDISE_ITEM_ID or "").strip()
+
         lines: list[dict[str, Any]] = []
         for item in line_items:
-            _qb_item_id = item.get("qb_item_id")
+            # One item for everything sold, when the books are configured that
+            # way. The product is named in the description, which is what a
+            # reader of the invoice actually goes by; a QuickBooks item per
+            # variant only ever existed to satisfy the API.
+            _qb_item_id = _merch or item.get("qb_item_id")
             if not _qb_item_id:
                 logger.critical(
-                    "QB invoice line missing qb_item_id — falling back to item '1' (Services). "
-                    "Revenue and COGS will be misclassified. description=%s",
+                    "QB invoice line has no item to bill against — neither "
+                    "QB_MERCHANDISE_ITEM_ID nor a per-variant item id. Falling back "
+                    "to item '1' (Services); revenue will be misclassified. "
+                    "description=%s",
                     item.get("description"),
                 )
             line_detail: dict[str, Any] = {

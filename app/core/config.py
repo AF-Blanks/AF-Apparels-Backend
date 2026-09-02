@@ -119,6 +119,19 @@ class Settings(BaseSettings):
     # Tax never recalculates and the invoice total always equals the customer's
     # charge. Default is this company's live item; override via env if it changes.
     QB_TAX_ITEM_ID: str = "584"
+    # Every sold line is billed against this one item. QuickBooks will not take
+    # an invoice line without an item, but it does not need one per product to
+    # keep books — the product is named in the line description, and the
+    # catalogue stays here, where it is managed.
+    QB_MERCHANDISE_ITEM_ID: str = ""
+
+    # What QuickBooks is used for. Invoices and payments, and nothing about
+    # stock: a catalogue in two places has to be kept in step, and an inventory
+    # ledger in two places will disagree the first time either is touched
+    # outside the other.
+    QB_SYNC_CATALOG: bool = False      # per-variant items
+    QB_SYNC_INVENTORY: bool = False    # quantity on hand
+    QB_SYNC_PURCHASES: bool = False    # supplier bills from PO receipts
 
     # Carriers we wait for when quoting rates. Shippo fills a shipment's rates in
     # progressively, so a carrier that is slow to answer is simply absent from the

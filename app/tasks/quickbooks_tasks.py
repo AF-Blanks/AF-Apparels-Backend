@@ -120,6 +120,42 @@ async def _log_attempt(
         await _log_engine.dispose()
 
 
+#: Which QuickBooks company the ids stored against our records belong to.
+#: A customer id, an invoice id, an item id — each is a number that means
+#: something only inside the company it was created in. Point the app at a
+#: different company and those same numbers refer to whatever happens to sit
+#: there, which is how an invoice ends up against a stranger.
+_QB_IDS_REALM_KEY = "qb_ids_realm"
+
+
+async def _realm_matches(session) -> tuple[bool, str | None, str | None]:
+    """Whether our stored ids belong to the company we are connected to.
+
+    Returns (ok, connected_realm, ids_realm). Unknown ids_realm counts as a
+    match: it is the state every existing install is in, and the first sync
+    after this ships adopts whatever it is already connected to.
+    """
+    from sqlalchemy import text as _t
+
+    rows = dict((await session.execute(_t(
+        "SELECT key, value FROM settings WHERE key IN ('qb_realm_id', :k)"
+    ), {"k": _QB_IDS_REALM_KEY})).all())
+    connected = rows.get("qb_realm_id")
+    ids_realm = rows.get(_QB_IDS_REALM_KEY)
+    if not connected:
+        return True, connected, ids_realm      # not connected — nothing to guard
+    if not ids_realm:
+        # First run since this guard existed. Adopt the company we are already
+        # talking to, so nothing changes for an install that never switched.
+        await session.execute(_t(
+            "INSERT INTO settings (key, value) VALUES (:k, :v) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+        ), {"k": _QB_IDS_REALM_KEY, "v": connected})
+        await session.commit()
+        return True, connected, connected
+    return connected == ids_realm, connected, ids_realm
+
+
 @celery_app.task(bind=True, max_retries=5)
 def sync_customer_to_qb(self, company_id: str):
     """Sync a Company to QuickBooks as a Customer."""
@@ -136,6 +172,16 @@ def sync_customer_to_qb(self, company_id: str):
             # Single session holds FOR UPDATE from check through commit — same
             # race-free pattern as sync_variant_to_qb.
             async with AsyncSessionLocal() as session:
+                _ok, _connected, _ids_realm = await _realm_matches(session)
+                if not _ok:
+                    logger.error(
+                        "sync_customer_to_qb: refusing to run — connected to QuickBooks "
+                        "company %s but our stored ids belong to %s. Adopt the new company "
+                        "from Settings first (this clears ids that mean nothing there).",
+                        _connected, _ids_realm,
+                    )
+                    return None
+
                 # ── 1. Lock the company row ───────────────────────────────────
                 company = (await session.execute(
                     select(Company)
@@ -257,6 +303,18 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
 
         try:
             logger.info("QB sync starting — order_id=%s", order_id)
+
+            async with AsyncSessionLocal() as _guard_session:
+                _ok, _connected, _ids_realm = await _realm_matches(_guard_session)
+            if not _ok:
+                logger.error(
+                    "sync_order_invoice_to_qb: refusing to run — connected to QuickBooks "
+                    "company %s but our stored ids belong to %s. An invoice raised now "
+                    "could land against whatever record happens to hold that number. "
+                    "Adopt the new company from Settings first.",
+                    _connected, _ids_realm,
+                )
+                return None
 
             # ── 1. Fetch order and resolve QB customer identity ───────────────
             qb_customer_id: str | None = None
@@ -938,6 +996,14 @@ def sync_rma_credit_memo_to_qb(self, rma_id: str):
 
 @celery_app.task(bind=True, max_retries=5)
 def sync_variant_to_qb(self, variant_id: str):
+    # Off by choice. The catalogue is managed here; QuickBooks keeps the books.
+    # Sending each variant over created an item per size and colour, and with it
+    # an inventory ledger in two places that had to be kept in step. Invoices
+    # bill against one merchandise item instead — see QB_MERCHANDISE_ITEM_ID.
+    if not settings.QB_SYNC_CATALOG:
+        logger.info("sync_variant_to_qb: catalogue sync is off — skipping %s", variant_id)
+        return {"skipped": "catalog sync disabled"}
+
     """Sync a ProductVariant to QuickBooks as an Inventory Item.
 
     Creates the QB item if it doesn't exist, or updates price/cost if it does.
@@ -1045,6 +1111,10 @@ def sync_variant_to_qb(self, variant_id: str):
 
 @celery_app.task(bind=True, max_retries=5)
 def sync_variant_batch_to_qb(self, variant_ids: list):
+    if not settings.QB_SYNC_CATALOG:
+        logger.info("sync_variant_batch_to_qb: catalogue sync is off — skipping %d", len(variant_ids or []))
+        return {"skipped": "catalog sync disabled"}
+
     """Sync multiple ProductVariants to QuickBooks in a single Celery task.
 
     Replaces the old per-variant dispatch loop in bulk-generate and CSV-import
@@ -1150,6 +1220,10 @@ def sync_variant_batch_to_qb(self, variant_ids: list):
 
 @celery_app.task(bind=True, max_retries=5)
 def sync_inventory_to_qb(self, variant_id: str, deferred_count: int = 0):
+    if not settings.QB_SYNC_INVENTORY:
+        logger.info("sync_inventory_to_qb: inventory sync is off — skipping %s", variant_id)
+        return {"skipped": "inventory sync disabled"}
+
     """Push the current total stock for a variant to QuickBooks.
 
     If the variant has no QB item yet, falls back to sync_variant_to_qb
@@ -1217,6 +1291,12 @@ def sync_inventory_to_qb(self, variant_id: str, deferred_count: int = 0):
 
 @celery_app.task(bind=True, max_retries=5)
 def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
+    # A receipt from a supplier is a purchase, which belongs to the stock side
+    # rather than to sales. Off with the rest of it.
+    if not settings.QB_SYNC_PURCHASES:
+        logger.info("sync_po_receipt_to_qb: purchase sync is off — skipping %s", po_id)
+        return {"skipped": "purchase sync disabled"}
+
     """Create a QuickBooks Vendor Bill when a PO receiving is recorded.
 
     Looks up the manufacturer name from the PO, builds line items from the
@@ -1388,6 +1468,10 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
 
 @celery_app.task(bind=True, max_retries=5)
 def sync_inventory_batch_to_qb(self, variant_ids: list[str], push_quantity: bool = True):
+    if not settings.QB_SYNC_INVENTORY:
+        logger.info("sync_inventory_batch_to_qb: inventory sync is off — skipping %d", len(variant_ids or []))
+        return {"skipped": "inventory sync disabled"}
+
     """Push current stock for multiple variants in one task.
 
     push_quantity=False updates price and cost but leaves QtyOnHand alone. Use it
