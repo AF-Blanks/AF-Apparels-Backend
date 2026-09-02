@@ -114,9 +114,23 @@ async def quickbooks_status(
         except Exception as exc:  # noqa: BLE001 — informational only
             logger.warning("Could not read the QuickBooks company name: %s", exc)
 
+    # How many orders are pinned to a company we have moved away from. After a
+    # switch this is the number that says the old books were actually protected
+    # — a claim worth being able to check rather than take on trust.
+    kept_elsewhere = (await db.execute(_t(
+        "SELECT count(*) FROM orders WHERE qb_realm_id IS NOT NULL "
+        "AND qb_realm_id <> COALESCE(:realm, '')"
+    ), {"realm": connected_realm})).scalar() or 0
+    invoiced_unstamped = (await db.execute(_t(
+        "SELECT count(*) FROM orders WHERE qb_invoice_id IS NOT NULL "
+        "AND qb_realm_id IS NULL"
+    ))).scalar() or 0
+
     return {
         "last_sync_at": last_sync_at,
         "synced_today": synced_today,
+        "orders_kept_with_previous_company": kept_elsewhere,
+        "invoiced_orders_not_stamped": invoiced_unstamped,
         "connected": bool(connected_realm),
         "connected_realm": connected_realm,
         "company_name": company_name,
