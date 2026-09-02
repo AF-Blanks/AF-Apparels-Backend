@@ -292,18 +292,33 @@ async def quickbooks_items(
 
     from app.services.quickbooks_service import QuickBooksService
 
+    # Only the ones an invoice can be built from. A company that has ever had a
+    # catalogue pushed into it holds thousands of Inventory items, and the four
+    # that matter here sit somewhere past the first page of them — asking for
+    # everything returned a list that did not contain what it was opened for.
+    #
+    # Paged, because a page is capped at 1000 however narrow the question.
+    # One request, and a narrow one. Only Service items can be what we are
+    # looking for; a company that has had a catalogue pushed into it holds
+    # thousands of Inventory items, and asking for all of them returned a list
+    # that did not even contain the four it was opened for.
+    #
+    # Deliberately not paged. QuickBooks caps a page at 1000, and a company with
+    # more than a thousand *service* items is not one this system talks to —
+    # walking pages to prove it would spend requests against a shared limit for
+    # nothing.
     try:
         svc = await QuickBooksService().initialize()
         raw = await _asyncio.to_thread(
-            svc.query, "SELECT * FROM Item MAXRESULTS 1000"
+            svc.query,
+            "SELECT * FROM Item WHERE Type = 'Service' MAXRESULTS 1000",
         )
+        items = (raw or {}).get("QueryResponse", {}).get("Item", [])
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not list QuickBooks items: %s", exc)
         raise HTTPException(
             status_code=502, detail=f"Could not read items from QuickBooks: {exc}"
         ) from exc
-
-    items = (raw or {}).get("QueryResponse", {}).get("Item", [])
     return {
         "items": sorted(
             (
