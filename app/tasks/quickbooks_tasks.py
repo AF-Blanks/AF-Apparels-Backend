@@ -333,6 +333,19 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                     await _log_attempt("order", order_id, "failed", "Order not found")
                     return None
 
+                # An order whose invoice was raised in a different QuickBooks company
+                # is finished as far as this system is concerned. Its invoice id is a
+                # number that belongs to those books; used here it would point at
+                # whatever invoice happens to hold that number in the company we are
+                # connected to now, and a payment would post against a stranger.
+                if order.qb_realm_id and _connected and order.qb_realm_id != _connected:
+                    logger.warning(
+                        "sync_order_invoice_to_qb: leaving order %s alone — its invoice "
+                        "was raised in QuickBooks company %s and we are connected to %s.",
+                        order.order_number, order.qb_realm_id, _connected,
+                    )
+                    return None
+
                 logger.info(
                     "QB sync order found — order_number=%s total=%.2f payment_status=%s payment_method=%s company_id=%s",
                     order.order_number, float(order.total), order.payment_status,
@@ -657,9 +670,13 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                     try:
                         await session.execute(
                             _sql_text(
-                                "UPDATE orders SET qb_invoice_id=:iid, qb_sync_status='synced' WHERE id=:oid"
+                                "UPDATE orders SET qb_invoice_id=:iid, qb_sync_status='synced', "
+                                # Stamp the company the number was issued by, so a
+                                # later payment can tell whether it still applies.
+                                "qb_realm_id=COALESCE(:realm, qb_realm_id) WHERE id=:oid"
                             ),
-                            {"iid": str(qb_invoice_id), "oid": order_id},
+                            {"iid": str(qb_invoice_id), "oid": order_id,
+                             "realm": _connected},
                         )
                         await session.commit()
                         logger.info(

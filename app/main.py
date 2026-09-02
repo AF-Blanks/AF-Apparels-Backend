@@ -342,6 +342,9 @@ async def _ensure_content_tables() -> None:
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='payment_method') THEN
                         ALTER TABLE orders ADD COLUMN payment_method VARCHAR(20);
                     END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='qb_realm_id') THEN
+                        ALTER TABLE orders ADD COLUMN qb_realm_id VARCHAR(64);
+                    END IF;
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='ach_bank_name') THEN
                         ALTER TABLE orders ADD COLUMN ach_bank_name VARCHAR(255);
                     END IF;

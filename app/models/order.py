@@ -101,6 +101,13 @@ class Order(BaseModel):
         nullable=False,
     )
     qb_invoice_id: Mapped[str | None] = mapped_column(String(255))
+    #: Which QuickBooks company the invoice above was raised in.
+    #:
+    #: An invoice id means nothing on its own — number 2138 is one invoice in one
+    #: company and a completely different one next door. Recording the company
+    #: alongside the number is what lets a later payment refuse to post itself
+    #: against a stranger's invoice after the books move.
+    qb_realm_id: Mapped[str | None] = mapped_column(String(64))
     # QB Accounting Payment record id (money-received entry linked to the invoice).
     # Distinct from qb_payment_charge_id (the QB Payments card charge). Set once the
     # payment is recorded so a task retry never books a duplicate payment.

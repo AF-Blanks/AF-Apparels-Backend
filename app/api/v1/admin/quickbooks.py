@@ -279,6 +279,15 @@ async def adopt_quickbooks_company(
     variants = (await db.execute(_t(
         "UPDATE product_variants SET qb_item_id = NULL WHERE qb_item_id IS NOT NULL"
     ))).rowcount or 0
+    # Every invoice raised so far belongs to the company we are leaving. Say so
+    # on the order itself, because clearing the invoice id is not an option —
+    # it is the only record of where that invoice went — and without the stamp
+    # a payment settling later would post the same number into the new books,
+    # against whatever invoice happens to hold it there.
+    stamped = (await db.execute(_t(
+        "UPDATE orders SET qb_realm_id = :prev "
+        "WHERE qb_invoice_id IS NOT NULL AND qb_realm_id IS NULL"
+    ), {"prev": previous or "unknown"})).rowcount or 0
     await db.execute(_t(
         "INSERT INTO settings (key, value) VALUES ('qb_ids_realm', :v) "
         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
@@ -286,17 +295,20 @@ async def adopt_quickbooks_company(
     await db.commit()
 
     logger.warning(
-        "QuickBooks company adopted: %s (was %s) — cleared %d customer and %d item references",
-        connected, previous or "none", customers, variants,
+        "QuickBooks company adopted: %s (was %s) — cleared %d customer and %d item "
+        "references; %d existing orders stamped as belonging to the previous company",
+        connected, previous or "none", customers, variants, stamped,
     )
     return {
         "message": (
             f"Now set up for QuickBooks company {connected}. "
             f"{customers} customer and {variants} item references from the previous "
             "company were cleared; customers will be created fresh as orders come in. "
-            "Invoices already raised were left untouched."
+            f"Invoices already raised were left untouched — {stamped} orders are marked "
+            "as belonging to the previous company and will not be synced again."
         ),
         "company": connected,
         "previous_company": previous,
         "cleared": {"customers": customers, "variants": variants},
+        "kept_with_previous_company": stamped,
     }
