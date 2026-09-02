@@ -131,7 +131,11 @@ class Settings(BaseSettings):
     # outside the other.
     QB_SYNC_CATALOG: bool = False      # per-variant items
     QB_SYNC_INVENTORY: bool = False    # quantity on hand
-    QB_SYNC_PURCHASES: bool = False    # supplier bills from PO receipts
+    # A receipt from a supplier creates a bill — money owed — so it belongs in
+    # the books whatever happens to the catalogue. Without a per-variant item
+    # the bill lines fall to the Cost of Goods Sold account with the product
+    # named on them, which is where they belong anyway.
+    QB_SYNC_PURCHASES: bool = True     # supplier bills from PO receipts
 
     # Carriers we wait for when quoting rates. Shippo fills a shipment's rates in
     # progressively, so a carrier that is slow to answer is simply absent from the

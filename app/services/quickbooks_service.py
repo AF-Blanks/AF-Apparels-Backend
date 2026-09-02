@@ -1130,13 +1130,20 @@ class QuickBooksService:
         Idempotency is handled at the task level (rma.qb_credit_memo_id check).
         line_items: list of {description, quantity, unit_price, amount, qb_item_id}.
         """
+        from app.core.config import get_settings as _cfg
+        _merch = (_cfg().QB_MERCHANDISE_ITEM_ID or "").strip()
+
         lines = []
         for item in line_items:
-            _qb_item_id = item.get("qb_item_id")
+            # The same item the sale was billed against, so a return lands back
+            # on the account the money came in on rather than somewhere else.
+            _qb_item_id = _merch or item.get("qb_item_id")
             if not _qb_item_id:
                 logger.critical(
-                    "QB credit memo line missing qb_item_id — falling back to item '1' (Services). "
-                    "COGS/inventory reversal will be misclassified. description=%s",
+                    "QB credit memo line has no item to credit against — neither "
+                    "QB_MERCHANDISE_ITEM_ID nor a per-variant item id. Falling back to "
+                    "item '1' (Services); the reversal will be misclassified. "
+                    "description=%s",
                     item.get("description"),
                 )
             lines.append({

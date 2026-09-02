@@ -866,6 +866,16 @@ def sync_rma_credit_memo_to_qb(self, rma_id: str):
         from sqlalchemy import select, text as _sql_text
         from sqlalchemy.orm import selectinload
 
+        async with AsyncSessionLocal() as _guard_session:
+            _ok, _connected, _ids_realm = await _realm_matches(_guard_session)
+        if not _ok:
+            logger.error(
+                "%s: refusing to run — connected to QuickBooks company %s but our "
+                "stored ids belong to %s. Adopt the new company from Settings first.",
+                "sync_rma_credit_memo_to_qb", _connected, _ids_realm,
+            )
+            return None
+
         try:
             async with AsyncSessionLocal() as session:
                 rma = (await session.execute(
@@ -1312,6 +1322,16 @@ def sync_po_receipt_to_qb(self, po_id: str, receiving_id: str):
         from app.services.quickbooks_service import QuickBooksService
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
+
+        async with AsyncSessionLocal() as _guard_session:
+            _ok, _connected, _ids_realm = await _realm_matches(_guard_session)
+        if not _ok:
+            logger.error(
+                "%s: refusing to run — connected to QuickBooks company %s but our "
+                "stored ids belong to %s. Adopt the new company from Settings first.",
+                "sync_po_receipt_to_qb", _connected, _ids_realm,
+            )
+            return None
 
         try:
             async with AsyncSessionLocal() as session:
