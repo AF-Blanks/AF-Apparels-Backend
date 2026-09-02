@@ -84,12 +84,18 @@ async def quickbooks_status(
 
             from app.services.quickbooks_service import QuickBooksService
 
+            # The constructor only reads env vars. The live tokens — and the
+            # realm we are actually connected to — come from initialize().
+            _svc = await QuickBooksService().initialize()
             _info = await _asyncio.to_thread(
-                QuickBooksService().query, "SELECT CompanyName FROM CompanyInfo"
+                _svc.query, "SELECT * FROM CompanyInfo"
             )
             _rows = (_info or {}).get("QueryResponse", {}).get("CompanyInfo", [])
             if _rows:
-                company_name = _rows[0].get("CompanyName")
+                company_name = (
+                    _rows[0].get("CompanyName")
+                    or _rows[0].get("LegalName")
+                )
         except Exception as exc:  # noqa: BLE001 — informational only
             logger.warning("Could not read the QuickBooks company name: %s", exc)
 
