@@ -436,6 +436,10 @@ async def outstanding_report(
                 Order.id, Order.company_id, Order.order_number, Order.created_at,
                 Order.total, Order.amount_paid, Order.payment_status, Order.status,
                 Order.payment_terms,
+                # Written onto the order when the invoice was raised, so it is
+                # read from here rather than asked of QuickBooks again — this
+                # report opens often and that would be a call per row.
+                Order.qb_invoice_id, Order.invoice_sent_at,
             )
             .where(
                 Order.company_id.in_(_ids),
@@ -457,6 +461,13 @@ async def outstanding_report(
                 "due": round(float(o["total"] or 0) - float(o["amount_paid"] or 0), 2),
                 "payment_status": o["payment_status"],
                 "payment_terms": o["payment_terms"],
+                "qb_invoice_id": o["qb_invoice_id"],
+                # The number the customer sees on their invoice is the order
+                # number; qb_invoice_id is QuickBooks' own reference for it.
+                "invoice_number": o["order_number"],
+                "invoice_sent_at": (
+                    o["invoice_sent_at"].isoformat() if o["invoice_sent_at"] else None
+                ),
             })
 
     items = []
