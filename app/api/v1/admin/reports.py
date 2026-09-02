@@ -1333,6 +1333,8 @@ async def variant_sales_comparison(
 @router.get("/reports/stock-movement")
 async def stock_movement_report(
     month: str | None = Query(None, description='Month to report, as "2026-08". Defaults to the current month.'),
+    date_from: date | None = Query(None, description="Start date (inclusive) — overrides month"),
+    date_to: date | None = Query(None, description="End date (inclusive) — overrides month"),
     q: str | None = Query(None, description="Filter by product name, colour or size"),
     hide_idle: bool = Query(True, description="Leave out variants with no stock and no movement"),
     _: None = Depends(require_admin),
@@ -1353,8 +1355,23 @@ async def stock_movement_report(
     from app.models.inventory import InventoryAdjustment
     from app.models.purchase_order import POLineItem, POReceiving, POReceivingItem, PurchaseOrder
 
-    month = month or date.today().strftime("%Y-%m")
-    start, end, label = _month_bounds(month)
+    # A month is the usual question, but stock gets counted over whatever window
+    # someone is actually asking about — a season, the week either side of a
+    # delivery, the days since the last physical count.
+    if date_from or date_to:
+        _f, _t = (date_from or date_to), (date_to or date_from)
+        if _f > _t:
+            _f, _t = _t, _f
+        start = datetime.combine(_f, datetime.min.time())
+        end = datetime.combine(_t, datetime.max.time())
+        label = (
+            _f.strftime("%d %b %Y") if _f == _t
+            else f"{_f.strftime('%d %b %Y')} – {_t.strftime('%d %b %Y')}"
+        )
+        month = None
+    else:
+        month = month or date.today().strftime("%Y-%m")
+        start, end, label = _month_bounds(month)
 
     def _variant_filter(stmt, name_col, color_col, size_col):
         if not (q and q.strip()):
@@ -1395,6 +1412,49 @@ async def stock_movement_report(
 
     ids = list(variants)
 
+    async def _sold_qty(since=None, after=None, until=None, exclude_cancelled=True) -> dict:
+        """Units that left the shelf on orders, over a window.
+
+        Drafts never touch stock, so they never count. A cancelled order does
+        count as having left — it was deducted at checkout — and the restock
+        that followed shows up in the adjustment log, so the two cancel out
+        exactly where they should.
+        """
+        stmt = (
+            select(OrderItem.variant_id, func.coalesce(func.sum(OrderItem.quantity), 0))
+            .join(Order, Order.id == OrderItem.order_id)
+            .where(OrderItem.variant_id.in_(ids))
+            .where(Order.is_draft.is_(False))
+            .group_by(OrderItem.variant_id)
+        )
+        if exclude_cancelled:
+            stmt = stmt.where(Order.status.notin_(["cancelled", "refunded"]))
+        if since is not None:
+            stmt = stmt.where(Order.created_at >= since)
+        if after is not None:
+            stmt = stmt.where(Order.created_at > after)
+        if until is not None:
+            stmt = stmt.where(Order.created_at <= until)
+        return {vid: int(n or 0) for vid, n in (await db.execute(stmt)).all()}
+
+    async def _received_qty(since=None, after=None, until=None) -> dict:
+        """Units booked in against a purchase order, over a window."""
+        stmt = (
+            select(POLineItem.product_variant_id,
+                   func.coalesce(func.sum(POReceivingItem.qty_received), 0))
+            .join(POLineItem, POLineItem.id == POReceivingItem.po_line_item_id)
+            .join(POReceiving, POReceiving.id == POReceivingItem.receiving_id)
+            .where(POLineItem.product_variant_id.in_(ids))
+            .group_by(POLineItem.product_variant_id)
+        )
+        if since is not None:
+            stmt = stmt.where(POReceiving.created_at >= since)
+        if after is not None:
+            stmt = stmt.where(POReceiving.created_at > after)
+        if until is not None:
+            stmt = stmt.where(POReceiving.created_at <= until)
+        return {vid: int(n or 0) for vid, n in (await db.execute(stmt)).all()}
+
     async def _net_change(since: datetime | None = None, after: datetime | None = None) -> dict:
         """Net stock change recorded by the adjustment log over a window."""
         stmt = (
@@ -1412,34 +1472,37 @@ async def stock_movement_report(
             stmt = stmt.where(InventoryAdjustment.created_at > after)
         return {vid: int(n or 0) for vid, n in (await db.execute(stmt)).all()}
 
-    changed_since_start = await _net_change(since=start)
-    changed_after_end = await _net_change(after=end)
+    # Winding today's stock back to a date means undoing everything that has
+    # happened since — and only some of it is in the adjustment log.
+    #
+    # A sale takes stock straight off the record, and so does receiving a
+    # purchase order; neither writes a log row. Reconstructing from the log
+    # alone therefore undid manual corrections and nothing else, so opening
+    # came out roughly equal to today's figure and the balancing column
+    # absorbed the difference. On a variant that had simply been sold and
+    # restocked all month, the report read as though nothing had moved.
+    _adj_since_start = await _net_change(since=start)
+    _adj_after_end = await _net_change(after=end)
+    _sold_since_start = await _sold_qty(since=start, exclude_cancelled=False)
+    _sold_after_end = await _sold_qty(after=end, exclude_cancelled=False)
+    _recv_since_start = await _received_qty(since=start)
+    _recv_after_end = await _received_qty(after=end)
 
-    # ── Sold in the month ─────────────────────────────────────────────────────
-    sold = {
-        vid: int(n or 0)
-        for vid, n in (await db.execute(
-            select(OrderItem.variant_id, func.coalesce(func.sum(OrderItem.quantity), 0))
-            .join(Order, Order.id == OrderItem.order_id)
-            .where(OrderItem.variant_id.in_(ids))
-            .where(Order.created_at.between(start, end))
-            .where(Order.status.notin_(["cancelled", "refunded"]))
-            .group_by(OrderItem.variant_id)
-        )).all()
-    }
+    def _moved(adj, sold_, recv):
+        """Everything that changed the count over a window."""
+        return {
+            vid: adj.get(vid, 0) + recv.get(vid, 0) - sold_.get(vid, 0)
+            for vid in ids
+        }
 
-    # ── Received in the month (goods that actually arrived) ───────────────────
-    received = {
-        vid: int(n or 0)
-        for vid, n in (await db.execute(
-            select(POLineItem.product_variant_id, func.coalesce(func.sum(POReceivingItem.qty_received), 0))
-            .join(POLineItem, POLineItem.id == POReceivingItem.po_line_item_id)
-            .join(POReceiving, POReceiving.id == POReceivingItem.receiving_id)
-            .where(POLineItem.product_variant_id.in_(ids))
-            .where(POReceiving.created_at.between(start, end))
-            .group_by(POLineItem.product_variant_id)
-        )).all()
-    }
+    changed_since_start = _moved(_adj_since_start, _sold_since_start, _recv_since_start)
+    changed_after_end = _moved(_adj_after_end, _sold_after_end, _recv_after_end)
+
+    # ── Sold and received inside the window ───────────────────────────────────
+    # Drafts are left out of "sold" here as everywhere else: a draft is a quote,
+    # and quoting something does not take it off the shelf.
+    sold = await _sold_qty(since=start, until=end)
+    received = await _received_qty(since=start, until=end)
 
     # ── Still on order — new stock booked but not yet in the building ─────────
     ordered = {
@@ -1500,7 +1563,12 @@ async def stock_movement_report(
         cursor = date(cursor.year - (cursor.month == 1), (cursor.month - 2) % 12 + 1, 1)
 
     return {
-        "period": {"value": month, "label": label},
+        "period": {
+            "value": month,
+            "label": label,
+            "from": start.date().isoformat(),
+            "to": end.date().isoformat(),
+        },
         "available_months": months,
         "summary": {
             "variants": len(rows),
