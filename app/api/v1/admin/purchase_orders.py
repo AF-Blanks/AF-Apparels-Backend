@@ -427,6 +427,143 @@ async def _create_new_product_variant(db: AsyncSession, line_item: "POLineItem")
     return variant.id
 
 
+#: An order that has already gone out cannot be waiting on this delivery, and a
+#: cancelled one is not waiting either.
+_WAITING_STATUSES = ("pending", "confirmed", "processing", "ready_for_pickup")
+
+
+async def _awaiting_delivery(db: AsyncSession, receiving_id: UUID) -> list[dict]:
+    """Customers whose backordered lines this delivery covers.
+
+    A backorder is a promise with no date attached until the goods land. The
+    moment they do, the people who took that promise are the ones who most want
+    to hear — and for anything still unpaid, hearing is also what prompts them
+    to settle it.
+    """
+    from app.models.company import Company
+    from app.models.order import Order, OrderItem
+    from app.models.user import User
+
+    # What actually arrived, and how much of each.
+    arrived = {
+        vid: int(q or 0)
+        for vid, q in (await db.execute(
+            select(POLineItem.product_variant_id,
+                   func.sum(POReceivingItem.qty_received))
+            .join(POLineItem, POLineItem.id == POReceivingItem.po_line_item_id)
+            .where(POReceivingItem.receiving_id == receiving_id)
+            .group_by(POLineItem.product_variant_id)
+        )).all()
+        if vid is not None
+    }
+    if not arrived:
+        return []
+
+    rows = (await db.execute(
+        select(
+            Order.id, Order.order_number, Order.total, Order.payment_status,
+            Order.guest_email, Order.guest_name,
+            Company.name.label("company_name"),
+            User.email.label("user_email"), User.first_name,
+            OrderItem.quantity, OrderItem.product_name,
+            ProductVariant.color, ProductVariant.size, ProductVariant.id.label("variant_id"),
+        )
+        .select_from(OrderItem)
+        .join(Order, Order.id == OrderItem.order_id)
+        .join(ProductVariant, ProductVariant.id == OrderItem.variant_id)
+        .outerjoin(Company, Company.id == Order.company_id)
+        .outerjoin(User, User.id == Order.placed_by_id)
+        .where(OrderItem.variant_id.in_(list(arrived)))
+        .where(OrderItem.is_backordered.is_(True))
+        .where(Order.status.in_(_WAITING_STATUSES))
+        .where(Order.is_draft.is_(False))
+        .order_by(Order.created_at.asc())
+    )).mappings().all()
+
+    # One message per order, however many of its lines this delivery covers.
+    orders: dict = {}
+    for r in rows:
+        oid = str(r["id"])
+        o = orders.setdefault(oid, {
+            "order_id": oid,
+            "order_number": r["order_number"],
+            "customer": r["company_name"] or r["guest_name"] or "Customer",
+            "email": r["user_email"] or r["guest_email"],
+            "first_name": r["first_name"] or "",
+            "payment_status": r["payment_status"],
+            "balance": float(r["total"] or 0) if r["payment_status"] != "paid" else 0.0,
+            "lines": [],
+        })
+        o["lines"].append({
+            "description": " ".join(x for x in [
+                r["product_name"], r["color"], r["size"],
+            ] if x),
+            "quantity": int(r["quantity"] or 0),
+        })
+
+    # No address, no message. Said plainly rather than dropped, so nobody is
+    # left believing a customer was told when they were not.
+    return [
+        {**o, "can_email": bool(o["email"])}
+        for o in orders.values()
+    ]
+
+
+@router.get("/receivings/{receiving_id}/awaiting-customers")
+async def list_awaiting_customers(receiving_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Who is waiting on what this delivery brought in — read only."""
+    people = await _awaiting_delivery(db, receiving_id)
+    return {
+        "receiving_id": str(receiving_id),
+        "customers": people,
+        "count": len(people),
+        "unpaid_count": sum(1 for p in people if p["balance"] > 0),
+        "unreachable": [p["order_number"] for p in people if not p["can_email"]],
+    }
+
+
+class NotifyRequest(BaseModel):
+    order_ids: list[str] | None = None      # None = everyone on the list
+
+
+@router.post("/receivings/{receiving_id}/notify-awaiting")
+async def notify_awaiting_customers(
+    receiving_id: UUID,
+    payload: NotifyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Tell the waiting customers their goods have arrived.
+
+    Sent by hand rather than the moment stock is booked in: a receiving entered
+    against the wrong line, or with the wrong quantity, is a normal mistake and
+    an easy one to correct — but an email that has gone out cannot be called
+    back, and this one goes to customers.
+    """
+    from app.tasks.email_tasks import send_backorder_arrived_email
+
+    people = await _awaiting_delivery(db, receiving_id)
+    if payload.order_ids is not None:
+        wanted = set(payload.order_ids)
+        people = [p for p in people if p["order_id"] in wanted]
+
+    sent, skipped = 0, []
+    for p in people:
+        if not p["can_email"]:
+            skipped.append(p["order_number"])
+            continue
+        send_backorder_arrived_email.delay(
+            p["email"], p["first_name"], p["customer"], p["order_number"],
+            p["lines"], p["balance"],
+        )
+        sent += 1
+
+    logger.info(
+        "Backorder-arrived notices queued: receiving=%s sent=%d skipped=%d",
+        receiving_id, sent, len(skipped),
+    )
+    return {"sent": sent, "skipped_no_email": skipped}
+
+
 @router.post("/{po_id}/receive")
 async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(

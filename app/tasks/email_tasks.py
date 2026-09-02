@@ -1012,6 +1012,98 @@ def send_payment_failed_email(self, order_id: str) -> dict:
         raise self.retry(exc=exc, countdown=delay)
 
 
+# ─── Backordered stock has arrived ───────────────────────────────────────────
+
+def _backorder_arrived_html(
+    first_name: str, customer: str, order_number: str,
+    lines: list, balance: float,
+) -> str:
+    """The message a customer waiting on a backorder actually wants."""
+    rows = "".join(
+        '<tr>'
+        f'<td style="padding:7px 0;font-size:14px;color:#2A2830">{l.get("description","")}</td>'
+        f'<td style="padding:7px 0;font-size:14px;color:#1B3A5C;font-weight:700;'
+        f'text-align:right">{l.get("quantity", 0)} pcs</td>'
+        '</tr>'
+        for l in (lines or [])
+    )
+
+    # Only where something is actually owed. Telling somebody who has already
+    # paid that their balance is zero reads as a bill, not as good news.
+    owing = ""
+    if balance and balance > 0:
+        owing = (
+            '<div style="margin:22px 0 0;padding:16px 18px;background:#FEF6F6;'
+            'border:1px solid #F3C9CB;border-radius:8px">'
+            '<p style="margin:0 0 6px;font-size:13px;font-weight:700;color:#1B3A5C">'
+            'Outstanding balance</p>'
+            f'<p style="margin:0;font-size:22px;font-weight:800;color:#E8242A">'
+            f'${balance:,.2f}</p>'
+            '<p style="margin:8px 0 0;font-size:13px;line-height:1.6;color:#4B5563">'
+            f'Invoice {order_number}. Settling this lets us release the order — '
+            'reply to this email or call us and we will take payment over the phone.'
+            '</p></div>'
+        )
+
+    greeting = f"Good news, {first_name}" if first_name else "Good news"
+
+    return (
+        '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\','
+        'Helvetica,Arial,sans-serif;max-width:600px;margin:0 auto;background:#ffffff">'
+        '<div style="background:#1B3A5C;padding:26px 32px;text-align:center;'
+        'border-bottom:3px solid #E8242A">'
+        '<span style="font-size:26px;font-weight:900;color:#fff;letter-spacing:.02em">'
+        'AF APPARELS</span>'
+        '</div>'
+        '<div style="padding:34px 32px;background:#fff;color:#2A2830">'
+        f'<h2 style="margin:0 0 14px;color:#1B3A5C;font-size:22px">{greeting} &mdash; '
+        'your stock has arrived</h2>'
+        '<p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#374151">'
+        f'The items you had on backorder against order <strong>{order_number}</strong> '
+        'have landed in our warehouse.'
+        '</p>'
+        '<table style="width:100%;border-collapse:collapse;border-top:1px solid #E5E7EB;'
+        'border-bottom:1px solid #E5E7EB">'
+        f'{rows}'
+        '</table>'
+        f'{owing}'
+        '<p style="margin:24px 0 0;font-size:14px;line-height:1.7;color:#374151">'
+        'Questions? Call '
+        '<a href="tel:2142727213" style="color:#1B3A5C;font-weight:700">'
+        '+1&nbsp;(214)&nbsp;272-7213</a> or email '
+        '<a href="mailto:info@afblanks.com" style="color:#1B3A5C">info@afblanks.com</a>.'
+        '</p>'
+        '</div>'
+        '<div style="background:#F7F6F3;padding:18px 32px;text-align:center;'
+        'font-size:12px;color:#7A7880">AF Apparels &middot; Dallas, TX</div>'
+        '</div>'
+    )
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_backorder_arrived_email(
+    self, to_email: str, first_name: str, customer: str, order_number: str,
+    lines: list, balance: float,
+) -> dict:
+    """One customer's notice that the stock they were waiting on is in."""
+    try:
+        async def _send():
+            from app.services.email_service import EmailService
+            async with AsyncSessionLocal() as db:
+                ok = EmailService(db).send_raw(
+                    to_email=to_email,
+                    subject=f"Your backordered stock has arrived — order {order_number}",
+                    body_html=_backorder_arrived_html(
+                        first_name, customer, order_number, lines, balance,
+                    ),
+                )
+                return {"status": "sent" if ok else "failed", "order": order_number}
+        return _run(_send())
+    except Exception as exc:
+        delay = 60 * (2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)
+
+
 # ─── Marketing broadcast ──────────────────────────────────────────────────────
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
