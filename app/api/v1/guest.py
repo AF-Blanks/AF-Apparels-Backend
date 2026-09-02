@@ -170,6 +170,13 @@ async def guest_checkout(
     """Place an order as a guest (retail pricing, no account required)."""
     from app.core.config import get_settings
 
+    if get_settings().MAINTENANCE_MODE:
+        raise ValidationError(
+            "The store is briefly closed for maintenance and cannot take orders "
+            "right now. Please try again shortly, or email info@afblanks.com and "
+            "we will place it for you."
+        )
+
     settings = get_settings()
 
     if not payload.items:

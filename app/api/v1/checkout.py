@@ -159,6 +159,14 @@ async def _confirm_checkout_inner(
     request: Request,
     db: AsyncSession,
 ):
+    from app.core.config import settings as _cfg_maint
+    if _cfg_maint.MAINTENANCE_MODE:
+        raise ValidationError(
+            "The store is briefly closed for maintenance and cannot take orders "
+            "right now. Please try again shortly, or email info@afblanks.com and "
+            "we will place it for you."
+        )
+
     company_id = getattr(request.state, "company_id", None)
     user_id = getattr(request.state, "user_id", None)
     _account_type = getattr(request.state, "account_type", "wholesale")

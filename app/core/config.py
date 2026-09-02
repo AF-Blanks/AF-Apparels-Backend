@@ -129,6 +129,12 @@ class Settings(BaseSettings):
     # stock: a catalogue in two places has to be kept in step, and an inventory
     # ledger in two places will disagree the first time either is touched
     # outside the other.
+    # Closes the shop to new orders. The storefront hides itself too, but a page
+    # already open in somebody's browser does not know that — so the checkout
+    # has to refuse as well, or the one customer who was mid-order slips
+    # through exactly when nobody is watching.
+    MAINTENANCE_MODE: bool = False
+
     QB_SYNC_CATALOG: bool = False      # per-variant items
     QB_SYNC_INVENTORY: bool = False    # quantity on hand
     # A receipt from a supplier creates a bill — money owed — so it belongs in
