@@ -425,6 +425,40 @@ async def outstanding_report(
 
     rows = (await db.execute(q)).mappings().all()
 
+    # The orders behind each customer's balance. A total is what gets noticed,
+    # but a total cannot be chased — the individual order is what a reminder is
+    # about, so they are carried alongside it rather than fetched again per row.
+    _ids = [r["company_id"] for r in rows]
+    _by_company: dict = {}
+    if _ids:
+        for o in (await db.execute(
+            select(
+                Order.id, Order.company_id, Order.order_number, Order.created_at,
+                Order.total, Order.amount_paid, Order.payment_status, Order.status,
+                Order.payment_terms,
+            )
+            .where(
+                Order.company_id.in_(_ids),
+                Order.status.notin_(["cancelled", "refunded"]),
+                owed > 0,
+            )
+            .order_by(Order.created_at.asc())
+        )).mappings().all():
+            _placed = o["created_at"]
+            if _placed is not None and _placed.tzinfo is None:
+                _placed = _placed.replace(tzinfo=timezone.utc)
+            _by_company.setdefault(str(o["company_id"]), []).append({
+                "order_id": str(o["id"]),
+                "order_number": o["order_number"],
+                "date": _placed.date().isoformat() if _placed else None,
+                "days": (now - _placed).days if _placed else None,
+                "total": round(float(o["total"] or 0), 2),
+                "paid": round(float(o["amount_paid"] or 0), 2),
+                "due": round(float(o["total"] or 0) - float(o["amount_paid"] or 0), 2),
+                "payment_status": o["payment_status"],
+                "payment_terms": o["payment_terms"],
+            })
+
     items = []
     for r in rows:
         oldest = r["oldest_unpaid_at"]
@@ -453,6 +487,7 @@ async def outstanding_report(
                 "d60": round(float(r["age_60"] or 0), 2),
                 "d90": round(float(r["age_90"] or 0), 2),
             },
+            "orders": _by_company.get(str(r["company_id"]), []),
         })
 
     return {
