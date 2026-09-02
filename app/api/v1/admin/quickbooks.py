@@ -225,7 +225,10 @@ async def quickbooks_callback(
     })
     await db.commit()
 
-    return RedirectResponse(url=f"{frontend_url}/admin/quickbooks?connected=true")
+    # The settings page is where the connection is managed and where the
+    # company being adopted is confirmed — sending someone to /admin/quickbooks
+    # landed them on a 404 right after a successful connect.
+    return RedirectResponse(url=f"{frontend_url}/admin/settings/quickbooks?connected=true")
 
 
 @router.post("/quickbooks/adopt-company", response_model=dict)
