@@ -1015,7 +1015,7 @@ def send_payment_failed_email(self, order_id: str) -> dict:
 # ─── Marketing broadcast ──────────────────────────────────────────────────────
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
-def send_marketing_email(self, user_id: str, to_email: str, first_name: str, subject: str, body_html: str) -> dict:
+def send_marketing_email(self, user_id: str, to_email: str, first_name: str, subject: str, body_html: str, attachments: list | None = None) -> dict:
     """Send one recipient's copy of an admin-composed marketing broadcast.
 
     Queued one task per recipient (not looped synchronously) so Celery's own
@@ -1028,7 +1028,17 @@ def send_marketing_email(self, user_id: str, to_email: str, first_name: str, sub
             async with AsyncSessionLocal() as db:
                 svc = EmailService(db)
                 rendered = body_html.replace("{{first_name}}", first_name or "there")
-                ok = svc.send_raw(to_email=to_email, subject=subject, body_html=rendered)
+                # Passed as URLs, so the file itself never rides through the
+                # queue — one upload serves every recipient's copy.
+                _files = [
+                    {"filename": a["filename"], "path": a["url"]}
+                    for a in (attachments or [])
+                    if a.get("url") and a.get("filename")
+                ] or None
+                ok = svc.send_raw(
+                    to_email=to_email, subject=subject, body_html=rendered,
+                    attachments=_files,
+                )
                 return {"status": "sent" if ok else "failed", "user_id": user_id}
         return _run(_send())
     except Exception as exc:

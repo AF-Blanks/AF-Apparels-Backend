@@ -207,15 +207,25 @@ class EmailService:
         if reply_to:
             params["reply_to"] = [reply_to]
         if attachments:
-            params["attachments"] = [
-                {
+            # Two ways to attach. "content" carries the bytes, which is right for
+            # something generated here and then thrown away — an invoice PDF. A
+            # "path" is a URL Resend fetches itself, which is what a broadcast
+            # wants: the file is uploaded once and every recipient's copy points
+            # at it, instead of the same megabytes riding through the queue and
+            # out over the wire once per person.
+            _params = []
+            for a in attachments:
+                if a.get("path"):
+                    _params.append({"filename": a["filename"], "path": a["path"]})
+                    continue
+                _content = a["content"]
+                _params.append({
                     "filename": a["filename"],
-                    "content": base64.b64encode(a["content"]).decode()
-                    if isinstance(a["content"], bytes)
-                    else a["content"],
-                }
-                for a in attachments
-            ]
+                    "content": base64.b64encode(_content).decode()
+                    if isinstance(_content, bytes)
+                    else _content,
+                })
+            params["attachments"] = _params
 
         try:
             result = resend.Emails.send(params)
