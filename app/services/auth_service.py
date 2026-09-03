@@ -78,9 +78,13 @@ class AuthService:
         membership: CompanyUser | None = None
         is_retail = getattr(user, "account_type", "wholesale") == "retail"
         if not user.is_admin:
+            # Ordered rather than left to the database's own return order: a user
+            # invited into a second company should sign into the one they joined
+            # most recently, not whichever row happens to come back first.
             mem_result = await self.db.execute(
                 select(CompanyUser)
                 .where(CompanyUser.user_id == user.id, CompanyUser.is_active == True)
+                .order_by(CompanyUser.created_at.desc())
                 .limit(1)
             )
             membership = mem_result.scalar_one_or_none()

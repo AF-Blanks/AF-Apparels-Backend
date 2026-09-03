@@ -774,8 +774,13 @@ async def invite_user(
     await db.commit()
 
     try:
+        from app.core.config import settings as _cfg_invite
         from app.services.email_service import EmailService
         email_svc = EmailService(db)
+        # Was hardcoded to localhost:3000 — every invited teammate got a link
+        # that only ever worked on whoever built this. FRONTEND_URL is the
+        # live domain everywhere else an email links back to the site.
+        login_url = f"{_cfg_invite.FRONTEND_URL}/login"
         email_svc.send_raw(
             to_email=payload.email,
             subject="You have been invited to AF Apparels",
@@ -785,7 +790,7 @@ async def invite_user(
             <p>You have been invited to join the AF Apparels wholesale platform.</p>
             <p><strong>Your login details:</strong></p>
             <p>Email: {payload.email}<br>Password: {payload.password}</p>
-            <p><a href="http://localhost:3000/login">Click here to login</a></p>
+            <p><a href="{login_url}">Click here to login</a></p>
             <p>AF Apparels Team</p>
             """,
         )
