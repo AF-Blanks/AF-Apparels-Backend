@@ -686,7 +686,17 @@ async def get_customer_qb_balance(company_id: UUID, db: AsyncSession = Depends(g
     """Pull this customer's live open balance (accounts receivable) straight from
     QuickBooks — for when a payment was recorded directly in QB and the app's own
     figure may be stale. One on-demand call (behind the global rate limiter), not
-    automatic, so it never causes a QB API storm."""
+    automatic, so it never causes a QB API storm.
+
+    Also returns the name QuickBooks has on file for whichever customer this
+    company is actually linked to. Our own record of who a company is and the
+    QuickBooks id stored against it are two different things — the id is a
+    number, and nothing here re-checks it says what we think it says. A company
+    renamed on our side after its QuickBooks customer was first created carries
+    the old name in QuickBooks silently, since nothing pushes the new one back;
+    this is the one place that says whose invoices this company's orders have
+    actually been landing on.
+    """
     from sqlalchemy import select as _sel
     from fastapi import HTTPException
 
@@ -701,11 +711,28 @@ async def get_customer_qb_balance(company_id: UUID, db: AsyncSession = Depends(g
         from app.services.quickbooks_service import QuickBooksService
         svc = await QuickBooksService().initialize()
         data = await asyncio.to_thread(svc._request, "GET", f"customer/{qb_id}?minorversion=65")
-        balance = float((data.get("Customer") or {}).get("Balance", 0) or 0)
-        return {"synced": True, "qb_balance": balance}
+        cust = data.get("Customer") or {}
+        balance = float(cust.get("Balance", 0) or 0)
+        qb_name = cust.get("DisplayName") or cust.get("CompanyName")
+        return {
+            "synced": True,
+            "qb_balance": balance,
+            "qb_customer_id": str(qb_id),
+            "qb_customer_name": qb_name,
+            # Loose comparison — "American HTV & Supply" vs "american htv and supply"
+            # is the same name typed twice, not a mismatch worth a red flag.
+            "name_matches": _names_roughly_match(company.name, qb_name),
+        }
     except Exception as _e:
         logger.warning("QB balance fetch failed for company %s: %s", company_id, _e)
         return {"synced": False, "reason": "Couldn't reach QuickBooks right now — try again shortly."}
+
+
+def _names_roughly_match(a: str | None, b: str | None) -> bool:
+    """Same name allowing for case, spacing and punctuation — see the tier-key
+    comparison used for Discount Groups, same idea."""
+    norm = lambda s: "".join(ch for ch in (s or "").upper() if ch.isalnum())
+    return bool(a) and bool(b) and norm(a) == norm(b)
 
 
 class _CustomerEmailRequest(BaseModel):
