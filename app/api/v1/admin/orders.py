@@ -359,6 +359,58 @@ async def create_draft_order(
     return {"id": str(order.id), "order_number": order.order_number}
 
 
+@router.get("/orders/audit-qb-customers")
+async def audit_qb_invoice_customers(db: AsyncSession = Depends(get_db)):
+    """Every synced order, checked against who QuickBooks actually billed it to.
+
+    Order 1068 (American HTV & Supply) went out under the name "E-Z Connection
+    Inc" — right goods, right amount, wrong customer. The company's own
+    QuickBooks link had been cleared by a switch to a different QuickBooks
+    company, and a fallback meant to survive a different, older bug reached for
+    a leftover reference from before the switch: a bare number that meant one
+    customer in the old company and a different, unrelated one in this one.
+    That fallback is now scoped to only trust references written since the
+    switch — this answers how many orders it already reached before that fix
+    landed, since the company's own name in our records was never wrong; only
+    what QuickBooks was told matched.
+    """
+    from app.services.quickbooks_service import QuickBooksService
+    from app.api.v1.admin.customers import _names_roughly_match
+
+    rows = (await db.execute(
+        select(Order.id, Order.order_number, Order.qb_invoice_id, Order.guest_name,
+               Company.name.label("company_name"))
+        .outerjoin(Company, Company.id == Order.company_id)
+        .where(Order.qb_invoice_id.isnot(None))
+        .order_by(Order.created_at.desc())
+    )).all()
+
+    if not rows:
+        return {"checked": 0, "mismatches": [], "errors": []}
+
+    svc = await QuickBooksService().initialize()
+    mismatches: list[dict] = []
+    errors: list[dict] = []
+    for oid, onum, inv_id, guest_name, company_name in rows:
+        our_name = company_name or guest_name or "—"
+        try:
+            data = await asyncio.to_thread(svc._request, "GET", f"invoice/{inv_id}?minorversion=65")
+            qb_cust = ((data.get("Invoice") or {}).get("CustomerRef") or {}).get("name")
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"order_number": onum, "qb_invoice_id": inv_id, "error": str(exc)})
+            continue
+        if not _names_roughly_match(our_name, qb_cust):
+            mismatches.append({
+                "order_id": str(oid),
+                "order_number": onum,
+                "our_company": our_name,
+                "qb_customer": qb_cust,
+                "qb_invoice_id": inv_id,
+            })
+
+    return {"checked": len(rows), "mismatches": mismatches, "errors": errors}
+
+
 @router.get("/orders/companies")
 async def list_order_companies(db: AsyncSession = Depends(get_db)):
     """Every company that has placed an order, for the Company filter dropdown.

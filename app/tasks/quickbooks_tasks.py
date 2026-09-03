@@ -377,19 +377,41 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                                 " — QB Payments overwrote it; falling back to QBSyncLog",
                                 raw_qb_id,
                             )
-                        # Fall back to QBSyncLog for a prior successful sync
-                        log = (await session.execute(
+                        # Fall back to QBSyncLog for a prior successful sync — but only
+                        # one written since we last adopted the company we are now
+                        # connected to. A log row carries no record of which QuickBooks
+                        # company it was synced into, only a bare integer id — and that
+                        # id means whatever customer happens to hold it in whichever
+                        # company is connected today.
+                        #
+                        # This is exactly how order 1068 (American HTV & Supply) landed
+                        # on an invoice for "E-Z Connection Inc": company.qb_customer_id
+                        # had been cleared by the move to a new QuickBooks company, this
+                        # fallback reached for a "success" log left over from the old
+                        # one, and the number it held pointed at an unrelated customer
+                        # in the new company. Scoping the fallback to after the switch
+                        # closes that — anything older is not evidence of anything here.
+                        from sqlalchemy import text as _cutoff_text
+                        _cutoff = (await session.execute(
+                            _cutoff_text("SELECT value FROM app_settings WHERE key = 'qb_ids_realm_since'")
+                        )).scalar_one_or_none()
+                        log_q = (
                             select(QBSyncLog)
                             .where(QBSyncLog.entity_type == "company")
                             .where(QBSyncLog.entity_id == order.company_id)
                             .where(QBSyncLog.status == "success")
-                            .order_by(QBSyncLog.created_at.desc())
-                            .limit(1)
+                        )
+                        if _cutoff:
+                            from datetime import datetime as _dt
+                            log_q = log_q.where(QBSyncLog.created_at >= _dt.fromisoformat(_cutoff))
+                        log = (await session.execute(
+                            log_q.order_by(QBSyncLog.created_at.desc()).limit(1)
                         )).scalar_one_or_none()
                         qb_customer_id = log.qb_entity_id if log else None
                         logger.info(
-                            "sync_order_invoice_to_qb qb_customer_id from QBSyncLog: %s",
-                            qb_customer_id,
+                            "sync_order_invoice_to_qb qb_customer_id from QBSyncLog "
+                            "(since %s): %s",
+                            _cutoff or "install", qb_customer_id,
                         )
 
                 # Snapshot all needed fields before the session closes.

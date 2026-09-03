@@ -433,6 +433,13 @@ async def adopt_quickbooks_company(
         "INSERT INTO app_settings (key, value) VALUES ('qb_ids_realm', :v) "
         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
     ), {"v": connected})
+    # When this switch happened. Nothing here scopes how far back a QBSyncLog
+    # row can be trusted to have been written into the company we are in now —
+    # this is that boundary, read by the invoice sync's log fallback.
+    await db.execute(_t(
+        "INSERT INTO app_settings (key, value) VALUES ('qb_ids_realm_since', :v) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+    ), {"v": datetime.now(timezone.utc).isoformat()})
     await db.commit()
 
     logger.warning(

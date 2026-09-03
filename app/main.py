@@ -602,6 +602,20 @@ async def _ensure_content_tables() -> None:
                     updated_at TIMESTAMPTZ DEFAULT now()
                 )
             """))
+            # A company switch already happened before this fix existed, so no
+            # qb_ids_realm_since is on record for it — meaning the invoice sync's
+            # QBSyncLog fallback (just made to respect this cutoff) would otherwise
+            # trust every log entry ever written, including ones from the company
+            # left behind. Backfilling "now" the first time this runs after the fix
+            # ships discards all of that history at once: nothing older than the fix
+            # itself is trusted, which is the only safe default when the real
+            # switch time was never recorded.
+            await conn.execute(text("""
+                INSERT INTO app_settings (key, value)
+                SELECT 'qb_ids_realm_since', now()::text
+                WHERE EXISTS (SELECT 1 FROM app_settings WHERE key = 'qb_ids_realm')
+                  AND NOT EXISTS (SELECT 1 FROM app_settings WHERE key = 'qb_ids_realm_since')
+            """))
             await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS custom_swatch_colors (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
