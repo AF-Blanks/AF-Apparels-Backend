@@ -170,6 +170,11 @@ async def get_analytics(
     )
     total_tax_collected = float(tax_collected_q.scalar() or 0)
 
+    # Tier 4/5 commission earned in the same window, on the same rule the
+    # Commission report uses — see commission_total_for_period.
+    from app.api.v1.admin.reports import commission_total_for_period
+    total_commission = await commission_total_for_period(db, cur_start_dt, cur_end_dt)
+
     # ── Money in vs money still owed, on the same orders Total Sales counts ────
     # payment_status is the source of truth for settlement: a card capture marks
     # an order paid without always writing amount_paid, so "total - amount_paid"
@@ -396,6 +401,7 @@ async def get_analytics(
             "customers_change_percent": _pct_change(ordered_this_period, prev_customers),
             "conversion_rate": conversion_rate,
             "total_tax_collected": round(total_tax_collected, 2),
+            "total_commission": total_commission,
             "total_refunds": round(cur_refunds, 2),
         },
         "revenue_chart": revenue_chart,
