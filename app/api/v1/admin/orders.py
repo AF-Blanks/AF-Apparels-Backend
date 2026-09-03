@@ -359,6 +359,26 @@ async def create_draft_order(
     return {"id": str(order.id), "order_number": order.order_number}
 
 
+@router.get("/orders/companies")
+async def list_order_companies(db: AsyncSession = Depends(get_db)):
+    """Every company that has placed an order, for the Company filter dropdown.
+
+    Not the full customer list — a company with an account but no order yet
+    would sit in the dropdown pointing at an empty result, which is a dead end
+    dressed up as a choice.
+    """
+    rows = (await db.execute(
+        select(Company.id, Company.name, func.count(Order.id).label("order_count"))
+        .join(Order, Order.company_id == Company.id)
+        .group_by(Company.id, Company.name)
+        .order_by(Company.name.asc())
+    )).all()
+    return [
+        {"id": str(cid), "name": name, "order_count": count}
+        for cid, name, count in rows
+    ]
+
+
 @router.get("/orders", response_model=PaginatedResponse[AdminOrderListItem])
 async def list_admin_orders(
     q: str | None = None,
@@ -443,6 +463,9 @@ async def list_admin_orders(
 async def export_orders_csv(
     q: str | None = None,
     status: str | None = None,
+    company_id: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
     request: Request = None,
     db: AsyncSession = Depends(get_db),
 ):
@@ -450,10 +473,18 @@ async def export_orders_csv(
     query = select(Order, Company.name.label("company_name")).select_from(
         _outerjoin(Order, Company, Order.company_id == Company.id)
     )
+    # Same filters as the list this button sits beside — an export that ignores
+    # what is on screen hands back everything when the point was one company.
     if q:
         query = query.where(Order.order_number.ilike(f"%{q}%"))
     if status:
         query = query.where(Order.status == status)
+    if company_id:
+        query = query.where(Order.company_id == company_id)
+    if date_from:
+        query = query.where(Order.created_at >= datetime.combine(date_from, datetime.min.time()))
+    if date_to:
+        query = query.where(Order.created_at <= datetime.combine(date_to, datetime.max.time()))
     result = await db.execute(query.order_by(Order.created_at.desc()))
     rows = result.all()
 
