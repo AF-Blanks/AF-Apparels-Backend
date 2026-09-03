@@ -1767,7 +1767,7 @@ async def _commission_csv(db: AsyncSession, date_from, date_to, period: str):
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "Customer", "Tier", "Order #", "Date", "Paid", "Order total", "Billed",
+        "Customer", "Tier", "Order #", "Date", "Paid", "Order total",
         f"{'/'.join(COMMISSION_SPECIAL_CODES)} sales",
         f"{'/'.join(COMMISSION_SPECIAL_CODES)} commission ({COMMISSION_SPECIAL_PERCENT:g}%)",
         "Other sales",
@@ -1781,7 +1781,6 @@ async def _commission_csv(db: AsyncSession, date_from, date_to, period: str):
                 (o["date"] or "")[:10],
                 "yes" if o.get("paid") else "no",
                 f"{o.get('order_total', 0):.2f}",
-                f"{o.get('billed_goods', 0):.2f}",
                 f"{o['special_base']:.2f}", f"{o['special_commission']:.2f}",
                 f"{o['other_base']:.2f}", f"{o['other_commission']:.2f}",
                 f"{o['total_commission']:.2f}",
@@ -1791,7 +1790,6 @@ async def _commission_csv(db: AsyncSession, date_from, date_to, period: str):
         writer.writerow([
             c["company_name"], c["tier"], "— customer total —", "", "",
             f"{c.get('order_total', 0):.2f}",
-            f"{c.get('billed_goods', 0):.2f}",
             f"{c['special_base']:.2f}", f"{c['special_commission']:.2f}",
             f"{c['other_base']:.2f}", f"{c['other_commission']:.2f}",
             f"{c['total_commission']:.2f}",
@@ -1801,14 +1799,14 @@ async def _commission_csv(db: AsyncSession, date_from, date_to, period: str):
     t = data["totals"]
     writer.writerow([
         "ALL CUSTOMERS", "", "", "", "",
-        f"{t.get('order_total', 0):.2f}", f"{t.get('billed_goods', 0):.2f}",
+        f"{t.get('order_total', 0):.2f}",
         f"{t['special_base']:.2f}", f"{t['special_commission']:.2f}",
         f"{t['other_base']:.2f}", f"{t['other_commission']:.2f}",
         f"{t['total_commission']:.2f}",
     ])
     if t.get("unpaid_commission"):
         writer.writerow([
-            "of which on orders not yet paid", "", "", "", "", "", "",
+            "of which on orders not yet paid", "", "", "", "", "",
             "", "", "", "", f"{t['unpaid_commission']:.2f}",
         ])
 
@@ -1832,7 +1830,6 @@ async def commission_total_for_period(db: AsyncSession, start: datetime, end: da
     same rule.
     """
     from app.models.discount_group import DiscountGroup
-    from app.services import rate_card as _rc
 
     wanted = {_tier_key(t) for t in COMMISSION_TIERS}
     tagged = (await db.execute(
@@ -1847,8 +1844,7 @@ async def commission_total_for_period(db: AsyncSession, start: datetime, end: da
 
     rows = (await db.execute(
         select(
-            Product.product_code, OrderItem.product_name,
-            OrderItem.size, OrderItem.quantity, OrderItem.line_total,
+            Product.product_code, OrderItem.product_name, OrderItem.line_total,
         )
         .select_from(OrderItem)
         .join(Order, Order.id == OrderItem.order_id)
@@ -1862,12 +1858,10 @@ async def commission_total_for_period(db: AsyncSession, start: datetime, end: da
     )).all()
 
     total = 0.0
-    for product_code, product_name, size, qty, line_total in rows:
+    for product_code, product_name, line_total in rows:
         code = _product_code_of(product_code, product_name)
         rate = COMMISSION_SPECIAL_PERCENT if code in COMMISSION_SPECIAL_CODES else COMMISSION_DEFAULT_PERCENT
-        card_price = _rc.price_for(code, size)
-        base = float(card_price) * int(qty or 0) if card_price is not None else float(line_total or 0)
-        total += base * rate / 100
+        total += float(line_total or 0) * rate / 100
     return round(total, 2)
 
 
@@ -1894,7 +1888,6 @@ async def commission_report(
     from sqlalchemy import or_ as _or
 
     from app.models.discount_group import DiscountGroup
-    from app.services import rate_card as _rate_card
 
     # A customer's tier is a discount group reached through the tags on their
     # company record — not the pricing_tiers table, which is a separate and
@@ -2012,9 +2005,6 @@ async def commission_report(
             "total_commission": 0.0,
             # The slice of the total that rests on orders not yet paid for.
             "unpaid_commission": 0.0,
-            # What the orders were actually billed. Beside the rate-card figure
-            # it shows where pricing and the agreed card have drifted apart.
-            "billed_goods": 0.0,
             # Sum of each order's own total — the same figure the Orders list
             # shows for each, added up. Filled in once orders are known, not
             # accumulated per line, so a multi-line order is not counted twice.
@@ -2025,16 +2015,14 @@ async def commission_report(
         code = _product_code_of(r["product_code"], r["product_name"])
         is_special = code in COMMISSION_SPECIAL_CODES
 
-        # Commission is worked out on the agreed rate card, not on what the
-        # order happened to be billed. The two came apart because the card was
-        # never entered — orders went out at the ordinary price, and commission
-        # inherited that. The card is what was agreed, so the card is what pays.
-        #
-        # Anything the card does not cover falls back to the billed figure,
-        # which is the only price there is for it.
-        _billed = float(r["line_total"] or 0)
-        _card = _rate_card.price_for(code, r["size"])
-        base = float(_card) * int(r["quantity"] or 0) if _card is not None else _billed
+        # Commission is worked out on what the order was billed — the price set
+        # for that variant in Individual Variant Pricing, which is where prices
+        # live. There was a second copy of the price list in code, so that
+        # commission could be paid on the agreed figure while orders were still
+        # going out at the old one; the prices are set properly now, so the two
+        # would only ever drift apart, and the billed line is the one that is
+        # true by definition.
+        base = float(r["line_total"] or 0)
         rate = COMMISSION_SPECIAL_PERCENT if is_special else COMMISSION_DEFAULT_PERCENT
         # Deliberately not rounded here. A size is one line, an order is a dozen
         # of them, and rounding each to the cent before adding them up drifted
@@ -2052,7 +2040,6 @@ async def commission_report(
             cust["other_base"] += base
             cust["other_commission"] += earned
         cust["total_commission"] += earned
-        cust["billed_goods"] += _billed
         if not _paid:
             cust["unpaid_commission"] += earned
 
@@ -2063,7 +2050,6 @@ async def commission_report(
             "special_base": 0.0, "special_commission": 0.0,
             "other_base": 0.0, "other_commission": 0.0,
             "total_commission": 0.0,
-            "billed_goods": 0.0,
             # What the order actually came to — goods, shipping, tax and any
             # fee together, the same figure the Orders list shows. Set once per
             # order rather than accumulated, since every line on an order
@@ -2074,7 +2060,6 @@ async def commission_report(
             "paid": _paid,
         })
         o["units"] += int(r["quantity"] or 0)
-        o["billed_goods"] += _billed
         if is_special:
             o["special_base"] += base
             o["special_commission"] += earned
@@ -2089,11 +2074,10 @@ async def commission_report(
         c["order_total"] = round(sum(o["order_total"] for o in orders), 2)
         for o in orders:
             for k in ("special_base", "special_commission", "other_base",
-                      "other_commission", "total_commission", "billed_goods"):
+                      "other_commission", "total_commission"):
                 o[k] = round(o[k], 2)
         for k in ("special_base", "special_commission", "other_base",
-                  "other_commission", "total_commission", "unpaid_commission",
-                  "billed_goods"):
+                  "other_commission", "total_commission", "unpaid_commission"):
             c[k] = round(c[k], 2)
         c["order_count"] = len(orders)
         c["orders"] = orders
@@ -2117,7 +2101,6 @@ async def commission_report(
             "other_commission": round(sum(c["other_commission"] for c in out), 2),
             "total_commission": round(sum(c["total_commission"] for c in out), 2),
             "unpaid_commission": round(sum(c["unpaid_commission"] for c in out), 2),
-            "billed_goods": round(sum(c["billed_goods"] for c in out), 2),
             "order_total": round(sum(c["order_total"] for c in out), 2),
         },
         "customers": out,
