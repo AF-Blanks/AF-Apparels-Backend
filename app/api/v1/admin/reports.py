@@ -1820,6 +1820,62 @@ async def _commission_csv(db: AsyncSession, date_from, date_to, period: str):
     )
 
 
+async def _current_variant_prices(db: AsyncSession, company_ids: list) -> dict:
+    """What each of these customers pays per variant right now.
+
+    Keyed (company_id, variant_id). Read from the per-variant overrides set in
+    Individual Variant Pricing, reached through the discount group a company's
+    tags put it in — the same route the storefront prices an order by.
+
+    Commission is worked out on these rather than on the historical line total,
+    so setting a price once applies it to every order that customer has placed,
+    not only the ones placed afterwards. A variant with no price set is absent
+    here, and its line falls back to what it was billed.
+    """
+    from app.models.discount_group import DiscountGroup, VariantLevelPricingOverride
+
+    if not company_ids:
+        return {}
+
+    # Which discount group each company's tags land it in — the storefront's own
+    # rule: first enabled group whose customer_tag the company carries.
+    groups = (await db.execute(
+        select(DiscountGroup.id, DiscountGroup.customer_tag)
+        .where(DiscountGroup.status == "enabled")
+    )).all()
+    tag_to_group = {tag: str(gid) for gid, tag in groups if tag}
+
+    company_group: dict[str, str] = {}
+    for cid, tags in (await db.execute(
+        select(Company.id, Company.tags).where(Company.id.in_(company_ids))
+    )).all():
+        for t in (tags or []):
+            if t in tag_to_group:
+                company_group[str(cid)] = tag_to_group[t]
+                break
+
+    wanted_groups = set(company_group.values())
+    if not wanted_groups:
+        return {}
+
+    by_group: dict[str, dict[str, float]] = {}
+    for variant_id, group_id, price in (await db.execute(
+        select(
+            VariantLevelPricingOverride.variant_id,
+            VariantLevelPricingOverride.group_id,
+            VariantLevelPricingOverride.price,
+        ).where(VariantLevelPricingOverride.group_id.in_(wanted_groups))
+    )).all():
+        if price is not None:
+            by_group.setdefault(str(group_id), {})[str(variant_id)] = float(price)
+
+    return {
+        (cid, vid): price
+        for cid, gid in company_group.items()
+        for vid, price in by_group.get(gid, {}).items()
+    }
+
+
 async def commission_total_for_period(db: AsyncSession, start: datetime, end: datetime) -> float:
     """Total tier commission earned in a window — the one number, not the report.
 
@@ -1842,9 +1898,12 @@ async def commission_total_for_period(db: AsyncSession, start: datetime, end: da
     if not company_ids:
         return 0.0
 
+    price_now = await _current_variant_prices(db, company_ids)
+
     rows = (await db.execute(
         select(
             Product.product_code, OrderItem.product_name, OrderItem.line_total,
+            OrderItem.quantity, OrderItem.variant_id, Order.company_id,
         )
         .select_from(OrderItem)
         .join(Order, Order.id == OrderItem.order_id)
@@ -1858,10 +1917,12 @@ async def commission_total_for_period(db: AsyncSession, start: datetime, end: da
     )).all()
 
     total = 0.0
-    for product_code, product_name, line_total in rows:
+    for product_code, product_name, line_total, qty, variant_id, company_id in rows:
         code = _product_code_of(product_code, product_name)
         rate = COMMISSION_SPECIAL_PERCENT if code in COMMISSION_SPECIAL_CODES else COMMISSION_DEFAULT_PERCENT
-        total += float(line_total or 0) * rate / 100
+        now = price_now.get((str(company_id), str(variant_id)))
+        base = float(now) * int(qty or 0) if now is not None else float(line_total or 0)
+        total += base * rate / 100
     return round(total, 2)
 
 
@@ -1954,6 +2015,15 @@ async def commission_report(
             ),
         }
 
+    # The price each of these customers pays today, per variant — read from
+    # Individual Variant Pricing, which is where prices are set.
+    #
+    # Commission is worked out on this rather than on what an order happened to
+    # be billed, so an order placed before those prices were entered earns what
+    # it would earn today. One place holds the prices; every order, old or new,
+    # is measured against it.
+    _price_now = await _current_variant_prices(db, _company_ids)
+
     rows = (await db.execute(
         select(
             Company.id.label("company_id"),
@@ -1967,6 +2037,7 @@ async def commission_report(
             OrderItem.quantity,
             OrderItem.line_total,
             OrderItem.size,
+            OrderItem.variant_id,
             Order.payment_status,
             Order.total.label("order_total"),
         )
@@ -2015,14 +2086,13 @@ async def commission_report(
         code = _product_code_of(r["product_code"], r["product_name"])
         is_special = code in COMMISSION_SPECIAL_CODES
 
-        # Commission is worked out on what the order was billed — the price set
-        # for that variant in Individual Variant Pricing, which is where prices
-        # live. There was a second copy of the price list in code, so that
-        # commission could be paid on the agreed figure while orders were still
-        # going out at the old one; the prices are set properly now, so the two
-        # would only ever drift apart, and the billed line is the one that is
-        # true by definition.
-        base = float(r["line_total"] or 0)
+        # Today's price for this customer and variant, times the quantity. Falls
+        # back to what the line was billed where no price has been set for it.
+        _now = _price_now.get((str(r["company_id"]), str(r["variant_id"])))
+        base = (
+            float(_now) * int(r["quantity"] or 0)
+            if _now is not None else float(r["line_total"] or 0)
+        )
         rate = COMMISSION_SPECIAL_PERCENT if is_special else COMMISSION_DEFAULT_PERCENT
         # Deliberately not rounded here. A size is one line, an order is a dozen
         # of them, and rounding each to the cent before adding them up drifted
