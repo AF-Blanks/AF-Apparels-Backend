@@ -1,6 +1,8 @@
 import json
 from uuid import UUID
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select, and_
@@ -10,6 +12,8 @@ from app.core.database import get_db
 from app.models.discount_group import DiscountGroup, VariantPricingOverride, VariantLevelPricingOverride
 
 router = APIRouter(prefix="/admin", tags=["admin", "discount-groups"])
+
+logger = logging.getLogger(__name__)
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -210,6 +214,165 @@ async def apply_group_shipping(
 
 
 # ── Variant Pricing Overrides ─────────────────────────────────────────────────
+
+# ── The agreed rate card for the top tiers ───────────────────────────────────
+
+
+async def _rate_card_plan(db: AsyncSession) -> dict:
+    """What applying the card would do, worked out but not done.
+
+    Every price it would set, every product it could not find, and every size the
+    card says nothing about — because a price list applied blind to a live shop
+    is how a customer gets billed the wrong figure, and nobody notices until the
+    invoice.
+    """
+    from app.models.product import Product, ProductVariant
+    from app.services import rate_card as rc
+
+    groups = (await db.execute(
+        select(DiscountGroup).where(DiscountGroup.status == "enabled")
+    )).scalars().all()
+    wanted = {rc.tier_key(t) for t in rc.CARD_TIERS}
+    targets = [g for g in groups if rc.tier_key(g.customer_tag) in wanted]
+
+    variants = (await db.execute(
+        select(
+            ProductVariant.id, ProductVariant.size, ProductVariant.color,
+            ProductVariant.retail_price,
+            Product.product_code, Product.name,
+        )
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(ProductVariant.status == "active")
+    )).all()
+
+    # What the card covers, per product, so the preview reads product by product
+    # rather than as several thousand variant rows nobody will check.
+    per_product: dict[str, dict] = {}
+    priced = 0
+    for vid, size, _color, retail, code_col, name in variants:
+        code = rc.product_code_of(code_col, name)
+        entry = per_product.setdefault(code or name, {
+            "product_code": code,
+            "product_name": name,
+            "in_card": code in rc.RATE_CARD,
+            "matched_by_name": code in rc.UNCODED_ROWS,
+            "card_row": rc.UNCODED_ROWS.get(code),
+            "sizes": {},
+            "variants": 0,
+            "priced": 0,
+            "untouched": 0,
+        })
+        entry["variants"] += 1
+        price = rc.price_for(code, size)
+        band = rc.SIZE_BANDS.get((size or "").strip().upper())
+        slot = entry["sizes"].setdefault(size or "—", {
+            "band": band, "price": float(price) if price is not None else None,
+            "count": 0, "retail": float(retail or 0),
+        })
+        slot["count"] += 1
+        if price is None:
+            entry["untouched"] += 1
+        else:
+            entry["priced"] += 1
+            priced += 1
+
+    products = sorted(
+        per_product.values(),
+        key=lambda p: (not p["in_card"], p["product_code"] or "", p["product_name"]),
+    )
+    return {
+        "tiers": list(rc.CARD_TIERS),
+        "groups": [
+            {"id": str(g.id), "title": g.title, "tag": g.customer_tag}
+            for g in targets
+        ],
+        "products": products,
+        "totals": {
+            "groups": len(targets),
+            "products_in_card": sum(1 for p in products if p["in_card"]),
+            "products_not_in_card": sum(1 for p in products if not p["in_card"]),
+            "variants_priced": priced,
+            # One override per variant per group.
+            "overrides": priced * len(targets),
+        },
+    }
+
+
+@router.get("/discount-groups/rate-card")
+async def preview_rate_card(db: AsyncSession = Depends(get_db)):
+    """What applying the card would set, without setting anything."""
+    return await _rate_card_plan(db)
+
+
+@router.post("/discount-groups/rate-card/apply")
+async def apply_rate_card(db: AsyncSession = Depends(get_db)):
+    """Write the card's prices onto every tier group it names.
+
+    Only the prices the card actually states. A size it is silent about keeps
+    whatever it has — overwriting it with a guess would be inventing a price
+    nobody agreed to, and doing so quietly across a live catalogue.
+    """
+    from app.models.product import Product, ProductVariant
+    from app.services import rate_card as rc
+
+    groups = (await db.execute(
+        select(DiscountGroup).where(DiscountGroup.status == "enabled")
+    )).scalars().all()
+    wanted = {rc.tier_key(t) for t in rc.CARD_TIERS}
+    targets = [g for g in groups if rc.tier_key(g.customer_tag) in wanted]
+    if not targets:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "No enabled discount group is named "
+                f"{' or '.join(rc.CARD_TIERS)} — nothing to price."
+            ),
+        )
+
+    rows = (await db.execute(
+        select(ProductVariant.id, ProductVariant.size, Product.product_code, Product.name)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(ProductVariant.status == "active")
+    )).all()
+
+    written, skipped = 0, 0
+    for g in targets:
+        gid = str(g.id)
+        for vid, size, code_col, name in rows:
+            price = rc.price_for(rc.product_code_of(code_col, name), size)
+            if price is None:
+                skipped += 1
+                continue
+            existing = (await db.execute(
+                select(VariantLevelPricingOverride).where(
+                    VariantLevelPricingOverride.variant_id == str(vid),
+                    VariantLevelPricingOverride.group_id == gid,
+                )
+            )).scalar_one_or_none()
+            if existing:
+                existing.price = price
+            else:
+                db.add(VariantLevelPricingOverride(
+                    variant_id=str(vid), group_id=gid, price=price,
+                ))
+            written += 1
+
+    await db.commit()
+    logger.warning(
+        "Rate card applied to %d group(s): %d prices written, %d sizes left alone",
+        len(targets), written, skipped,
+    )
+    return {
+        "groups": [{"id": str(g.id), "title": g.title} for g in targets],
+        "prices_written": written,
+        "sizes_left_alone": skipped // max(len(targets), 1),
+        "message": (
+            f"{written} price{'s' if written != 1 else ''} set across "
+            f"{len(targets)} group{'s' if len(targets) != 1 else ''}. "
+            "Existing orders are unchanged; this applies from the next order on."
+        ),
+    }
+
 
 @router.get("/variant-pricing")
 async def get_variant_pricing(db: AsyncSession = Depends(get_db)):
