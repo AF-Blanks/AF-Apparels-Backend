@@ -1962,7 +1962,12 @@ async def commission_report(
         is_special = code in COMMISSION_SPECIAL_CODES
         base = float(r["line_total"] or 0)
         rate = COMMISSION_SPECIAL_PERCENT if is_special else COMMISSION_DEFAULT_PERCENT
-        earned = round(base * rate / 100, 2)
+        # Deliberately not rounded here. A size is one line, an order is a dozen
+        # of them, and rounding each to the cent before adding them up drifted
+        # the total off what anyone checking it would get: ten percent of
+        # $125.34 is $12.53, and the report was saying $12.55. Kept exact all
+        # the way up; rounded once, where it is shown.
+        earned = base * rate / 100
 
         _paid = (r["payment_status"] or "").lower() == "paid"
 
