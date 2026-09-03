@@ -300,78 +300,16 @@ async def _rate_card_plan(db: AsyncSession) -> dict:
 
 @router.get("/discount-groups/rate-card")
 async def preview_rate_card(db: AsyncSession = Depends(get_db)):
-    """What applying the card would set, without setting anything."""
-    return await _rate_card_plan(db)
+    """The agreed prices commission is worked out on — read only.
 
-
-@router.post("/discount-groups/rate-card/apply")
-async def apply_rate_card(db: AsyncSession = Depends(get_db)):
-    """Write the card's prices onto every tier group it names.
-
-    Only the prices the card actually states. A size it is silent about keeps
-    whatever it has — overwriting it with a guess would be inventing a price
-    nobody agreed to, and doing so quietly across a live catalogue.
+    This never writes anything. The card is the basis for what Tier 4 and
+    Tier 5 earn (ten percent on 1000 and 1001, eighteen on everything else);
+    what those customers are actually billed is left alone. There was a button
+    here that wrote these prices onto every variant in both groups — one click
+    that would have rewritten several thousand live prices — and it was removed
+    rather than left sitting next to a read-only screen.
     """
-    from app.models.product import Product, ProductVariant
-    from app.services import rate_card as rc
-
-    groups = (await db.execute(
-        select(DiscountGroup).where(DiscountGroup.status == "enabled")
-    )).scalars().all()
-    wanted = {rc.tier_key(t) for t in rc.CARD_TIERS}
-    targets = [g for g in groups if rc.tier_key(g.customer_tag) in wanted]
-    if not targets:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "No enabled discount group is named "
-                f"{' or '.join(rc.CARD_TIERS)} — nothing to price."
-            ),
-        )
-
-    rows = (await db.execute(
-        select(ProductVariant.id, ProductVariant.size, Product.product_code, Product.name)
-        .join(Product, Product.id == ProductVariant.product_id)
-        .where(ProductVariant.status == "active")
-    )).all()
-
-    written, skipped = 0, 0
-    for g in targets:
-        gid = str(g.id)
-        for vid, size, code_col, name in rows:
-            price = rc.price_for(rc.product_code_of(code_col, name), size)
-            if price is None:
-                skipped += 1
-                continue
-            existing = (await db.execute(
-                select(VariantLevelPricingOverride).where(
-                    VariantLevelPricingOverride.variant_id == str(vid),
-                    VariantLevelPricingOverride.group_id == gid,
-                )
-            )).scalar_one_or_none()
-            if existing:
-                existing.price = price
-            else:
-                db.add(VariantLevelPricingOverride(
-                    variant_id=str(vid), group_id=gid, price=price,
-                ))
-            written += 1
-
-    await db.commit()
-    logger.warning(
-        "Rate card applied to %d group(s): %d prices written, %d sizes left alone",
-        len(targets), written, skipped,
-    )
-    return {
-        "groups": [{"id": str(g.id), "title": g.title} for g in targets],
-        "prices_written": written,
-        "sizes_left_alone": skipped // max(len(targets), 1),
-        "message": (
-            f"{written} price{'s' if written != 1 else ''} set across "
-            f"{len(targets)} group{'s' if len(targets) != 1 else ''}. "
-            "Existing orders are unchanged; this applies from the next order on."
-        ),
-    }
+    return await _rate_card_plan(db)
 
 
 @router.get("/variant-pricing")
