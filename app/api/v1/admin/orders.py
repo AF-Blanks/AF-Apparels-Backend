@@ -374,24 +374,39 @@ async def audit_qb_invoice_customers(db: AsyncSession = Depends(get_db)):
     landed, since the company's own name in our records was never wrong; only
     what QuickBooks was told matched.
     """
+    from sqlalchemy import text as _rt
     from app.services.quickbooks_service import QuickBooksService
     from app.api.v1.admin.customers import _names_roughly_match
 
+    connected_realm = (await db.execute(
+        _rt("SELECT value FROM app_settings WHERE key = 'qb_realm_id'")
+    )).scalar_one_or_none()
+
     rows = (await db.execute(
         select(Order.id, Order.order_number, Order.qb_invoice_id, Order.guest_name,
-               Company.name.label("company_name"))
+               Order.qb_realm_id, Company.name.label("company_name"))
         .outerjoin(Company, Company.id == Order.company_id)
         .where(Order.qb_invoice_id.isnot(None))
         .order_by(Order.created_at.desc())
     )).all()
 
     if not rows:
-        return {"checked": 0, "mismatches": [], "errors": []}
+        return {"checked": 0, "mismatches": [], "errors": [], "skipped_other_company": 0}
+
+    # An invoice id is a number that means something only inside the company
+    # that issued it. Fetching order 1004's invoice from whatever company is
+    # connected today, when 1004 was actually invoiced in the one before it,
+    # does not answer "who was 1004 billed to" — it answers "who holds number
+    # 1004 in this company", which is somebody else's real invoice being read
+    # as though it were ours. This is exactly the bug the audit exists to
+    # catch, so the audit has to be the one place that never commits it.
+    checkable = [r for r in rows if r.qb_realm_id and r.qb_realm_id == connected_realm]
+    skipped = len(rows) - len(checkable)
 
     svc = await QuickBooksService().initialize()
     mismatches: list[dict] = []
     errors: list[dict] = []
-    for oid, onum, inv_id, guest_name, company_name in rows:
+    for oid, onum, inv_id, guest_name, _realm, company_name in checkable:
         our_name = company_name or guest_name or "—"
         try:
             data = await asyncio.to_thread(svc._request, "GET", f"invoice/{inv_id}?minorversion=65")
@@ -408,7 +423,14 @@ async def audit_qb_invoice_customers(db: AsyncSession = Depends(get_db)):
                 "qb_invoice_id": inv_id,
             })
 
-    return {"checked": len(rows), "mismatches": mismatches, "errors": errors}
+    return {
+        "checked": len(checkable),
+        "mismatches": mismatches,
+        "errors": errors,
+        # Invoiced in a company other than the one connected now — not wrong,
+        # just not checkable from here without asking that other company.
+        "skipped_other_company": skipped,
+    }
 
 
 @router.get("/orders/companies")
