@@ -100,7 +100,15 @@ class CheckoutConfirmRequest(BaseModel):
 
 class OrderItemOut(BaseModel):
     id: UUID
-    variant_id: UUID
+    # Empty once the variant it pointed at has been deleted — the foreign key is
+    # ON DELETE SET NULL on purpose, so removing a product from the catalogue
+    # never takes the record of what was sold with it. The order keeps its own
+    # copy of the name, sku, colour and size, which is what anyone reading it
+    # needs; only the link back to a live variant is gone.
+    #
+    # Declared non-null here, so one such line made the whole order refuse to
+    # open — a validation error where the page should have been.
+    variant_id: UUID | None = None
     product_name: str
     sku: str
     product_code: str | None = None
