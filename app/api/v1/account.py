@@ -70,7 +70,7 @@ async def get_price_list_status(
 
 from app.schemas.order import AddressIn, AddressOut  # noqa: E402
 from app.models.company import UserAddress  # noqa: E402
-from sqlalchemy import func, select, delete, update  # noqa: E402
+from sqlalchemy import and_, func, or_, select, delete, update  # noqa: E402
 
 
 @router.get("/addresses", response_model=list[AddressOut])
@@ -2070,7 +2070,19 @@ async def list_qb_invoices(
         select(OrderModel)
         .where(
             OrderModel.company_id == company_id,
-            OrderModel.qb_invoice_id.isnot(None),
+            OrderModel.status != "cancelled",
+            or_(
+                OrderModel.qb_invoice_id.isnot(None),
+                # Anything still owed, invoice or not. This list used to require
+                # a QuickBooks invoice id, so an order placed on terms before the
+                # sync had run — or one where the sync failed — was invisible to
+                # the customer who owed the money. What is owed should be the
+                # thing that puts a row here.
+                and_(
+                    OrderModel.payment_status.notin_(("paid", "refunded")),
+                    OrderModel.total > func.coalesce(OrderModel.amount_paid, 0),
+                ),
+            ),
         )
         .order_by(OrderModel.created_at.desc())
         .limit(100)
@@ -2099,6 +2111,10 @@ async def list_qb_invoices(
         result.append({
             "id": str(o.id),
             "doc_number": o.qb_invoice_id or o.order_number,
+            # The order's own number, which is what the payment page is
+            # addressed by — doc_number may be QuickBooks' invoice id, which
+            # means nothing to a URL here.
+            "order_number": o.order_number,
             "txn_date": o.created_at.strftime("%Y-%m-%d") if o.created_at else None,
             "due_date": None,
             "total_amt": total,
