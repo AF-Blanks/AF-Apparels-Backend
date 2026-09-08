@@ -808,10 +808,61 @@ async def verify_ach_payment(order_id: UUID, db: AsyncSession = Depends(get_db))
     if not order:
         raise NotFoundError(f"Order {order_id} not found")
 
+    # ── Ask QuickBooks what actually happened to the debit ────────────────
+    #
+    # This button used to write "paid" without checking anything. A debit that
+    # QuickBooks had already declined was recorded as money received, a payment
+    # was posted against the invoice for it, and the order went out — order 1082
+    # ($585) is exactly that: Declined at Intuit, PAID on our screen.
+    #
+    # Declined is not a maybe. It is refused here, loudly, rather than left to
+    # whoever reads the order next.
+    _echeck_id = getattr(order, "qb_echeck_id", None)
+    _live_status = None
+    if _echeck_id:
+        try:
+            from app.services.qb_payments_service import (
+                ECHECK_NOT_COLLECTED, QBPaymentsService,
+            )
+            _ec = await asyncio.to_thread(QBPaymentsService().get_echeck, _echeck_id)
+            _live_status = str(_ec.get("status") or "").upper()
+        except Exception as exc:  # noqa: BLE001
+            # Could not reach QuickBooks. Not proof of anything either way, so
+            # the decision is left to the person — who can see their own bank.
+            logger.warning(
+                "verify_ach_payment: could not read eCheck %s for order %s: %s",
+                _echeck_id, order.order_number, exc,
+            )
+        else:
+            if _live_status in ECHECK_NOT_COLLECTED:
+                logger.critical(
+                    "verify_ach_payment REFUSED — order %s eCheck %s is %s at QuickBooks. "
+                    "No money was collected.",
+                    order.order_number, _echeck_id, _live_status,
+                )
+                raise ConflictError(
+                    f"This bank transfer was {_live_status.lower()} by the bank — "
+                    f"no money was collected, so the order cannot be marked paid. "
+                    f"(QuickBooks transaction {_echeck_id}.) Ask the customer for "
+                    f"another payment method, or record the payment manually once "
+                    f"you have the funds by another route."
+                )
+            logger.info(
+                "verify_ach_payment: order %s eCheck %s is %s at QuickBooks",
+                order.order_number, _echeck_id, _live_status,
+            )
+
+    _note = f"ACH transfer verified — payment received (${float(order.total or 0):.2f})"
+    if _live_status and _live_status not in ("SUCCEEDED", "SETTLED", "CAPTURED", "PAID"):
+        # Still clearing. The admin may well be looking at their own bank
+        # statement, which is ahead of QuickBooks — but the record should say
+        # the two did not agree at the time.
+        _note += f" — marked by hand while QuickBooks still showed {_live_status.lower()}"
+
     _timeline = list(order.timeline or [])
     _timeline.append({
         "status": "paid",
-        "message": f"ACH transfer verified — payment received (${float(order.total or 0):.2f})",
+        "message": _note,
         "created_by": "Admin",
         "created_at": datetime.now(timezone.utc).isoformat(),
     })

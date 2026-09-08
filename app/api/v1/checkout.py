@@ -1,5 +1,6 @@
 import logging
 import traceback
+from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -465,6 +466,58 @@ async def _confirm_checkout_inner(
                     order.order_number, _echeck_id, _echeck_status, float(order.total),
                     _safe,
                 )
+
+                # A line in a log file is not a warning anybody receives. This
+                # decline used to leave no mark on the order at all, so the next
+                # person to open it saw an ordinary unpaid bank transfer and
+                # pressed "Mark as Verified" — recording money that had already
+                # been refused. It goes on the order's own timeline now, and to
+                # whoever watches the inbox.
+                try:
+                    _tl = list(order.timeline or [])
+                    _tl.append({
+                        "status": "payment_failed",
+                        "message": (
+                            f"Bank transfer was {_echeck_status.lower()} by the bank — "
+                            f"no money was collected. Do not mark this order paid "
+                            f"until payment is arranged another way."
+                        ),
+                        "created_by": "System",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    order.timeline = _tl
+                    await db.commit()
+                except Exception as _tl_exc:
+                    _log.warning("Could not record the decline on order %s: %s",
+                                 order.order_number, _tl_exc)
+
+                try:
+                    from app.core.config import settings as _cfg_alert
+                    from app.services.email_service import EmailService as _Mail
+                    if _cfg_alert.ADMIN_NOTIFICATION_EMAIL:
+                        _Mail(db).send_raw(
+                            to_email=_cfg_alert.ADMIN_NOTIFICATION_EMAIL,
+                            subject=f"Bank transfer declined — order {order.order_number}",
+                            body_html=(
+                                '<div style="font-family:sans-serif;max-width:560px">'
+                                '<div style="background:#1B3A5C;padding:20px;'
+                                'border-bottom:3px solid #E8242A">'
+                                '<span style="color:#fff;font-weight:900;font-size:20px">'
+                                'AF APPARELS</span></div>'
+                                '<div style="padding:24px;color:#2A2830;line-height:1.7">'
+                                f'<p>The bank transfer for order '
+                                f'<strong>{order.order_number}</strong> was '
+                                f'<strong>{_echeck_status.lower()}</strong>. '
+                                f'No money was collected.</p>'
+                                f'<p>Amount: <strong>${float(order.total):,.2f}</strong><br>'
+                                f'QuickBooks transaction: {_echeck_id}</p>'
+                                '<p>The order has been placed and is unpaid. Do not mark '
+                                'it as paid — arrange payment another way first.</p>'
+                                '</div></div>'
+                            ),
+                        )
+                except Exception as _mail_exc:
+                    _log.warning("Could not send the decline alert: %s", _mail_exc)
             else:
                 _log.info(
                     "eCheck raised for order %s — id=%s status=%s amount=%.2f",
