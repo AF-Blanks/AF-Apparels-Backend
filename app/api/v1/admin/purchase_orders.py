@@ -136,13 +136,41 @@ def _receiving_dict(r: POReceiving) -> dict:
     }
 
 
+def _received_status(po: PurchaseOrder) -> str:
+    """The status the quantities themselves say this PO is in.
+
+    The stored column is written on receipt, and for a long time it was written
+    wrong: the sum that decided it ran before the new rows were flushed, so a
+    delivery that arrived complete in one go was recorded as "partial" and had
+    no second receipt coming to correct it. Reading it back from the quantities
+    means those POs come out right without anybody editing them by hand.
+
+    Only touched once receiving has begun. draft / sent / closed / cancelled
+    mean something a quantity cannot overrule.
+    """
+    if po.status not in ("partial", "received"):
+        return po.status
+    try:
+        ordered = sum(int(li.qty_ordered or 0) for li in po.line_items)
+        received = sum(
+            int(ri.qty_received or 0)
+            for r in (po.receivings or [])
+            for ri in (r.items or [])
+        )
+    except Exception:  # noqa: BLE001 — a relationship that was not loaded
+        return po.status
+    if ordered <= 0:
+        return po.status
+    return "received" if received >= ordered else "partial"
+
+
 def _po_dict(po: PurchaseOrder, include_detail: bool = False) -> dict:
     d: dict = {
         "id": str(po.id),
         "po_number": po.po_number,
         "manufacturer_id": str(po.manufacturer_id) if po.manufacturer_id else None,
         "manufacturer_name": po.manufacturer.name if po.manufacturer else None,
-        "status": po.status,
+        "status": _received_status(po),
         "order_date": po.order_date.isoformat() if po.order_date else None,
         "expected_delivery": po.expected_delivery.isoformat() if po.expected_delivery else None,
         "notes": po.notes,
@@ -223,6 +251,7 @@ async def list_pos(db: AsyncSession = Depends(get_db)):
         .options(
             selectinload(PurchaseOrder.manufacturer),
             selectinload(PurchaseOrder.line_items),
+            selectinload(PurchaseOrder.receivings).selectinload(POReceiving.items),
         )
         .order_by(PurchaseOrder.created_at.desc())
     )
@@ -575,6 +604,47 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
     if not po:
         raise HTTPException(status_code=404, detail="PO not found")
 
+    # ── Nothing may arrive that was never ordered ─────────────────────────
+    #
+    # Receiving short is ordinary — a supplier sends 900 of the 1000 on the
+    # order and that is a normal Tuesday. Receiving long is not: a typo of
+    # 10000 for 1000 books nine thousand shirts that do not exist into stock,
+    # at cost, and drags the weighted-average cost with them. The browser caps
+    # the box, but a cap in a browser is a suggestion.
+    _ordered = {str(li.id): int(li.qty_ordered or 0) for li in po.line_items}
+    _already = {
+        str(k): int(v or 0)
+        for k, v in (await db.execute(
+            select(POReceivingItem.po_line_item_id, func.sum(POReceivingItem.qty_received))
+            .join(POReceiving)
+            .where(POReceiving.po_id == po_id)
+            .group_by(POReceivingItem.po_line_item_id)
+        )).all()
+    }
+
+    for item_data in data.items:
+        line_id = str(item_data.po_line_item_id)
+        if line_id not in _ordered:
+            raise HTTPException(
+                status_code=400,
+                detail="That line is not on this purchase order.",
+            )
+        if item_data.qty_received < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="A received quantity cannot be negative.",
+            )
+        remaining = _ordered[line_id] - _already.get(line_id, 0)
+        if item_data.qty_received > remaining:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"You can't receive {item_data.qty_received} against a line "
+                    f"with {max(0, remaining)} still outstanding. Reduce the "
+                    f"quantity, or raise a new purchase order for the extra."
+                ),
+            )
+
     receiving = POReceiving(
         po_id=po_id,
         received_date=data.received_date or date.today(),
@@ -667,7 +737,16 @@ async def receive_items(po_id: UUID, data: ReceivingCreate, db: AsyncSession = D
 
     po.total_received = float(po.total_received or 0) + total_received_this_batch
 
-    # Recalculate status
+    # Recalculate status.
+    #
+    # The flush is the whole of it. Sessions here are built with autoflush off,
+    # so the POReceivingItem rows added just above were still sitting in memory
+    # and this sum counted them as zero — a PO received in full, in one go,
+    # compared 0 against the ordered quantity and wrote "partial". It could
+    # only ever reach "received" on a *second* receipt, which for a delivery
+    # that already arrived complete never comes.
+    await db.flush()
+
     total_qty_ordered = sum(li.qty_ordered for li in po.line_items)
     qty_recv_result = await db.execute(
         select(func.sum(POReceivingItem.qty_received))
