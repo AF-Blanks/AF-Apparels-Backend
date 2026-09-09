@@ -220,6 +220,39 @@ async def _ensure_content_tables() -> None:
                     updated_at TIMESTAMPTZ DEFAULT now()
                 )
             """))
+            # The inbound-webhook log. Nothing creates this table — alembic does
+            # not run on deploy — so every Stripe event failed on the insert
+            # before its handler was reached, and Stripe retried into the same
+            # wall. The enum is made first because the column depends on it.
+            await conn.execute(text("""
+                DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_type WHERE typname = 'webhook_status'
+                    ) THEN
+                        CREATE TYPE webhook_status AS ENUM
+                            ('received', 'processed', 'failed');
+                    END IF;
+                END $$;
+            """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS webhook_log (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    event_id VARCHAR(255) NOT NULL UNIQUE,
+                    provider VARCHAR(50) NOT NULL,
+                    event_type VARCHAR(100) NOT NULL,
+                    payload TEXT NOT NULL,
+                    status webhook_status NOT NULL DEFAULT 'received',
+                    error_message TEXT,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+            """))
+            # The unique index is what makes an event idempotent: Stripe retries
+            # the same event id, and the second insert must lose.
+            await conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_webhook_log_event_id "
+                "ON webhook_log (event_id)"
+            ))
             await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS product_specs (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

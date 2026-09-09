@@ -46,10 +46,19 @@ async def stripe_webhook(
         return {"status": "already_processed"}
 
     # Log event
+    # Every column this table actually requires.
+    #
+    # This row was being built without `provider` or `payload`, both NOT NULL,
+    # and with a status of "processing" that is not one of the three the enum
+    # allows. The insert failed before the handler ever ran, so every Stripe
+    # event — including the one that marks a settled bank transfer paid —
+    # answered 500 and Stripe kept retrying into the same wall.
     log_entry = WebhookLog(
         event_id=event_id,
+        provider="stripe",
         event_type=event_type,
-        status="processing",
+        payload=payload.decode("utf-8", "replace")[:1_000_000],
+        status="received",
     )
     db.add(log_entry)
     await db.flush()
@@ -77,12 +86,13 @@ async def stripe_webhook(
         else:
             logger.info("Stripe event %s (%s) received, nothing to do", event_id, event_type)
 
-        log_entry.status = "completed"
+        log_entry.status = "processed"
         await db.commit()
 
     except Exception as exc:
         logger.exception("Webhook handler error for event %s: %s", event_id, exc)
         log_entry.status = "failed"
+        log_entry.error_message = str(exc)[:2000]
         await db.commit()
         raise HTTPException(status_code=500, detail="Webhook processing failed")
 
