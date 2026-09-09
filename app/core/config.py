@@ -99,6 +99,12 @@ class Settings(BaseSettings):
         return self
 
     # ── Stripe ────────────────────────────────────────────────────────────────
+    # Who takes the money. "quickbooks" is what runs today; "stripe" switches
+    # every card and bank payment over to Stripe in one move, and back again the
+    # same way. Nothing about QuickBooks invoicing changes either way — that
+    # keeps working regardless of who collected the payment.
+    PAYMENT_PROVIDER: str = "quickbooks"
+
     STRIPE_SECRET_KEY: str = ""
     STRIPE_PUBLISHABLE_KEY: str = ""
     STRIPE_WEBHOOK_SECRET: str = ""

@@ -46,8 +46,27 @@ class CreatePaymentIntentRequest(BaseModel):
 
 
 class CheckoutConfirmRequest(BaseModel):
+    # One press of Pay, however many times it arrives.
+    #
+    # Made once by the browser when the checkout form opens and sent unchanged
+    # on every retry of that same attempt — a double-click, a dropped
+    # connection, a refresh. The server claims it before charging anything, so
+    # the second arrival gets the first one's order back instead of paying
+    # again. A genuinely new attempt sends a new key. See payment_attempt.py.
+    #
+    # Optional: a client that does not send one still works exactly as before,
+    # with no protection. That is how the QuickBooks path runs today, and
+    # nothing about it changes.
+    attempt_key: str | None = None
+
     # Stripe flow (legacy — kept for backward compatibility)
     payment_intent_id: str | None = None
+    #: A payment method collected on the client by Stripe Elements — a card or a
+    #: US bank account. Raw card and account numbers never reach this server on
+    #: the Stripe path; Stripe's own script exchanges them for this id.
+    stripe_payment_method_id: str | None = None
+    #: Charge a card the customer already saved, by its Stripe id.
+    stripe_saved_method_id: str | None = None
 
     # QuickBooks Payments flow
     qb_token: str | None = None          # one-time charge token from QB.js or server tokenize

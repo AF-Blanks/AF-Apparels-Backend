@@ -1,4 +1,5 @@
 # backend/app/api/v1/orders.py
+import asyncio
 import logging
 from uuid import UUID
 
@@ -312,7 +313,23 @@ class CommentOut(_BaseModel):
 
 
 class _PayInvoiceRequest(_BaseModel):
-    card_token: str
+    #: QuickBooks one-time card token. Optional now that Stripe can take this
+    #: payment instead — one of these has to be present, checked in the handler.
+    card_token: str | None = None
+    #: A payment method collected in the browser by Stripe Elements — a card or
+    #: a US bank account. Raw numbers never reach this server.
+    stripe_payment_method_id: str | None = None
+    #: Charge a card the customer already saved, by its Stripe id.
+    stripe_saved_method_id: str | None = None
+    #: "card" or "ach". A bank debit does not settle here; it settles days later
+    #: through the webhook, so this endpoint answers "pending", not "paid".
+    payment_method: str = "card"
+    #: Ticked box authorising us to debit the account. Required for ach.
+    ach_authorized: bool = False
+    ach_authorization_text: str | None = None
+    #: Made once when the form is opened and reused on every retry of that same
+    #: attempt, so a double-click cannot pay twice. See payment_attempt.py.
+    attempt_key: str | None = None
 
 
 @router.get("/{order_id}/comments", response_model=list[CommentOut])
@@ -491,41 +508,217 @@ async def pay_invoice(
     if _balance_due <= _Dec('0.00'):
         raise HTTPException(status_code=400, detail="Order is already paid in full")
 
+    # ── One press of Pay, however many times it arrives ───────────────────
+    #
+    # This endpoint had no guard at all: two clicks were two charges against the
+    # same invoice. The key comes from the form and is reused on every retry of
+    # that one attempt, so the second request is refused rather than charged.
+    from app.services import payment_attempt as _attempt
+    _akey = (payload.attempt_key or "").strip() or f"inv:{order_id}:{_balance_due}"
     try:
-        qb = QBPaymentsService()
-        charge_resp = qb.charge_card(
-            token=payload.card_token,
-            amount=float(_balance_due),
-            description=f"Invoice — {order.order_number}",
+        await _attempt.claim(db, attempt_key=_akey, company_id=str(company_id or ""))
+    except _attempt.AttemptAlreadyDone:
+        return {
+            "message": "This payment has already gone through.",
+            "order_number": order.order_number,
+            "already_paid": True,
+        }
+    except _attempt.AttemptInFlight:
+        raise HTTPException(
+            status_code=409,
+            detail="This payment is already going through — please wait a moment.",
         )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=f"Payment failed: {exc}") from exc
 
-    if charge_resp.get("status") != "CAPTURED":
+    # ── Whoever is taking money today ─────────────────────────────────────
+    #
+    # This used to be QuickBooks and only QuickBooks, which meant a customer on
+    # terms clicking Pay went through the provider we are moving off — including
+    # its bank transfers, the thing that does not work. One switch decides it,
+    # the same switch checkout reads.
+    from app.services.stripe_service import is_stripe_active as _stripe_on
+
+    _provider = "stripe" if _stripe_on() else "quickbooks"
+    _settled = True          # did the money actually arrive during this request?
+    _stripe_out: dict = {}
+
+    try:
+        if _provider == "stripe":
+            from app.services.stripe_service import StripeService
+            _svc = StripeService()
+
+            _company = None
+            if company_id:
+                from app.models.company import Company as _Co
+                _company = (await db.execute(
+                    select(_Co).where(_Co.id == company_id)
+                )).scalar_one_or_none()
+
+            _cust = getattr(_company, "stripe_customer_id", None)
+            if _company is not None and not _cust:
+                _cust = await asyncio.to_thread(
+                    lambda: _svc.find_or_create_customer(
+                        company_id=str(_company.id),
+                        name=_company.name or f"Company {_company.id}",
+                        email=_company.email,
+                    )
+                )
+                _company.stripe_customer_id = _cust
+                await db.commit()
+
+            _desc = f"Invoice — {order.order_number}"
+            if (payload.payment_method or "card").lower() == "ach":
+                if not payload.ach_authorized:
+                    raise ValueError(
+                        "Please tick the box authorising us to debit your bank account."
+                    )
+                if not payload.stripe_payment_method_id:
+                    raise ValueError("Bank details are missing. Please re-enter them.")
+                _stripe_out = await asyncio.to_thread(
+                    lambda: _svc.charge_bank_account(
+                        amount=float(_balance_due),
+                        payment_method_id=payload.stripe_payment_method_id,
+                        idempotency_key=f"inv-ach:{_akey}",
+                        customer_id=_cust,
+                        description=_desc,
+                        metadata={"order_number": order.order_number,
+                                  "company_id": str(company_id or "")},
+                    )
+                )
+            elif payload.stripe_saved_method_id:
+                if not _cust:
+                    raise ValueError("No saved cards on this account yet.")
+                _stripe_out = await asyncio.to_thread(
+                    lambda: _svc.charge_saved_card(
+                        amount=float(_balance_due),
+                        customer_id=_cust,
+                        payment_method_id=payload.stripe_saved_method_id,
+                        idempotency_key=f"inv-card:{_akey}",
+                        description=_desc,
+                        metadata={"order_number": order.order_number,
+                                  "company_id": str(company_id or "")},
+                    )
+                )
+            elif payload.stripe_payment_method_id:
+                _stripe_out = await asyncio.to_thread(
+                    lambda: _svc.charge_card(
+                        amount=float(_balance_due),
+                        payment_method_id=payload.stripe_payment_method_id,
+                        idempotency_key=f"inv-card:{_akey}",
+                        customer_id=_cust,
+                        description=_desc,
+                        metadata={"order_number": order.order_number,
+                                  "company_id": str(company_id or "")},
+                    )
+                )
+            else:
+                raise ValueError("Payment details are missing.")
+
+            charge_resp = {"id": _stripe_out.get("id"), "status": _stripe_out.get("status")}
+            # A bank debit leaves Stripe in "processing" and lands days later.
+            # Calling that paid here is how goods go out against money that has
+            # not arrived; the webhook marks it paid when it actually does.
+            _settled = _stripe_out.get("payment_status") == "paid"
+            if not _settled and _stripe_out.get("payment_status") == "failed":
+                raise ValueError(
+                    f"Payment was not approved (status: {_stripe_out.get('status')})."
+                )
+        else:
+            if not payload.card_token:
+                raise ValueError("Card details are missing.")
+            qb = QBPaymentsService()
+            charge_resp = qb.charge_card(
+                token=payload.card_token,
+                amount=float(_balance_due),
+                description=f"Invoice — {order.order_number}",
+            )
+            if charge_resp.get("status") != "CAPTURED":
+                raise ValueError(
+                    f"Payment not captured (status={charge_resp.get('status')})"
+                )
+    except (RuntimeError, ValueError) as exc:
+        await _attempt.failed(db, attempt_key=_akey, reason=str(exc))
+        raise HTTPException(status_code=400, detail=f"Payment failed: {exc}") from exc
+    except Exception as exc:
+        # Stripe raises its own error types — a declined card is a CardError, not
+        # a RuntimeError. Re-raising those bare turned an ordinary decline into a
+        # 500 error page on the customer's invoice.
+        await _attempt.failed(db, attempt_key=_akey, reason=str(exc))
+        _uexc = getattr(exc, "user_message", None)
+        if _uexc:
+            raise HTTPException(status_code=400, detail=f"Payment failed: {_uexc}") from exc
+        logger.exception("pay_invoice failed for order %s", order_id)
         raise HTTPException(
             status_code=400,
-            detail=f"Payment not captured (status={charge_resp.get('status')})",
-        )
+            detail=(
+                "We could not take that payment. Please check your details and "
+                "try again, or call us on 214-272-7213."
+            ),
+        ) from exc
 
     now = _dt.now(_tz.utc)
     timeline = list(order.timeline or [])
     timeline.append({
-        "message": f"Payment received via invoice link — ${float(_balance_due):.2f}",
-        "status": "paid",
+        "message": (
+            f"Payment received via invoice link — ${float(_balance_due):.2f}"
+            if _settled else
+            f"Bank transfer started via invoice link — ${float(_balance_due):.2f}. "
+            f"Takes 3–5 business days to clear; the order stays unpaid until it does."
+        ),
+        "status": "paid" if _settled else "pending",
         "created_by": "Customer",
         "created_at": now.isoformat(),
     })
-    await db.execute(
-        _text(
-            "UPDATE orders SET payment_status='paid', marked_paid_at=:ts, "
-            "amount_paid=:ap, "
-            "timeline=CAST(:tl AS jsonb) WHERE id=:id"
-        ),
-        {"ts": now, "ap": float(_order_total), "tl": _json.dumps(timeline), "id": str(order_id)},
-    )
+
+    # Only money that has actually arrived counts as paid. A bank debit is still
+    # in flight, so amount_paid is left alone and the webhook settles it — the
+    # same rule checkout follows.
+    if _settled:
+        await db.execute(
+            _text(
+                "UPDATE orders SET payment_status='paid', marked_paid_at=:ts, "
+                "amount_paid=:ap, timeline=CAST(:tl AS jsonb) WHERE id=:id"
+            ),
+            {"ts": now, "ap": float(_order_total), "tl": _json.dumps(timeline), "id": str(order_id)},
+        )
+    else:
+        await db.execute(
+            _text(
+                "UPDATE orders SET payment_status='pending', "
+                "timeline=CAST(:tl AS jsonb) WHERE id=:id"
+            ),
+            {"tl": _json.dumps(timeline), "id": str(order_id)},
+        )
+
+    # Who took it, so a refund months from now goes back the same way — and so
+    # the webhook can find this order by its intent when the debit lands.
+    if _provider == "stripe":
+        await db.execute(
+            _text(
+                "UPDATE orders SET payment_provider='stripe', "
+                "stripe_payment_intent_id=:pi, stripe_charge_id=:ch, "
+                "stripe_payment_status=:st, stripe_customer_id=COALESCE(:cu, stripe_customer_id) "
+                "WHERE id=:id"
+            ),
+            {
+                "pi": _stripe_out.get("id"),
+                "ch": _stripe_out.get("charge_id"),
+                "st": _stripe_out.get("status"),
+                "cu": _stripe_out.get("customer_id"),
+                "id": str(order_id),
+            },
+        )
+
     await db.commit()
+    await _attempt.completed(
+        db, attempt_key=_akey, order_id=str(order_id),
+        payment_reference=str(charge_resp.get("id") or ""),
+    )
     return {
-        "message": "Payment successful",
+        "message": (
+            "Payment successful" if _settled else
+            "Bank transfer started — it takes 3–5 business days to clear."
+        ),
+        "settled": _settled,
         "order_number": order.order_number,
         "charge_id": charge_resp.get("id"),
     }

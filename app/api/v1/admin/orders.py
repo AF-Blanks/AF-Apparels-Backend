@@ -3002,7 +3002,43 @@ async def update_rma(
         refund_failed = False
         _echeck_id = getattr(order, "qb_echeck_id", None)
         _echeck_status = (getattr(order, "qb_echeck_status", None) or "").upper()
-        if order.payment_status == "paid" and (order.qb_payment_charge_id or _echeck_id):
+        # Money goes back through whoever took it — read off the order, not off
+        # the current setting. Switching providers must not strand every earlier
+        # order's refund with the wrong one.
+        _took_it = (getattr(order, "payment_provider", None) or "quickbooks").lower()
+        _stripe_intent = getattr(order, "stripe_payment_intent_id", None)
+
+        if order.payment_status == "paid" and _took_it == "stripe" and _stripe_intent:
+            try:
+                from app.services.stripe_service import StripeService
+                _svc = StripeService()
+                refund_resp = await asyncio.to_thread(
+                    lambda: _svc.refund(
+                        intent_id=_stripe_intent,
+                        # Keyed on the RMA, so approving a return twice gives the
+                        # money back once.
+                        idempotency_key=f"rma:{rma_number}",
+                        amount=refund_amount,
+                        reason="requested_by_customer",
+                    )
+                )
+                if not refund_resp.get("succeeded"):
+                    raise RuntimeError(
+                        f"Stripe declined the refund (status {refund_resp.get('status')})."
+                    )
+                rma.refund_status = "refunded"
+                rma.qb_refund_id = str(refund_resp.get("id") or "")
+                rma.refund_amount = refund_amount
+                if refund_amount >= float(order.total) - 0.01:
+                    order.payment_status = "refunded"
+            except Exception as exc:
+                logger.error("RMA %s Stripe refund failed: %s", rma_number, exc, exc_info=True)
+                rma.refund_status = "failed"
+                rma.refund_amount = refund_amount
+                refund_error = str(exc)
+                refund_failed = True
+
+        elif order.payment_status == "paid" and (order.qb_payment_charge_id or _echeck_id):
             try:
                 from app.services.qb_payments_service import QBPaymentsService
                 qb_pay = QBPaymentsService()

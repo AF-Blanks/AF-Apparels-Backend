@@ -75,6 +75,16 @@ class Order(BaseModel):
     )
     stripe_payment_intent_id: Mapped[str | None] = mapped_column(String(255), index=True)
     stripe_customer_id: Mapped[str | None] = mapped_column(String(255))
+    stripe_charge_id: Mapped[str | None] = mapped_column(String(255))
+    #: Stripe's own word for where the payment stands — kept beside our own
+    #: payment_status because a bank debit sits in "processing" for days, and
+    #: "unpaid" alone does not say whether anything is on its way.
+    stripe_payment_status: Mapped[str | None] = mapped_column(String(50))
+    stripe_payment_method_id: Mapped[str | None] = mapped_column(String(255))
+    #: Who took the money for this order — "quickbooks" or "stripe". Recorded per
+    #: order rather than read from settings, because the setting will change and
+    #: a refund has to go back through whoever actually took it.
+    payment_provider: Mapped[str | None] = mapped_column(String(20))
 
     # Shipping
     shipping_method: Mapped[str | None] = mapped_column(String(50), nullable=True)

@@ -1,4 +1,5 @@
 """Guest checkout endpoints — no authentication required."""
+import asyncio
 import json
 import logging
 import secrets
@@ -8,7 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text as _text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -125,6 +126,9 @@ class GuestCheckoutRequest(BaseModel):
     shipping_method: str = "standard"  # standard | expedited | will_call
     payment_method: str = "card"  # card | ach
     qb_token: str | None = None
+    #: A card collected in the browser by Stripe Elements. Used when Stripe is
+    #: the active provider; the raw number never reaches this server.
+    stripe_payment_method_id: str | None = None
     ach_bank_name: str | None = None
     ach_account_holder: str | None = None
     ach_routing_number: str | None = None
@@ -332,40 +336,76 @@ async def guest_checkout(
         # Not paid: the money is still in the customer's bank. It settles when
         # the debit clears, which settle_pending_echecks watches for.
         _payment_status = "unpaid"
+        _stripe_guest = {}
     else:
-        if not payload.qb_token:
-            raise ValidationError("Card token is required for card payments")
-        from app.services.qb_payments_service import QBPaymentsService
-        qb_pay = QBPaymentsService()
-        try:
-            charge_resp = qb_pay.charge_card(
-                token=payload.qb_token,
-                amount=float(total),
-                description=f"AF Apparels guest order — {payload.guest_email}",
-            )
-        except RuntimeError as exc:
-            raise ValidationError(f"Payment failed: {exc}") from exc
+        _stripe_guest = {}
+        # Whoever is taking money today. Without this branch a guest paid through
+        # QuickBooks no matter what PAYMENT_PROVIDER said — half the shop moved
+        # to Stripe and half did not, which is worse than either on its own.
+        from app.services.stripe_service import is_stripe_active as _stripe_on
 
-        qb_charge_id = charge_resp.get("id")
-        qb_payment_status = charge_resp.get("status", "UNKNOWN")
-        # The charge call not raising an exception only means QuickBooks
-        # accepted the request — a declined card returns normally with
-        # status="DECLINED", no exception. Without this check the order
-        # still went through as "paid" with nothing actually collected.
-        # charge_card captures by default, so success returns "CAPTURED";
-        # any other status aborts here before the order is created.
-        if qb_payment_status != "CAPTURED":
-            if not get_settings().ALLOW_UNAPPROVED_CARD_CHARGES:
-                raise PaymentError(
-                    f"Payment was not approved (status: {qb_payment_status}). "
-                    "Please check your card details or try a different payment method."
+        if _stripe_on():
+            from app.services.stripe_service import StripeService as _Stripe
+            if not payload.stripe_payment_method_id:
+                raise ValidationError("Card details are missing. Please re-enter them.")
+            try:
+                _out = await asyncio.to_thread(
+                    lambda: _Stripe().charge_card(
+                        amount=float(total),
+                        payment_method_id=payload.stripe_payment_method_id,
+                        # Keyed on this guest's cart and total, so a double-click
+                        # or a retried request returns the first charge.
+                        idempotency_key=f"guest:{payload.guest_email}:{float(total):.2f}",
+                        description=f"AF Apparels guest order — {payload.guest_email}",
+                        metadata={"guest_email": payload.guest_email or ""},
+                    )
                 )
-            logger.critical(
-                "ALLOW_UNAPPROVED_CARD_CHARGES is on — letting an order through on a "
-                "card QuickBooks answered %s. No money was collected. Turn this off.",
-                qb_payment_status,
-            )
-        _payment_status = "paid" if qb_payment_status == "CAPTURED" else "unpaid"
+            except Exception as exc:
+                raise ValidationError(f"Payment failed: {exc}") from exc
+
+            if _out.get("payment_status") != "paid":
+                raise PaymentError(
+                    f"Payment was not approved (status: {_out.get('status')}). "
+                    "Please check your card details or try a different card."
+                )
+            _stripe_guest = _out
+            qb_charge_id = None
+            qb_payment_status = "STRIPE"
+            _payment_status = "paid"
+            charge_resp = {"id": _out.get("id"), "status": "CAPTURED"}
+
+        else:
+            from app.services.qb_payments_service import QBPaymentsService
+            qb_pay = QBPaymentsService()
+            try:
+                charge_resp = qb_pay.charge_card(
+                    token=payload.qb_token,
+                    amount=float(total),
+                    description=f"AF Apparels guest order — {payload.guest_email}",
+                )
+            except RuntimeError as exc:
+                raise ValidationError(f"Payment failed: {exc}") from exc
+
+            qb_charge_id = charge_resp.get("id")
+            qb_payment_status = charge_resp.get("status", "UNKNOWN")
+            # The charge call not raising an exception only means QuickBooks
+            # accepted the request — a declined card returns normally with
+            # status="DECLINED", no exception. Without this check the order
+            # still went through as "paid" with nothing actually collected.
+            # charge_card captures by default, so success returns "CAPTURED";
+            # any other status aborts here before the order is created.
+            if qb_payment_status != "CAPTURED":
+                if not get_settings().ALLOW_UNAPPROVED_CARD_CHARGES:
+                    raise PaymentError(
+                        f"Payment was not approved (status: {qb_payment_status}). "
+                        "Please check your card details or try a different payment method."
+                    )
+                logger.critical(
+                    "ALLOW_UNAPPROVED_CARD_CHARGES is on — letting an order through on a "
+                    "card QuickBooks answered %s. No money was collected. Turn this off.",
+                    qb_payment_status,
+                )
+            _payment_status = "paid" if qb_payment_status == "CAPTURED" else "unpaid"
 
     # 4. Generate order number — delegate to the single shared generator so
     #    retail/guest and wholesale order numbers form one sequential series.
@@ -396,6 +436,12 @@ async def guest_checkout(
         payment_status=_payment_status,
         notes=payload.order_notes,
         qb_payment_charge_id=qb_charge_id,
+        # Who took it. Without this a guest refund would look for a QuickBooks
+        # charge that never existed.
+        payment_provider="stripe" if _stripe_guest else "quickbooks",
+        stripe_payment_intent_id=_stripe_guest.get("id"),
+        stripe_charge_id=_stripe_guest.get("charge_id"),
+        stripe_payment_status=_stripe_guest.get("status"),
         qb_payment_status=qb_payment_status,
         payment_method=payload.payment_method,
         ach_bank_name=payload.ach_bank_name if payload.payment_method == "ach" else None,

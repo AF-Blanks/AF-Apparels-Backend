@@ -28,6 +28,10 @@ PUBLIC_PATHS = {
     "/api/v1/shipping/live-rates",
     "/api/v1/shipping/shipping-type",
     "/api/v1/webhooks/stripe",
+    # Says whether Stripe is switched on and hands over the publishable key —
+    # which is public by design and can only create payment methods, never move
+    # money. Guest checkout asks this before anyone has signed in.
+    "/api/v1/stripe/config",
     "/health",
     "/docs",
     "/openapi.json",

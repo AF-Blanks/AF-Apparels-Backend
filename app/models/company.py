@@ -49,6 +49,9 @@ class Company(BaseModel):
 
     # QuickBooks
     qb_customer_id: Mapped[str | None] = mapped_column(String(255))
+    #: This company as a customer in Stripe. Separate from qb_customer_id: two
+    #: providers, two sets of ids, and neither means anything to the other.
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255))
     default_payment_method_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Stripe

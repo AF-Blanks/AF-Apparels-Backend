@@ -345,6 +345,21 @@ async def _ensure_content_tables() -> None:
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='qb_realm_id') THEN
                         ALTER TABLE orders ADD COLUMN qb_realm_id VARCHAR(64);
                     END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='stripe_charge_id') THEN
+                        ALTER TABLE orders ADD COLUMN stripe_charge_id VARCHAR(255);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='stripe_payment_status') THEN
+                        ALTER TABLE orders ADD COLUMN stripe_payment_status VARCHAR(50);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='stripe_payment_method_id') THEN
+                        ALTER TABLE orders ADD COLUMN stripe_payment_method_id VARCHAR(255);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='payment_provider') THEN
+                        ALTER TABLE orders ADD COLUMN payment_provider VARCHAR(20);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='companies' AND column_name='stripe_customer_id') THEN
+                        ALTER TABLE companies ADD COLUMN stripe_customer_id VARCHAR(255);
+                    END IF;
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='marketing_campaigns' AND column_name='attachments') THEN
                         ALTER TABLE marketing_campaigns ADD COLUMN attachments JSONB NOT NULL DEFAULT '[]'::jsonb;
                     END IF;
@@ -595,6 +610,27 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            # One press of Pay, however many times it arrives — see
+            # services/payment_attempt.py. The unique key is the whole point:
+            # two simultaneous requests race on the insert and the database
+            # picks a winner, rather than both getting through and charging.
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS payment_attempts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    attempt_key VARCHAR(120) UNIQUE NOT NULL,
+                    company_id UUID,
+                    status VARCHAR(20) NOT NULL DEFAULT 'in_flight',
+                    order_id UUID,
+                    payment_reference VARCHAR(255),
+                    failure_reason TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    completed_at TIMESTAMPTZ
+                )
+            """))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_payment_attempts_created "
+                "ON payment_attempts (created_at)"
+            ))
             await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS app_settings (
                     key VARCHAR(100) PRIMARY KEY,
@@ -1023,6 +1059,12 @@ app.include_router(checkout.router, prefix=_V1)
 app.include_router(orders.router, prefix=_V1)
 app.include_router(account.router, prefix=_V1)
 app.include_router(webhooks.router, prefix=_V1)
+
+# Stripe's own endpoints — the publishable key, a SetupIntent, saved cards.
+# Every one answers safely while PAYMENT_PROVIDER is still "quickbooks", so the
+# checkout page can ask without knowing which provider is switched on.
+from app.api.v1 import stripe_payments as _stripe_payments  # noqa: E402
+app.include_router(_stripe_payments.router, prefix=_V1)
 app.include_router(discounts.router, prefix=_V1)
 app.include_router(guest.router, prefix=_V1)
 app.include_router(contact.router, prefix=_V1)

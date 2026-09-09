@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import traceback
 from datetime import datetime, timezone
@@ -6,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.exceptions import ForbiddenError, PaymentError, ValidationError
+from app.core.exceptions import ConflictError, ForbiddenError, PaymentError, ValidationError
 from app.schemas.order import CheckoutConfirmRequest, CreatePaymentIntentRequest, OrderOut
 from app.services.backorder_rules import MixedOrderError
 from app.services.cart_service import CartService
@@ -155,7 +156,316 @@ async def confirm_checkout(
         ) from exc
 
 
+#: Stripe's own limits on a metadata bag: 50 keys, keys of 40 characters,
+#: values of 500. Staying well inside them is what stops a large order having
+#: its payment rejected over a label.
+_META_VALUE_MAX = 500
+_META_ITEM_KEYS = 10
+
+
+def _stripe_item_summary(items) -> dict[str, str]:
+    """What was actually sold, in a shape Stripe will accept.
+
+    A payment of $118,687.46 sitting in the dashboard with nothing but a company
+    name against it is no use to anybody reconciling it. This puts the lines
+    themselves on the payment — product, colour/size, quantity — packed into as
+    few metadata keys as the 500-character limit allows, so a 38-line order is
+    readable rather than truncated to its first three rows.
+
+    Never lets the summary be the reason a charge fails: anything that will not
+    fit is dropped and counted, and any error here returns an empty bag rather
+    than raising.
+    """
+    try:
+        lines: list[str] = []
+        units = 0
+        for it in (items or []):
+            qty = int(getattr(it, "quantity", 0) or 0)
+            units += qty
+            name = (getattr(it, "product_name", "") or "").strip()
+            colour = (getattr(it, "color", "") or "").strip()
+            size = (getattr(it, "size", "") or "").strip()
+            variant = "/".join(p for p in (colour, size) if p)
+            label = f"{name} {variant}".strip() if variant else name
+            lines.append(f"{label} x{qty}" if label else f"x{qty}")
+
+        meta: dict[str, str] = {
+            "order_lines": str(len(lines)),
+            "total_units": str(units),
+        }
+
+        # Pack the lines into as few keys as they fit in, in order.
+        keys_used, buf, dropped = 0, "", 0
+        for i, line in enumerate(lines):
+            piece = line if not buf else f"; {line}"
+            if len(buf) + len(piece) <= _META_VALUE_MAX:
+                buf += piece
+                continue
+            keys_used += 1
+            meta[f"items_{keys_used}"] = buf
+            if keys_used >= _META_ITEM_KEYS:
+                dropped = len(lines) - i
+                buf = ""
+                break
+            buf = line
+        if buf:
+            keys_used += 1
+            meta[f"items_{keys_used}"] = buf
+        if dropped:
+            meta["items_truncated"] = f"+{dropped} more lines — see the order"
+        return meta
+    except Exception:  # noqa: BLE001 — a label must never cost a payment
+        return {}
+
+
+async def _charge_via_stripe(
+    *, payload, request, db, company_id, amount: float, items=None,
+) -> dict:
+    """Take the money through Stripe and answer in the shape the rest expects.
+
+    Returns {"id", "status"} where status is "CAPTURED" when the money is in —
+    the same word the QuickBooks path uses — so everything downstream reads one
+    vocabulary rather than branching on who was paid.
+
+    A bank debit never returns CAPTURED here. It leaves Stripe in `processing`
+    and settles days later, so it comes back as PENDING and the order is placed
+    unpaid; the webhook marks it paid when the money actually lands. Treating a
+    bank debit as collected at checkout is how goods go out against money that
+    never arrives.
+    """
+    from sqlalchemy import select as _sel
+    from app.models.company import Company as _Co
+    import stripe
+
+    from app.services.stripe_service import (
+        StripeNotConfigured, StripeService,
+    )
+
+    svc = StripeService()
+    company = (await db.execute(_sel(_Co).where(_Co.id == company_id))).scalar_one_or_none()
+
+    # The same key that guards the attempt guards the charge. A retry of one
+    # press reuses it, so Stripe returns the original charge rather than making
+    # a second — the last line of defence if both earlier layers are bypassed.
+    _key = (payload.attempt_key or "").strip() or f"order:{company_id}:{amount:.2f}"
+
+    _meta = {
+        "company_id": str(company_id),
+        "company_name": (company.name if company else "") or "",
+        "ip_address": _client_ip(request),
+        "user_agent": (request.headers.get("user-agent") or "")[:200],
+    }
+    _meta.update(_stripe_item_summary(items))
+
+    # The line shown in the dashboard's payment list, where there is room for
+    # one line only — so it carries the shape of the order, not its contents.
+    _desc = f"AF Apparels — {(company.name if company else None) or company_id}"
+    if _meta.get("order_lines"):
+        _desc += f" — {_meta['order_lines']} lines, {_meta['total_units']} pcs"
+
+    try:
+        cust_id = None
+        if company:
+            cust_id = company.stripe_customer_id
+            if not cust_id:
+                cust_id = await asyncio.to_thread(
+                    lambda: svc.find_or_create_customer(
+                        company_id=str(company_id),
+                        name=company.name or f"Company {company_id}",
+                        email=company.email,
+                    )
+                )
+                company.stripe_customer_id = cust_id
+                await db.commit()
+
+        # ── a bank debit ────────────────────────────────────────────────
+        if payload.payment_method == "ach":
+            if not payload.ach_authorized:
+                raise ValidationError(
+                    "Please tick the box authorising us to debit your bank account."
+                )
+            if not payload.stripe_payment_method_id:
+                raise ValidationError(
+                    "Bank details are missing. Please re-enter them and try again."
+                )
+            out = await asyncio.to_thread(
+                lambda: svc.charge_bank_account(
+                    amount=amount,
+                    payment_method_id=payload.stripe_payment_method_id,
+                    idempotency_key=f"ach:{_key}",
+                    customer_id=cust_id,
+                    description=_desc,
+                    metadata=_meta,
+                )
+            )
+        # ── a card the customer already saved ───────────────────────────
+        elif payload.stripe_saved_method_id:
+            if not cust_id:
+                raise ValidationError(
+                    "No saved cards on this account yet. Please enter a card."
+                )
+            out = await asyncio.to_thread(
+                lambda: svc.charge_saved_card(
+                    amount=amount,
+                    customer_id=cust_id,
+                    payment_method_id=payload.stripe_saved_method_id,
+                    idempotency_key=f"card:{_key}",
+                    description=_desc,
+                    metadata=_meta,
+                )
+            )
+        # ── a card entered now ──────────────────────────────────────────
+        elif payload.stripe_payment_method_id:
+            out = await asyncio.to_thread(
+                lambda: svc.charge_card(
+                    amount=amount,
+                    payment_method_id=payload.stripe_payment_method_id,
+                    idempotency_key=f"card:{_key}",
+                    customer_id=cust_id,
+                    description=_desc,
+                    save_for_future=bool(payload.save_card),
+                    metadata=_meta,
+                )
+            )
+        else:
+            raise ValidationError(
+                "Payment details are missing. Please enter a card or bank account."
+            )
+
+    except StripeNotConfigured as exc:
+        # The switch was thrown before the keys were in. Say so plainly rather
+        # than letting a customer meet a blank failure.
+        _log.critical("Stripe is the active provider but has no keys: %s", exc)
+        raise PaymentError(
+            "Card payments are temporarily unavailable. Please call us on "
+            "214-272-7213 and we will take the order."
+        )
+    except ValidationError:
+        raise
+    except stripe.IdempotencyError as exc:
+        # The same attempt key came back with different details — a cart edited
+        # in another tab, most often. Stripe's own wording here is written for
+        # developers ("Keys for idempotent requests can only be used with the
+        # same parameters…") and means nothing to a customer.
+        _log.warning("Stripe idempotency clash for company %s: %s", company_id, exc)
+        raise PaymentError(
+            "Something changed since you opened this page. Please refresh and "
+            "enter your payment details again — nothing has been charged."
+        )
+    except Exception as exc:  # noqa: BLE001 — Stripe's own errors, made readable
+        _msg = getattr(exc, "user_message", None) or str(exc)
+        _log.warning("Stripe charge failed for company %s: %s", company_id, _msg)
+        raise PaymentError(
+            f"Payment was not approved: {_msg}. Please check your details or "
+            "try a different payment method."
+        )
+
+    # ── translate into the vocabulary the rest of checkout speaks ───────
+    if out["payment_status"] == "paid":
+        status = "CAPTURED"
+    elif out["payment_status"] == "pending":
+        # A bank debit under way, or a card asking the cardholder to
+        # authenticate. Neither is money in hand.
+        status = "PENDING"
+    else:
+        status = (out.get("status") or "FAILED").upper()
+
+    if status not in ("CAPTURED", "PENDING"):
+        raise PaymentError(
+            out.get("failure_message")
+            or "Payment was not approved. Please check your details or try another card."
+        )
+
+    return {
+        "id": out["id"],
+        "status": status,
+        "_stripe": out,
+    }
+
+
+def _client_ip(request) -> str:
+    """The customer's address, for the bank debit mandate.
+
+    Behind a proxy the socket address is the proxy's; the first hop in
+    X-Forwarded-For is the one that belongs to the person who agreed.
+    """
+    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return fwd or (getattr(request.client, "host", "") or "0.0.0.0")
+
+
 async def _confirm_checkout_inner(
+    payload: CheckoutConfirmRequest,
+    request: Request,
+    db: AsyncSession,
+):
+    """One press of Pay, however many times it arrives.
+
+    Everything below charges money and creates an order. If the customer
+    double-clicks, or their phone drops the reply and the browser retries, this
+    runs twice — and without the guard, charges twice. See payment_attempt.py
+    for why three layers are needed rather than one.
+
+    A client that sends no attempt_key gets exactly the old behaviour, guard and
+    all bypassed. That is how the QuickBooks path runs today; nothing changes
+    for it until it starts sending one.
+    """
+    from app.services import payment_attempt as _attempt
+
+    _key = (payload.attempt_key or "").strip()[:120]
+    if not _key:
+        return await _do_confirm_checkout(payload, request, db)
+
+    _company_for_attempt = getattr(request.state, "company_id", None)
+    try:
+        await _attempt.claim(db, attempt_key=_key, company_id=str(_company_for_attempt or ""))
+    except _attempt.AttemptAlreadyDone as done:
+        # They already paid and already have an order. Give them that one back
+        # rather than an error for something that worked.
+        _log.info("checkout attempt %s already completed as order %s", _key, done.order_id)
+        return await _order_out_by_id(done.order_id, db)
+    except _attempt.AttemptInFlight:
+        raise ConflictError(
+            "This order is already being placed — give it a moment rather than "
+            "paying again. If nothing happens, refresh and check your orders "
+            "before retrying."
+        )
+
+    try:
+        result = await _do_confirm_checkout(payload, request, db)
+    except (PaymentError, ValidationError, MixedOrderError, ForbiddenError) as exc:
+        # Nothing was collected, or nothing should have been. Free the key so
+        # fixing the problem and pressing Pay again is not refused as a repeat.
+        await _attempt.release(db, attempt_key=_key)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # Something broke after money may already have moved. The key stays
+        # claimed and marked failed, so a blind retry cannot charge again — a
+        # person looks at it instead.
+        await _attempt.failed(db, attempt_key=_key, reason=str(exc))
+        raise
+
+    await _attempt.completed(
+        db, attempt_key=_key, order_id=str(result.id),
+        payment_reference=getattr(result, "qb_payment_charge_id", None),
+    )
+    return result
+
+
+async def _order_out_by_id(order_id: str, db: AsyncSession):
+    """Re-read an order for a retry that already succeeded."""
+    from sqlalchemy import select as _sel
+    from sqlalchemy.orm import selectinload as _sel_in
+    from app.models.order import Order as _Order
+
+    order = (await db.execute(
+        _sel(_Order).options(_sel_in(_Order.items)).where(_Order.id == order_id)
+    )).scalar_one_or_none()
+    if not order:
+        raise ValidationError("That order could not be found. Please check your orders.")
+    return OrderOut.model_validate(order)
+
+
+async def _do_confirm_checkout(
     payload: CheckoutConfirmRequest,
     request: Request,
     db: AsyncSession,
@@ -354,9 +664,31 @@ async def _confirm_checkout_inner(
         _convenience_fee_dc = (cart.subtotal * Decimal("0.03")).quantize(Decimal("0.01")) if _account_type == "wholesale" else Decimal("0.00")
         total_float = float(cart.subtotal + base_shipping + expedited_surcharge + tax_amount_dc - coupon_discount_amount + _convenience_fee_dc)
 
+        # ── Who takes the money ───────────────────────────────────────────
+        #
+        # One switch, PAYMENT_PROVIDER. Everything below this point — the order,
+        # the invoice, the emails — is the same either way; only the few lines
+        # that actually move money differ. Whoever took it is written onto the
+        # order, because a refund months later has to go back through the same
+        # provider whatever the setting says by then.
+        from app.services.stripe_service import is_stripe_active as _stripe_on
+
+        if _stripe_on():
+            charge_resp = await _charge_via_stripe(
+                payload=payload, request=request, db=db,
+                company_id=company_id, amount=total_float,
+                items=cart.items,
+            )
+            _payment_provider = "stripe"
+        else:
+            _payment_provider = "quickbooks"
+            charge_resp = None
+
         qb_pay = QBPaymentsService()
         try:
-            if payload.saved_card_id:
+            if _payment_provider == "stripe":
+                pass  # already charged above
+            elif payload.saved_card_id:
                 # Saved card — look up QB customer ID from DB (frontend doesn't need to pass it)
                 from sqlalchemy import select as _select
                 from app.models.company import Company as _Company
@@ -423,13 +755,80 @@ async def _confirm_checkout_inner(
         is_wholesale=_account_type == "wholesale",
     )
 
+    # Who took it and what they called it. Recorded per order because a refund
+    # months from now has to go back through the provider that actually took the
+    # money, whatever PAYMENT_PROVIDER happens to say by then.
+    order.payment_provider = _payment_provider
+    if _payment_provider == "stripe" and isinstance(charge_resp, dict):
+        _sd = charge_resp.get("_stripe") or {}
+        order.stripe_payment_intent_id = _sd.get("id")
+        order.stripe_charge_id = _sd.get("charge_id")
+        order.stripe_payment_status = _sd.get("status")
+        order.stripe_payment_method_id = _sd.get("payment_method_id")
+        order.stripe_customer_id = _sd.get("customer_id")
+        # A bank debit is days from settling. The order is real and owed; the
+        # webhook is what turns it paid, and only when the money lands.
+        order.payment_status = "paid" if _sd.get("payment_status") == "paid" else "unpaid"
+
+        # A bank account typed in rather than logged into needs two small
+        # deposits confirmed before anything can be taken. Nothing is in flight
+        # until that happens, so it goes on the order's own record and to
+        # whoever watches the inbox — otherwise it reads as an ordinary transfer
+        # on its way and simply never arrives.
+        if _sd.get("next_action") == "verify_with_microdeposits":
+            _tl_mv = list(order.timeline or [])
+            _tl_mv.append({
+                "status": "pending",
+                "message": (
+                    "Bank transfer NOT started — the customer's bank account still "
+                    "needs verifying. Stripe has sent two small deposits; the "
+                    "transfer only begins once those are confirmed. Nothing has "
+                    "been collected."
+                ),
+                "created_by": "System",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            order.timeline = _tl_mv
+            try:
+                from app.core.config import settings as _cfg_mv
+                from app.services.email_service import EmailService as _MailMv
+                if _cfg_mv.ADMIN_NOTIFICATION_EMAIL:
+                    _MailMv(db).send_raw(
+                        to_email=_cfg_mv.ADMIN_NOTIFICATION_EMAIL,
+                        subject=f"Bank account needs verifying — order {order.order_number}",
+                        body_html=(
+                            '<div style="font-family:sans-serif;max-width:560px">'
+                            '<div style="background:#1B3A5C;padding:20px;'
+                            'border-bottom:3px solid #E8242A"><span style="color:#fff;'
+                            'font-weight:900;font-size:20px">AF APPARELS</span></div>'
+                            '<div style="padding:24px;color:#2A2830;line-height:1.7">'
+                            f'<p>Order <strong>{order.order_number}</strong> was placed '
+                            f'with a bank transfer, but the account has not been '
+                            f'verified yet, so <strong>no money is on its way</strong>.</p>'
+                            f'<p>Amount: <strong>${float(order.total):,.2f}</strong></p>'
+                            '<p>Stripe has sent two small deposits to the account. The '
+                            'customer has to confirm those amounts before the transfer '
+                            'starts. Worth a call if the order is urgent.</p>'
+                            '</div></div>'
+                        ),
+                    )
+            except Exception as _mv_exc:  # noqa: BLE001
+                _log.warning("Could not send the verification alert: %s", _mv_exc)
+    await db.commit()
+
     # ── Bank debit ────────────────────────────────────────────────────────────
     # Raised against the order's own total rather than a figure worked out again
     # here, so what leaves the customer's bank is always exactly what the invoice
     # says. A card is charged before the order exists because the money is either
     # there or it is not; a bank debit clears over days and can still be returned,
     # so there is nothing to wait for and no reason to hold the order back.
-    if has_ach:
+    if has_ach and _payment_provider == "stripe":
+        # Stripe debited the account before the order was created, above. All
+        # that is left is the record of permission, which is filed either way.
+        from app.services.ach_authorization import record_authorization as _record_auth
+        await _record_auth(db, order.id, request, payload.ach_authorization_text)
+
+    elif has_ach:
         from app.services.ach_authorization import record_authorization as _record_auth
         from app.services.qb_payments_service import QBPaymentsService as _QBPaySvc
 
