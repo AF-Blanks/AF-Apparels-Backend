@@ -613,13 +613,26 @@ async def _do_confirm_checkout(
             for ci, var, prod in _bo_rows
         ])
 
-    # ── QB Payments flow ──────────────────────────────────────────────────────
+    # ── Taking money up front ─────────────────────────────────────────────────
     qb_charge_id: str | None = None
     qb_payment_status: str | None = None
     coupon_discount_dc = None
     coupon_discount_amount = Decimal("0")
 
-    if has_qb:
+    # Set before the block, because the block does not always run. An order on
+    # terms, or a QuickBooks bank debit, is created without a charge and reaches
+    # the lines below with nothing having been assigned here — which is how
+    # `_payment_provider` came to be read before it existed.
+    _payment_provider = "quickbooks"
+    charge_resp: dict | None = None
+
+    # This block is where a card is charged before the order is written, and it
+    # was gated on has_qb — "a QuickBooks token or saved card was supplied".
+    # Stripe supplies neither, so on the Stripe path the whole block was skipped:
+    # no charge was raised at all, and the order fell through to code expecting
+    # one. It runs for either provider now; which of them actually moves the
+    # money is decided inside, by the same switch as everywhere else.
+    if has_qb or has_stripe:
         from app.services.cart_service import CartService as _CartService
         from app.services.qb_payments_service import QBPaymentsService
 
