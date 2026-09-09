@@ -471,12 +471,21 @@ async def _do_confirm_checkout(
     db: AsyncSession,
 ):
     from app.core.config import settings as _cfg_maint
-    if _cfg_maint.MAINTENANCE_MODE:
+    if _cfg_maint.MAINTENANCE_MODE and not (
+        getattr(request.state, "is_admin", False)
+        or getattr(request.state, "is_staff", False)
+    ):
         raise ValidationError(
             "The store is briefly closed for maintenance and cannot take orders "
             "right now. Please try again shortly, or email info@afblanks.com and "
             "we will place it for you."
         )
+    # Staff are let through on purpose. Maintenance mode exists to keep customers
+    # out while something is being changed underneath them — and the person doing
+    # the changing is usually the one who needs to place an order to see whether
+    # it worked. Closing the shop to them as well leaves no way to check without
+    # reopening it to everyone. Guests are still refused: guest.py has no staff
+    # to recognise.
 
     company_id = getattr(request.state, "company_id", None)
     user_id = getattr(request.state, "user_id", None)
