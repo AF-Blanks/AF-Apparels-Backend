@@ -505,15 +505,24 @@ async def _do_confirm_checkout(
         bool(payload.payment_intent_id),
     )
 
-    # Validate: at least one payment method supplied
+    # Validate: at least one payment method supplied.
+    #
+    # has_stripe used to mean payment_intent_id alone — a field left over from an
+    # older Stripe flow that nothing sends any more. The form sends a payment
+    # method id now, so a customer could fill in a Stripe card, reach this line,
+    # and be told to supply a QuickBooks token.
     has_qb     = bool(payload.qb_token or payload.saved_card_id)
-    has_stripe = bool(payload.payment_intent_id)
+    has_stripe = bool(
+        payload.stripe_payment_method_id
+        or payload.stripe_saved_method_id
+        or payload.payment_intent_id
+    )
     has_ach    = payload.payment_method == "ach"
     has_net30  = payload.payment_method == "net_30"  # wholesale invoice/NET 30 — no upfront charge
     has_net7   = payload.payment_method == "net_7"   # wholesale invoice/NET 7 — no upfront charge
     if not has_qb and not has_stripe and not has_ach and not has_net30 and not has_net7:
         raise ValidationError(
-            "Payment required: supply qb_token, saved_card_id, payment_intent_id, "
+            "Payment required: supply card or bank details, "
             "payment_method=ach, payment_method=net_30, or payment_method=net_7"
         )
 
@@ -533,7 +542,15 @@ async def _do_confirm_checkout(
     # routing number is the common failure, and catching it here means the
     # customer is told to fix it rather than ending up with an order whose
     # payment could never have been raised.
-    if has_ach:
+    # These are QuickBooks' fields, and only QuickBooks needs them: it is handed
+    # the raw routing and account numbers and raises the debit itself. On the
+    # Stripe path the customer's bank details were collected by Stripe and never
+    # reach us — there is a payment method id and nothing else — so demanding an
+    # account number here refused every Stripe bank transfer for want of a number
+    # we deliberately do not hold.
+    from app.services.stripe_service import is_stripe_active as _stripe_on_val
+
+    if has_ach and not _stripe_on_val():
         from app.services.qb_payments_service import QBPaymentsService as _QBPaySvc
 
         if not payload.ach_authorized:
@@ -550,6 +567,18 @@ async def _do_confirm_checkout(
         if not (payload.ach_first_name or "").strip() or not (payload.ach_last_name or "").strip():
             raise ValidationError(
                 "Please enter the first and last name on the bank account."
+            )
+
+    elif has_ach:
+        # Stripe holds the bank details; what it cannot hold is the customer's
+        # permission to take the money, and that is still ours to insist on.
+        if not payload.ach_authorized:
+            raise ValidationError(
+                "Please authorise the bank transfer before placing the order."
+            )
+        if not payload.stripe_payment_method_id:
+            raise ValidationError(
+                "Bank details are missing. Please re-enter them and try again."
             )
 
     discount_percent = getattr(request.state, "tier_discount_percent", Decimal("0"))
@@ -725,7 +754,11 @@ async def _do_confirm_checkout(
         except RuntimeError as exc:
             raise ValidationError(f"Payment failed: {exc}") from exc
 
-        qb_charge_id = charge_resp.get("id")
+        # A Stripe id is not a QuickBooks charge id, and must not be written into
+        # the column that means one — a refund reading it would go looking for a
+        # charge QuickBooks has never heard of. The Stripe ids are recorded on the
+        # order in their own columns further down.
+        qb_charge_id = None if _payment_provider == "stripe" else charge_resp.get("id")
         qb_payment_status = charge_resp.get("status", "UNKNOWN")
 
         # The charge API call not raising an exception only means QuickBooks
@@ -736,7 +769,13 @@ async def _do_confirm_checkout(
         # no money actually collected. charge_card/charge_saved_card capture by
         # default, so a successful charge returns status "CAPTURED"; any other
         # status (DECLINED, etc.) aborts here before an order is created.
-        if qb_payment_status != "CAPTURED":
+        # PENDING is a real answer, not a failure. A bank debit leaves Stripe in
+        # `processing` and settles days later; refusing it here would mean Stripe
+        # can take cards and nothing else, which is the one thing it was brought
+        # in to do. The order is placed unpaid and the webhook settles it.
+        if qb_payment_status == "PENDING":
+            pass
+        elif qb_payment_status != "CAPTURED":
             from app.core.config import settings as _cfg_card
 
             if not _cfg_card.ALLOW_UNAPPROVED_CARD_CHARGES:
