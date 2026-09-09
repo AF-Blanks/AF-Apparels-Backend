@@ -67,7 +67,11 @@ async def _company_customer(db: AsyncSession, request: Request) -> tuple[Company
         lambda: svc.find_or_create_customer(
             company_id=str(company.id),
             name=company.name or f"Company {company.id}",
-            email=company.email,
+            # The column is company_email; there is no `email` on Company, and
+            # reading one raised straight past the error handling as a 500 with
+            # no CORS headers — which reaches the browser as "Failed to fetch"
+            # and tells nobody anything.
+            email=company.company_email,
         )
     )
     company.stripe_customer_id = cust_id

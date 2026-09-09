@@ -559,7 +559,7 @@ async def pay_invoice(
                     lambda: _svc.find_or_create_customer(
                         company_id=str(_company.id),
                         name=_company.name or f"Company {_company.id}",
-                        email=_company.email,
+                        email=_company.company_email,
                     )
                 )
                 _company.stripe_customer_id = _cust

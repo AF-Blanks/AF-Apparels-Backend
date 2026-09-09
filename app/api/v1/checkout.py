@@ -272,7 +272,7 @@ async def _charge_via_stripe(
                     lambda: svc.find_or_create_customer(
                         company_id=str(company_id),
                         name=company.name or f"Company {company_id}",
-                        email=company.email,
+                        email=company.company_email,
                     )
                 )
                 company.stripe_customer_id = cust_id
