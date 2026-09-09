@@ -712,7 +712,16 @@ async def _do_confirm_checkout(
             # $0 is legitimate (tax-exempt companies, no-tax-nexus states) —
             # only a negative value is unambiguously invalid/tampered.
             raise ValidationError("Invalid tax amount")
-        _convenience_fee_dc = (cart.subtotal * Decimal("0.03")).quantize(Decimal("0.01")) if _account_type == "wholesale" else Decimal("0.00")
+        # The 3% is a card fee. It was safe to leave the payment method out of
+        # this while only QuickBooks card payments reached here — a bank debit
+        # skipped this block entirely. Once Stripe's bank transfers started
+        # coming through it too, they arrived carrying a card's fee: the customer
+        # was shown $5.59 and the debit was raised for $5.74.
+        _convenience_fee_dc = (
+            (cart.subtotal * Decimal("0.03")).quantize(Decimal("0.01"))
+            if _account_type == "wholesale" and not has_ach
+            else Decimal("0.00")
+        )
         total_float = float(cart.subtotal + base_shipping + expedited_surcharge + tax_amount_dc - coupon_discount_amount + _convenience_fee_dc)
 
         # ── Who takes the money ───────────────────────────────────────────
