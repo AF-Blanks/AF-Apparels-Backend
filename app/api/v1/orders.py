@@ -689,6 +689,31 @@ async def pay_invoice(
             {"tl": _json.dumps(timeline), "id": str(order_id)},
         )
 
+    # Money already collected on this order, before today's payment. An invoice
+    # on terms that was part-paid through QuickBooks and finished through Stripe
+    # has money sitting with two providers, and a refund cannot simply pick one.
+    # Nothing here can decide that automatically, so it is written on the order
+    # for whoever does.
+    if _settled and _provider == "stripe" and _already_paid > _Dec("0.00"):
+        _prev = (order.payment_provider or "quickbooks").lower()
+        if _prev != "stripe":
+            _split = list(order.timeline or [])
+            _split.append({
+                "status": "note",
+                "message": (
+                    f"Split payment: ${float(_already_paid):.2f} was collected "
+                    f"earlier through {_prev}, and ${float(_balance_due):.2f} now "
+                    f"through stripe. A refund has to be split the same way — do "
+                    f"not refund the whole order through one of them."
+                ),
+                "created_by": "System",
+                "created_at": now.isoformat(),
+            })
+            await db.execute(
+                _text("UPDATE orders SET timeline=CAST(:tl AS jsonb) WHERE id=:id"),
+                {"tl": _json.dumps(_split), "id": str(order_id)},
+            )
+
     # Who took it, so a refund months from now goes back the same way — and so
     # the webhook can find this order by its intent when the debit lands.
     if _provider == "stripe":
@@ -713,6 +738,24 @@ async def pay_invoice(
         db, attempt_key=_akey, order_id=str(order_id),
         payment_reference=str(charge_resp.get("id") or ""),
     )
+
+    # Tell QuickBooks the invoice is settled.
+    #
+    # It was never told. A customer on Net 30 paying their own invoice here
+    # marked the order paid in our database and left the QuickBooks invoice
+    # standing open — the books said the money was still owed, whoever collected
+    # it. force_payment is what posts a payment against a terms invoice; without
+    # it the sync deliberately skips one, because a Net 30 order is not paid at
+    # the moment it is placed. It is now.
+    if _settled:
+        try:
+            from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+            sync_order_invoice_to_qb.delay(str(order_id), force_payment=True)
+        except Exception as _qb_exc:  # noqa: BLE001 — the money is in either way
+            logger.warning(
+                "Could not queue the QuickBooks payment for order %s: %s",
+                order.order_number, _qb_exc,
+            )
     return {
         "message": (
             "Payment successful" if _settled else
