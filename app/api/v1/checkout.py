@@ -928,6 +928,15 @@ async def _do_confirm_checkout(
                 # which left the one place a decline reason could have been
                 # found empty. Whatever it sends is logged verbatim now, minus
                 # the account number, which is nobody's business in a log file.
+                # Why, not just that. QuickBooks puts the reason in the body and
+                # its own transaction screen leaves the comment column empty for
+                # eChecks whatever description is sent — so this was the one
+                # place a decline reason could be read, and it went to a log file
+                # nobody opens.
+                from app.services.qb_payments_service import (
+                    echeck_decline_reason as _why,
+                )
+                _reason = _why(_echeck)
                 _safe = {k: v for k, v in _echeck.items() if k != "bankAccount"}
                 _log.error(
                     "eCheck NOT COLLECTED for order %s — id=%s status=%s amount=%.2f"
@@ -948,8 +957,9 @@ async def _do_confirm_checkout(
                         "status": "payment_failed",
                         "message": (
                             f"Bank transfer was {_echeck_status.lower()} by the bank — "
-                            f"no money was collected. Do not mark this order paid "
-                            f"until payment is arranged another way."
+                            f"no money was collected. Reason: {_reason}. "
+                            f"Do not mark this order paid until payment is "
+                            f"arranged another way."
                         ),
                         "created_by": "System",
                         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -979,6 +989,7 @@ async def _do_confirm_checkout(
                                 f'<strong>{_echeck_status.lower()}</strong>. '
                                 f'No money was collected.</p>'
                                 f'<p>Amount: <strong>${float(order.total):,.2f}</strong><br>'
+                                f'Reason given: <strong>{_reason}</strong><br>'
                                 f'QuickBooks transaction: {_echeck_id}</p>'
                                 '<p>The order has been placed and is unpaid. Do not mark '
                                 'it as paid — arrange payment another way first.</p>'

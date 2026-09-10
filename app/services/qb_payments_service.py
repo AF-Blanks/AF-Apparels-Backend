@@ -35,6 +35,37 @@ ECHECK_NOT_COLLECTED = {
     "FAILED_TO_RAISE", "DECLINED", "FAILED", "REJECTED", "CANCELLED", "VOIDED", "ERROR",
 }
 
+def echeck_decline_reason(echeck: dict) -> str:
+    """Why QuickBooks refused a debit, in words a person can act on.
+
+    The reason is in the body, in an `errors` list, and it was being read into a
+    log line and nowhere else — so the order showed a declined transfer with no
+    hint of why, and QuickBooks' own transaction screen leaves the comment column
+    empty for eChecks whatever description is sent with them. Common ones are an
+    account that cannot be found, a closed account, or no funds.
+    """
+    try:
+        errs = echeck.get("errors") or echeck.get("Errors") or []
+        if isinstance(errs, (dict, str)):
+            errs = [errs]
+        parts = []
+        for e in errs:
+            if not isinstance(e, dict):
+                parts.append(str(e)); continue
+            msg = (e.get("message") or e.get("Message") or "").strip()
+            det = (e.get("detail") or e.get("Detail") or "").strip()
+            code = (e.get("code") or e.get("Code") or "").strip()
+            one = " — ".join(p for p in (msg, det) if p) or code
+            if one:
+                parts.append(f"{one} ({code})" if code and code not in one else one)
+        if parts:
+            return "; ".join(parts)[:400]
+    except Exception:  # noqa: BLE001 — a reason must never cost the caller
+        pass
+    # Nothing usable in the body. The status is at least true.
+    return (echeck.get("status") or echeck.get("Status") or "declined").strip() or "declined"
+
+
 #: A refund QuickBooks answered 201 to but will not actually make.
 _ECHECK_REFUND_REFUSED = {"DECLINED", "FAILED", "REJECTED", "ERROR", "CANCELLED"}
 
