@@ -91,7 +91,7 @@ async def sales_report(
             func.sum(Order.shipping_cost).label("shipping"),
         )
         .where(Order.created_at.between(start, end))
-        .where(Order.status.notin_(["cancelled", "refunded"]), Order.is_draft.is_(False))
+        .where(Order.status.notin_(["cancelled", "refunded"]), or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
         .group_by(trunc)
         .order_by(trunc)
     )
@@ -110,7 +110,7 @@ async def sales_report(
         .join(ProductCategory, ProductCategory.product_id == ProductVariant.product_id)
         .join(Category, Category.id == ProductCategory.category_id)
         .where(Order.created_at.between(start, end))
-        .where(Order.status.notin_(["cancelled", "refunded"]), Order.is_draft.is_(False))
+        .where(Order.status.notin_(["cancelled", "refunded"]), or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
         .group_by(Category.name)
         .order_by(func.sum(OrderItem.line_total).desc())
         .limit(10)
@@ -127,7 +127,7 @@ async def sales_report(
         )
         .join(Order, Order.id == OrderItem.order_id)
         .where(Order.created_at.between(start, end))
-        .where(Order.status.notin_(["cancelled", "refunded"]), Order.is_draft.is_(False))
+        .where(Order.status.notin_(["cancelled", "refunded"]), or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
         # Aggregate per PRODUCT (all its variants) so the ranking is 20 products,
         # not 20 individual size/colour rows — accurate, nothing dropped.
         .group_by(OrderItem.product_name)
@@ -144,7 +144,7 @@ async def sales_report(
             func.avg(Order.total).label("avg_order_value"),
         )
         .where(Order.created_at.between(start, end))
-        .where(Order.status.notin_(["cancelled", "refunded"]), Order.is_draft.is_(False))
+        .where(Order.status.notin_(["cancelled", "refunded"]), or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
     )
     totals = (await db.execute(total_q)).mappings().one()
 
@@ -175,7 +175,7 @@ async def sales_report(
         .where(
             Order.created_at.between(start, end),
             Order.status.notin_(["cancelled", "refunded"]),
-            Order.is_draft.is_(False),
+            or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)),
             RMARequest.status == "approved",
             RMARequest.refund_status == "refunded",
         )
@@ -414,7 +414,7 @@ async def outstanding_report(
             _bucket(Order.created_at < d90).label("age_90"),
         )
         .join(Order, Order.company_id == Company.id)
-        .where(Order.status.notin_(["cancelled", "refunded"]), Order.is_draft.is_(False))
+        .where(Order.status.notin_(["cancelled", "refunded"]), or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
         .group_by(
             Company.id, Company.name, Company.company_email, Company.phone,
             Company.net30_enabled, Company.net7_enabled,
@@ -445,7 +445,7 @@ async def outstanding_report(
             .where(
                 Order.company_id.in_(_ids),
                 Order.status.notin_(["cancelled", "refunded"]),
-                Order.is_draft.is_(False),
+                or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)),
                 owed > 0,
             )
             .order_by(Order.created_at.asc())
@@ -563,7 +563,7 @@ async def customer_report(
         )
         .join(Order, Order.company_id == Company.id)
         .where(Order.created_at.between(start, end))
-        .where(Order.status.notin_(["cancelled", "refunded"]), Order.is_draft.is_(False))
+        .where(Order.status.notin_(["cancelled", "refunded"]), or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
         .group_by(Company.pricing_tier_id)
     )
     aov_rows = (await db.execute(aov_q)).mappings().all()
@@ -588,7 +588,7 @@ async def customer_report(
         )
         .join(Order, Order.company_id == Company.id)
         .where(Order.created_at.between(start, end))
-        .where(Order.status.notin_(["cancelled", "refunded"]), Order.is_draft.is_(False))
+        .where(Order.status.notin_(["cancelled", "refunded"]), or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
         .group_by(Company.id, Company.name)
         .order_by(func.sum(Order.total).desc())
         .limit(10)
@@ -651,7 +651,7 @@ async def variant_sales_report(
         )
         .join(Order, Order.id == OrderItem.order_id)
         .where(Order.created_at.between(start, end))
-        .where(Order.status.notin_(["cancelled", "refunded"]), Order.is_draft.is_(False))
+        .where(Order.status.notin_(["cancelled", "refunded"]), or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
         .group_by(OrderItem.product_name, OrderItem.color, OrderItem.size)
         .order_by(OrderItem.product_name, OrderItem.color, OrderItem.size)
     )).all()
@@ -708,7 +708,7 @@ async def customer_purchase_history(
         select(OrderItem, Order.created_at, Order.order_number)
         .join(Order, Order.id == OrderItem.order_id)
         .where(Order.company_id == company_uuid)
-        .where(Order.status.notin_(["cancelled", "refunded"]), Order.is_draft.is_(False))
+        .where(Order.status.notin_(["cancelled", "refunded"]), or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
     )
     if year:
         q = q.where(extract("year", Order.created_at) == year)
@@ -780,7 +780,7 @@ async def export_report_csv(
                 func.sum(Order.total).label("rev"),
             )
             .where(Order.created_at.between(start, end))
-            .where(Order.status.notin_(["cancelled", "refunded"]), Order.is_draft.is_(False))
+            .where(Order.status.notin_(["cancelled", "refunded"]), or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
             .group_by(func.date_trunc("day", Order.created_at))
             .order_by(func.date_trunc("day", Order.created_at))
         )
@@ -818,7 +818,7 @@ async def export_report_csv(
             )
             .join(Order, Order.company_id == Company.id)
             .where(Order.created_at.between(start, end))
-            .where(Order.status.notin_(["cancelled", "refunded"]), Order.is_draft.is_(False))
+            .where(Order.status.notin_(["cancelled", "refunded"]), or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
             .group_by(Company.id, Company.name)
             .order_by(func.sum(Order.total).desc())
         )
@@ -1233,7 +1233,7 @@ async def variant_sales_comparison(
             )
             .join(Order, Order.id == OrderItem.order_id)
             .where(Order.created_at.between(start, end))
-            .where(Order.status.notin_(["cancelled", "refunded"]), Order.is_draft.is_(False))
+            .where(Order.status.notin_(["cancelled", "refunded"]), or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
             .group_by(OrderItem.product_name, OrderItem.color, OrderItem.size)
         )
         if q and q.strip():
@@ -1417,16 +1417,22 @@ async def stock_movement_report(
     async def _sold_qty(since=None, after=None, until=None, exclude_cancelled=True) -> dict:
         """Units that left the shelf on orders, over a window.
 
-        Drafts never touch stock, so they never count. A cancelled order does
-        count as having left — it was deducted at checkout — and the restock
-        that followed shows up in the adjustment log, so the two cancel out
-        exactly where they should.
+        A draft that is still a quote never touched stock, so it never counts.
+        One that was moved into fulfilment did — that is where an admin-built
+        order's stock is taken off the shelf — and by then it is a sale like any
+        other. inventory_deducted is what tells the two apart; is_draft cannot,
+        because nothing ever sets it back to false, so an admin-built order stays
+        flagged a draft long after it has shipped and been delivered.
+
+        A cancelled order does count as having left — it was deducted at
+        checkout — and the restock that followed shows up in the adjustment log,
+        so the two cancel out exactly where they should.
         """
         stmt = (
             select(OrderItem.variant_id, func.coalesce(func.sum(OrderItem.quantity), 0))
             .join(Order, Order.id == OrderItem.order_id)
             .where(OrderItem.variant_id.in_(ids))
-            .where(Order.is_draft.is_(False))
+            .where(or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)))
             .group_by(OrderItem.variant_id)
         )
         if exclude_cancelled:
@@ -1620,7 +1626,7 @@ async def profit_loss_report(
 
     sold_ok = and_(
         Order.status.notin_(["cancelled", "refunded"]),
-        Order.is_draft.is_(False),
+        or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)),
     )
 
     # ── Order-level money: what was billed, split into its parts ──────────────
@@ -1917,7 +1923,7 @@ async def commission_total_for_period(db: AsyncSession, start: datetime, end: da
         .where(
             Order.company_id.in_(company_ids),
             Order.status.notin_(["cancelled", "refunded"]),
-            Order.is_draft.is_(False),
+            or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)),
             Order.created_at.between(start, end),
         )
     )).all()
@@ -2060,7 +2066,7 @@ async def commission_report(
             # counted, and each one says whether the money has landed, so a total
             # can still be split into earned and not-yet-collected.
             Order.status.notin_(["cancelled", "refunded"]),
-            Order.is_draft.is_(False),
+            or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)),
             Order.created_at.between(start, end),
         )
         .order_by(Company.name.asc(), Order.created_at.asc())
