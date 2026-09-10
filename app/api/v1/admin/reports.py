@@ -6,6 +6,8 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from zoneinfo import ZoneInfo
+
 from sqlalchemy import and_, case, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -18,6 +20,29 @@ from app.models.order import Order, OrderItem
 from app.models.product import Category, Product, ProductCategory, ProductVariant
 
 router = APIRouter(prefix="/admin", tags=["Admin — Reports"])
+
+#: The shop keeps Central time — it sells from Texas, and its day ends when the
+#: warehouse closes, not when UTC rolls over.
+#:
+#: created_at is stored with a timezone, but every date filter here was built
+#: from naive datetimes, which the database reads as UTC. So "9 September" meant
+#: 9 September in UTC: Texas from 7pm on the 8th to 7pm on the 9th. Every order
+#: taken after about 6pm fell into the next day's figures, which is why the
+#: calendar looked like it was not working.
+SHOP_TZ = ZoneInfo("America/Chicago")
+
+
+def _shop_today() -> date:
+    """Today where the shop is, not where the server is."""
+    return datetime.now(SHOP_TZ).date()
+
+
+def _day_start(d: date) -> datetime:
+    return datetime.combine(d, datetime.min.time(), tzinfo=SHOP_TZ)
+
+
+def _day_end(d: date) -> datetime:
+    return datetime.combine(d, datetime.max.time(), tzinfo=SHOP_TZ)
 
 
 def _date_range(
@@ -32,31 +57,16 @@ def _date_range(
     of only the fixed "last N days" windows.
     """
     if date_from or date_to:
-        today_ = date.today()
+        today_ = _shop_today()
         f = date_from or date(2000, 1, 1)
         t = date_to or today_
         if f > t:
             f, t = t, f
-        return (
-            datetime.combine(f, datetime.min.time()),
-            datetime.combine(t, datetime.max.time()),
-        )
+        return _day_start(f), _day_end(t)
 
-    today = date.today()
-    if period == "today":
-        start = datetime.combine(today, datetime.min.time())
-    elif period == "week":
-        start = datetime.combine(today - timedelta(days=7), datetime.min.time())
-    elif period == "month":
-        start = datetime.combine(today - timedelta(days=30), datetime.min.time())
-    elif period == "quarter":
-        start = datetime.combine(today - timedelta(days=90), datetime.min.time())
-    elif period == "year":
-        start = datetime.combine(today - timedelta(days=365), datetime.min.time())
-    else:
-        start = datetime.combine(today - timedelta(days=30), datetime.min.time())
-    end = datetime.combine(today, datetime.max.time())
-    return start, end
+    today = _shop_today()
+    days = {"today": 0, "week": 7, "month": 30, "quarter": 90, "year": 365}.get(period, 30)
+    return _day_start(today - timedelta(days=days)), _day_end(today)
 
 
 # ── T185: Sales Report ────────────────────────────────────────────────────────
@@ -1184,8 +1194,8 @@ def _month_bounds(ym: str) -> tuple[datetime, datetime, str]:
         raise HTTPException(status_code=422, detail="Month must look like 2026-09")
     nxt = date(year + (month == 12), (month % 12) + 1, 1)
     return (
-        datetime.combine(first, datetime.min.time()),
-        datetime.combine(nxt - timedelta(days=1), datetime.max.time()),
+        _day_start(first),
+        _day_end(nxt - timedelta(days=1)),
         first.strftime("%B %Y"),
     )
 
@@ -1215,7 +1225,7 @@ async def variant_sales_comparison(
     """
     from collections import defaultdict
 
-    today = date.today()
+    today = _shop_today()
     month = month or today.strftime("%Y-%m")
     compare_to = compare_to or _previous_month(month)
 
@@ -1364,15 +1374,15 @@ async def stock_movement_report(
         _f, _t = (date_from or date_to), (date_to or date_from)
         if _f > _t:
             _f, _t = _t, _f
-        start = datetime.combine(_f, datetime.min.time())
-        end = datetime.combine(_t, datetime.max.time())
+        start = _day_start(_f)
+        end = _day_end(_t)
         label = (
             _f.strftime("%d %b %Y") if _f == _t
             else f"{_f.strftime('%d %b %Y')} – {_t.strftime('%d %b %Y')}"
         )
         month = None
     else:
-        month = month or date.today().strftime("%Y-%m")
+        month = month or _shop_today().strftime("%Y-%m")
         start, end, label = _month_bounds(month)
 
     def _variant_filter(stmt, name_col, color_col, size_col):
@@ -1563,7 +1573,7 @@ async def stock_movement_report(
     # Busiest first — what moved is what a buyer wants to look at.
     rows.sort(key=lambda x: (-(x["sold"] + x["received"]), x["product_name"], x["color"], x["size"]))
 
-    today = date.today()
+    today = _shop_today()
     months: list[dict] = []
     cursor = date(today.year, today.month, 1)
     while cursor >= STORE_LAUNCH:
@@ -1620,7 +1630,7 @@ async def profit_loss_report(
         label = f"{start.date().isoformat()} to {end.date().isoformat()}"
         month_value = None
     else:
-        month = month or date.today().strftime("%Y-%m")
+        month = month or _shop_today().strftime("%Y-%m")
         start, end, label = _month_bounds(month)
         month_value = month
 
@@ -1695,7 +1705,7 @@ async def profit_loss_report(
     revenue = billed - tax - refunds
     gross_profit = revenue - cogs_total
 
-    today = date.today()
+    today = _shop_today()
     months: list[dict] = []
     cursor = date(today.year, today.month, 1)
     while cursor >= STORE_LAUNCH:
