@@ -560,6 +560,13 @@ async def _do_confirm_checkout(
         _ach_acct = "".join(c for c in (payload.ach_account_number or "") if c.isdigit())
         if len(_ach_acct) < 4:
             raise ValidationError("Please enter your full bank account number.")
+        # Both declined debits carried an account of nothing but zeros, beside a
+        # routing number of nine of them. Neither is an account anyone can be
+        # paid from.
+        if len(set(_ach_acct)) == 1:
+            raise ValidationError(
+                "That account number doesn't look right — please check it."
+            )
         if not _QBPaySvc.routing_number_is_valid(payload.ach_routing_number):
             raise ValidationError(
                 "That routing number doesn't look right — please check the nine digits."

@@ -265,6 +265,24 @@ class QBPaymentsService:
         digits = "".join(c for c in (routing or "") if c.isdigit())
         if len(digits) != 9:
             return False
+
+        # Nine of the same digit is nobody's bank. All zeros in particular
+        # satisfies the checksum below — nought times any weight is nought, and
+        # nought divides by ten — so it sailed through and was sent on to
+        # QuickBooks, which declined it a day later. Two orders were placed
+        # against routing number 000000000 before this was noticed, one of them
+        # for $5,481.80.
+        if len(set(digits)) == 1:
+            return False
+
+        # The first two digits say which Federal Reserve district issued it.
+        # Only these ranges are ever issued; the rest are not numbers a bank can
+        # have. This catches the typed-in nonsense that happens to check out.
+        prefix = int(digits[:2])
+        if not (0 <= prefix <= 12 or 21 <= prefix <= 32
+                or 61 <= prefix <= 72 or prefix == 80):
+            return False
+
         weights = (3, 7, 1, 3, 7, 1, 3, 7, 1)
         return sum(int(d) * w for d, w in zip(digits, weights)) % 10 == 0
 
