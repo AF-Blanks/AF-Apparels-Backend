@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.admin.reports import _day_end, _day_start, _shop_today
 from app.core.database import get_db
 from app.models.company import Company
 from app.models.order import Order, OrderItem
@@ -19,8 +20,12 @@ ACTIVE_STATUSES = ("pending", "confirmed", "processing", "ready_for_pickup", "sh
 
 
 def _date_range(period: str, start_date: Optional[str], end_date: Optional[str]):
+    # Days are the shop's days. This counted them in UTC — "today" ran from
+    # midnight UTC, which is seven in the evening in Texas — so an order taken
+    # during the afternoon landed in tomorrow's figures and the dashboard showed
+    # a day's trading as nothing at all.
     """Return (current_start, current_end, prev_start, prev_end) as date objects."""
-    today = date.today()
+    today = _shop_today()
     if period == "today":
         cur_start = cur_end = today
     elif period == "7d":
@@ -57,10 +62,10 @@ async def get_analytics(
 ):
     cur_start, cur_end, prev_start, prev_end = _date_range(period, start_date, end_date)
 
-    cur_start_dt = datetime(cur_start.year, cur_start.month, cur_start.day, tzinfo=timezone.utc)
-    cur_end_dt = datetime(cur_end.year, cur_end.month, cur_end.day, 23, 59, 59, tzinfo=timezone.utc)
-    prev_start_dt = datetime(prev_start.year, prev_start.month, prev_start.day, tzinfo=timezone.utc)
-    prev_end_dt = datetime(prev_end.year, prev_end.month, prev_end.day, 23, 59, 59, tzinfo=timezone.utc)
+    cur_start_dt = _day_start(cur_start)
+    cur_end_dt = _day_end(cur_end)
+    prev_start_dt = _day_start(prev_start)
+    prev_end_dt = _day_end(prev_end)
 
     # ── Current period overview ───────────────────────────────────────────────
     cur_q = await db.execute(
