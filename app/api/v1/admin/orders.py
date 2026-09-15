@@ -3594,7 +3594,11 @@ async def _reminder_context(order_id: UUID, db: AsyncSession) -> dict:
         co = (await db.execute(select(Company).where(Company.id == order.company_id))).scalar_one_or_none()
         if co:
             company_name = co.name
-            to_email = to_email or co.email
+            # The column is company_email. `co.email` does not exist, so an
+            # order whose buyer has no address of their own — a company account
+            # where the placer was removed, say — raised AttributeError here
+            # instead of falling back to the company's address.
+            to_email = to_email or co.company_email
 
     if not to_email:
         raise HTTPException(status_code=422, detail="No customer email found for this order")
@@ -3622,6 +3626,111 @@ async def _reminder_context(order_id: UUID, db: AsyncSession) -> dict:
         "amount_due": due,
         "account_due": round(account_due, 2),
     }
+
+
+async def _account_reminder_context(company_id: UUID, db: AsyncSession) -> dict:
+    """Everything a reminder about a whole account needs.
+
+    A customer with seven unpaid invoices was chased seven times, each email
+    about one of them, and the person receiving them had to add up their own
+    total. This gathers the lot: who to write to, every order still carrying a
+    balance, and what they come to.
+    """
+    co = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if not co:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    rows = (await db.execute(
+        select(Order)
+        .where(
+            Order.company_id == company_id,
+            Order.payment_status.notin_(["paid", "refunded"]),
+            Order.status.notin_(["cancelled"]),
+        )
+        .order_by(Order.created_at.asc())
+    )).scalars().all()
+
+    orders = []
+    total = 0.0
+    for o in rows:
+        due = round(float(o.total or 0) - float(o.amount_paid or 0), 2)
+        if due <= 0.005:
+            continue
+        total += due
+        orders.append({
+            "order_number": o.order_number,
+            "date": o.created_at.strftime("%d %b %Y") if o.created_at else "",
+            "due": due,
+            "qb_invoice_id": o.qb_invoice_id,
+        })
+
+    if not orders:
+        raise HTTPException(
+            status_code=422,
+            detail="This customer has nothing outstanding — there is nothing to remind about.",
+        )
+
+    # Who to write to. The company's own address first, because this is about
+    # the account rather than any one order; failing that, whoever last placed
+    # one, since they are the person who has been receiving the invoices.
+    to_email = (co.company_email or "").strip() or None
+    customer_name = None
+    if not to_email:
+        last = rows[-1] if rows else None
+        if last is not None and last.placed_by_id:
+            u = (await db.execute(
+                select(User).where(User.id == last.placed_by_id)
+            )).scalar_one_or_none()
+            if u:
+                to_email = u.email
+                customer_name = f"{u.first_name or ''} {u.last_name or ''}".strip() or None
+    if not to_email:
+        raise HTTPException(status_code=422, detail="No email address on file for this customer")
+
+    return {
+        "company": co,
+        "company_id": str(company_id),
+        "to_email": to_email,
+        "customer_name": customer_name,
+        "company_name": co.name,
+        "orders": orders,
+        "total_due": round(total, 2),
+    }
+
+
+def _account_reminder_draft(ctx: dict) -> tuple[str, str]:
+    """The wording for a whole-account reminder, listing what it is made of.
+
+    The total on its own invites the reply "which ones?", so the invoices are
+    named. Same tone as the single-order reminder: most of the time this is a
+    customer who has simply not got to it.
+    """
+    who = ctx["company_name"] or ctx["customer_name"] or "there"
+    n = len(ctx["orders"])
+    lines = [
+        f"Hi {who},",
+        "",
+        f"A friendly reminder that ${ctx['total_due']:,.2f} is outstanding on "
+        f"your account, across {n} invoice{'s' if n != 1 else ''}:",
+        "",
+    ]
+    lines += [
+        f"  • {o['order_number']} — {o['date']} — ${o['due']:,.2f}"
+        for o in ctx["orders"]
+    ]
+    lines += [
+        "",
+        "Could you arrange payment when you get a moment? If any of these have "
+        "already been sent, or if anything needs looking at, just reply to this "
+        "email and we will sort it out.",
+        "",
+        "Thank you,",
+        "AF Apparels",
+    ]
+    return (
+        f"Payment reminder — ${ctx['total_due']:,.2f} outstanding",
+        chr(10).join(lines),
+    )
 
 
 def _reminder_draft(ctx: dict) -> tuple[str, str]:
@@ -3658,6 +3767,125 @@ def _reminder_draft(ctx: dict) -> tuple[str, str]:
     ]
     subject = f"Payment reminder — order {order.order_number} (${ctx['amount_due']:.2f} outstanding)"
     return subject, "\n".join(lines)
+
+
+@router.get("/customers/{company_id}/payment-reminder", response_model=dict)
+async def preview_account_reminder(company_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """One reminder covering everything this customer owes, before it is sent."""
+    ctx = await _account_reminder_context(company_id, db)
+    subject, message = _account_reminder_draft(ctx)
+    return {
+        "to_email": ctx["to_email"],
+        "customer_name": ctx["customer_name"],
+        "company_name": ctx["company_name"],
+        "order_count": len(ctx["orders"]),
+        "orders": ctx["orders"],
+        "amount_due": ctx["total_due"],
+        "account_due": ctx["total_due"],
+        "subject": subject,
+        "message": message,
+    }
+
+
+@router.post("/customers/{company_id}/payment-reminder", response_model=dict)
+async def send_account_reminder(
+    company_id: UUID,
+    payload: dict,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Send it, in whatever words the admin settled on.
+
+    Recorded on every order it covers, not just one, so whoever opens any of
+    them next can see the customer has already been chased and when.
+    """
+    from html import escape as _html_escape
+    from sqlalchemy import text as _text
+    from app.services.email_service import EmailService
+
+    ctx = await _account_reminder_context(company_id, db)
+    _subject, _message = _account_reminder_draft(ctx)
+    subject = (payload.get("subject") or "").strip() or _subject
+    message = (payload.get("message") or "").strip() or _message
+    to_email = (payload.get("to_email") or "").strip() or ctx["to_email"]
+
+    _paras = "".join(
+        f'<p style="margin:0 0 12px;font-size:14px;color:#374151;line-height:1.6">'
+        f'{_html_escape(p).replace(chr(10), "<br>")}</p>'
+        for p in message.split(chr(10) * 2) if p.strip()
+    )
+
+    # The invoices themselves, so the total is not a number they have to take on
+    # trust. Each row is one they can look up.
+    _rows = "".join(
+        f'<tr>'
+        f'<td style="font-size:13px;color:#374151;padding:6px 0">{_html_escape(o["order_number"])}</td>'
+        f'<td style="font-size:12px;color:#6b7280;padding:6px 0">{_html_escape(o["date"])}</td>'
+        f'<td style="font-size:13px;font-weight:700;color:#B45309;text-align:right;padding:6px 0">'
+        f'${o["due"]:,.2f}</td>'
+        f'</tr>'
+        for o in ctx["orders"]
+    )
+
+    body_html = EmailService(db)._base_template(
+        f'<h2 style="color:#1B3A5C;font-size:20px;font-weight:800;margin:0 0 16px">'
+        f'Payment Reminder</h2>'
+        + _paras
+        + f'<div style="background:#F9F8F4;border-radius:8px;padding:16px 20px;margin:20px 0">'
+        f'<table style="width:100%;border-collapse:collapse">{_rows}'
+        f'<tr><td colspan="2" style="font-size:13px;font-weight:700;color:#1B3A5C;'
+        f'padding:10px 0 0;border-top:1px solid #E2E2DE">Total outstanding</td>'
+        f'<td style="font-size:18px;font-weight:800;color:#B45309;text-align:right;'
+        f'padding:10px 0 0;border-top:1px solid #E2E2DE">${ctx["total_due"]:,.2f}</td></tr>'
+        f'</table></div>'
+    )
+
+    ok = EmailService(db).send_raw(to_email=to_email, subject=subject, body_html=body_html)
+    if not ok:
+        raise HTTPException(status_code=502, detail="The reminder could not be sent — try again.")
+
+    _admin = "Admin"
+    _uid = getattr(request.state, "user_id", None) if request else None
+    if _uid:
+        _u = (await db.execute(select(User).where(User.id == _uid))).scalar_one_or_none()
+        if _u:
+            _admin = f"{_u.first_name or ''} {_u.last_name or ''}".strip() or "Admin"
+
+    _numbers = [o["order_number"] for o in ctx["orders"]]
+    for _num in _numbers:
+        try:
+            _o = (await db.execute(
+                select(Order).where(Order.order_number == _num)
+            )).scalar_one_or_none()
+            if _o is None:
+                continue
+            _tl = list(_o.timeline or [])
+            _tl.append({
+                "status": _o.status,
+                "message": (
+                    f"Account reminder sent to {to_email} — "
+                    f"${ctx['total_due']:,.2f} across {len(_numbers)} invoices"
+                ),
+                "created_by": _admin,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            await db.execute(
+                _text("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
+                {"tl": _json.dumps(_tl), "oid": str(_o.id)},
+            )
+        except Exception as exc:  # noqa: BLE001 — the email has gone either way
+            logger.warning("Could not record account reminder on %s: %s", _num, exc)
+    try:
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        await db.rollback()
+
+    return {
+        "message": f"Reminder sent to {to_email}",
+        "to_email": to_email,
+        "amount_due": ctx["total_due"],
+        "order_count": len(_numbers),
+    }
 
 
 @router.get("/orders/{order_id}/payment-reminder", response_model=dict)
