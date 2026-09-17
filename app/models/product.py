@@ -127,6 +127,12 @@ class ProductVariant(BaseModel):
     retail_price: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     compare_price: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
     msrp: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)  # kept for guest pricing logic; hidden from admin UI
+    #: A marked-down (or marked-up) selling price, set by an admin from the
+    #: Markdown screen. Kept apart from retail_price so the original survives —
+    #: clearing this restores it, and nothing has to be typed back from memory.
+    #: It stands in for the list price everywhere; a customer with a price of
+    #: their own still pays theirs.
+    markdown_price: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
     cost_per_item: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
     country_of_origin: Mapped[str | None] = mapped_column(String(100), nullable=True)
     weight_grams: Mapped[float | None] = mapped_column(Float, nullable=True)

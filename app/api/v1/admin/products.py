@@ -36,6 +36,124 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/products", tags=["admin", "products"])
 
 
+class MarkdownSet(BaseModel):
+    """One variant's marked price. None clears it and the list price returns."""
+    variant_id: str
+    price: Decimal | None = None
+
+
+class MarkdownBulk(BaseModel):
+    """Several at once — a whole colour, a whole size, or a whole product."""
+    items: list[MarkdownSet]
+
+
+@router.get("/markdown")
+async def list_markdown(
+    q: str | None = Query(None, description="Match a product name, code or SKU"),
+    only_marked: bool = Query(False, description="Only variants already marked"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Every product with its variants and what each one is priced at.
+
+    Grouped by product so a colour or a size can be changed together, which is
+    how markdowns are actually decided — rarely one shirt at a time.
+    """
+    stmt = (
+        select(Product)
+        .options(selectinload(Product.variants))
+        .where(Product.status != "archived")
+        .order_by(Product.name)
+    )
+    if q:
+        like = f"%{q.strip()}%"
+        stmt = stmt.where(or_(Product.name.ilike(like), Product.slug.ilike(like)))
+
+    products = (await db.execute(stmt)).scalars().unique().all()
+
+    out = []
+    for p in products:
+        variants = []
+        for v in sorted(p.variants, key=lambda x: (x.color or "", x.sort_order or 0, x.size or "")):
+            if v.status != "active":
+                continue
+            md = float(v.markdown_price) if v.markdown_price is not None else None
+            if only_marked and md is None:
+                continue
+            variants.append({
+                "variant_id": str(v.id),
+                "sku": v.sku,
+                "color": v.color,
+                "size": v.size,
+                "retail_price": float(v.retail_price or 0),
+                "markdown_price": md,
+            })
+        if not variants:
+            continue
+        _marked = [x for x in variants if x["markdown_price"] is not None]
+        out.append({
+            "product_id": str(p.id),
+            "product_name": p.name,
+            "slug": p.slug,
+            "variant_count": len(variants),
+            "marked_count": len(_marked),
+            "variants": variants,
+        })
+    return out
+
+
+@router.post("/markdown")
+async def set_markdown(
+    payload: MarkdownBulk,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark variants up or down, or clear the mark and let the list price back.
+
+    Written straight onto the variant rather than through a discount group, so
+    it applies to everyone priced off the list — and to nobody who has been
+    given a price of their own, which stays theirs.
+    """
+    if not payload.items:
+        return {"updated": 0, "cleared": 0}
+
+    ids = [i.variant_id for i in payload.items]
+    rows = (await db.execute(
+        select(ProductVariant).where(ProductVariant.id.in_(ids))
+    )).scalars().all()
+    by_id = {str(v.id): v for v in rows}
+
+    updated = cleared = 0
+    for item in payload.items:
+        v = by_id.get(str(item.variant_id))
+        if v is None:
+            continue
+        if item.price is None:
+            if v.markdown_price is not None:
+                cleared += 1
+            v.markdown_price = None
+            continue
+        price = Decimal(str(item.price)).quantize(Decimal("0.01"))
+        if price <= 0:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{v.sku}: a price has to be more than zero. To remove a markdown, clear it.",
+            )
+        v.markdown_price = price
+        updated += 1
+
+    await db.commit()
+    # The storefront serves prices from cache; a markdown nobody can see is no
+    # markdown at all.
+    await redis_delete_pattern("products:list:*")
+    await redis_delete_pattern("products:detail:*")
+
+    logger.info(
+        "Markdown: %d set, %d cleared by %s",
+        updated, cleared, getattr(getattr(request, "state", None), "user_id", None),
+    )
+    return {"updated": updated, "cleared": cleared}
+
+
 @router.get("", response_model=list[ProductDetail])
 async def list_admin_products(
     q: str | None = None,

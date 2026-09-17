@@ -330,13 +330,29 @@ class ProductService:
             ov = override_map.get(str(product.id))
             for variant in product.variants:
                 vlp = vlp_map.get(str(variant.id))
+
+                # A markdown stands in for the list price — for guests and for
+                # customers priced off it. It does not reach past a price
+                # somebody has been given of their own: a customer on an agreed
+                # rate pays that rate, sale or no sale.
+                _md = getattr(variant, "markdown_price", None)
+                _list = (
+                    Decimal(str(_md)) if _md is not None
+                    else Decimal(str(variant.retail_price))
+                )
+
                 if is_guest:
-                    # Guests see MSRP; fall back to retail_price if msrp not set
+                    # Guests see MSRP; a markdown undercuts it, because that is
+                    # what marking something down means.
                     msrp = getattr(variant, "msrp", None)
                     variant.effective_price = (
-                        Decimal(str(msrp)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                        if msrp is not None
-                        else Decimal(str(variant.retail_price))
+                        _list.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        if _md is not None
+                        else (
+                            Decimal(str(msrp)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            if msrp is not None
+                            else Decimal(str(variant.retail_price))
+                        )
                     )
                 elif vlp is not None and vlp.price is not None:
                     # Per-variant price override has highest priority
@@ -353,13 +369,13 @@ class ProductService:
                     multiplier = Decimal("1") - (
                         Decimal(str(ov.discount_percent)) / Decimal("100")
                     )
-                    variant.effective_price = (variant.retail_price * multiplier).quantize(
+                    variant.effective_price = (_list * multiplier).quantize(
                         Decimal("0.01"), rounding=ROUND_HALF_UP
                     )
                 else:
                     # Fall back to flat tier discount
                     variant.effective_price = pricing_svc.calculate_effective_price(
-                        variant.retail_price, discount_percent
+                        _list, discount_percent
                     )
                 # Use real inventory. No inventory record for a variant now means
                 # 0 (out of stock), NOT unlimited — otherwise a variant that was

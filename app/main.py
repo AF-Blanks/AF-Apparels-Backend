@@ -378,6 +378,9 @@ async def _ensure_content_tables() -> None:
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='qb_realm_id') THEN
                         ALTER TABLE orders ADD COLUMN qb_realm_id VARCHAR(64);
                     END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='product_variants' AND column_name='markdown_price') THEN
+                        ALTER TABLE product_variants ADD COLUMN markdown_price NUMERIC(10,2);
+                    END IF;
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='stripe_charge_id') THEN
                         ALTER TABLE orders ADD COLUMN stripe_charge_id VARCHAR(255);
                     END IF;
