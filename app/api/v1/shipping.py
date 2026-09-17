@@ -1,6 +1,7 @@
 """Public shipping endpoints — live Shippo rates and shipping type lookup."""
 import asyncio
 import logging
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
@@ -53,22 +54,56 @@ async def get_live_rates(payload: LiveRatesRequest, db: AsyncSession = Depends(g
     if not to_zip or not to_state:
         return {"rates": [], "error": "ZIP code and state are required"}
 
-    # Calculate weight from cart items when provided
+    # ── How many cartons actually ship ────────────────────────────────────
+    #
+    # The quote used to describe one 20x16x12 carton holding the entire order.
+    # A 1,872-shirt order leaves here as twenty-six of them, each billed
+    # separately by the carrier — and 743 lbs in a single parcel is five times
+    # a carrier's own limit, so the figure that came back was not the price of
+    # anything. A customer was quoted $45 for twenty-six boxes to California.
+    #
+    # The packing is worked out by the same calculate_boxes the shipping labels
+    # use, so what is quoted and what is bought can no longer disagree.
+    from app.utils.box_calculator import calculate_boxes as _calc_boxes
+
+    boxes = None
+    total_grams = 0.0
     if payload.cart_items:
-        total_grams = 0.0
+        _ids = [i.variant_id for i in payload.cart_items]
+        from sqlalchemy.orm import selectinload as _sel
+        _rows = (await db.execute(
+            select(ProductVariant)
+            .options(_sel(ProductVariant.product))
+            .where(ProductVariant.id.in_(_ids))
+        )).scalars().all()
+        _by_id = {str(v.id): v for v in _rows}
+
+        _items, _weights = [], {}
         for item in payload.cart_items:
-            variant = (await db.execute(
-                select(ProductVariant).where(ProductVariant.id == item.variant_id)
-            )).scalar_one_or_none()
-            weight_g = float(variant.weight_grams) if (variant and variant.weight_grams) else DEFAULT_WEIGHT_GRAMS
-            total_grams += weight_g * item.quantity
+            v = _by_id.get(str(item.variant_id))
+            _name = (v.product.name if v is not None and v.product is not None else "") if v is not None else ""
+            _items.append(SimpleNamespace(
+                product_name=_name,
+                size=(v.size if v is not None else None),
+                quantity=item.quantity,
+                variant_id=str(item.variant_id),
+            ))
+            if v is not None and v.weight_grams:
+                _weights[str(item.variant_id)] = float(v.weight_grams)
+            total_grams += (
+                float(v.weight_grams) if (v is not None and v.weight_grams) else DEFAULT_WEIGHT_GRAMS
+            ) * item.quantity
+
+        boxes = _calc_boxes(_items, _weights or None)
         weight_oz = max(total_grams / GRAMS_PER_OZ, 1.0)
     else:
-        total_grams = 0.0
         weight_oz = payload.weight_oz
 
     logger.info(f"Live rates: zip={to_zip}, state={to_state}, items={len(payload.cart_items)}")
-    logger.info(f"Live rates weight: grams={total_grams:.1f}, oz={weight_oz:.2f}")
+    logger.info(
+        "Live rates weight: grams=%.1f, oz=%.2f, boxes=%s",
+        total_grams, weight_oz, len(boxes) if boxes else 1,
+    )
 
     try:
         client = shippo_service.get_client()
@@ -99,7 +134,19 @@ async def get_live_rates(payload: LiveRatesRequest, db: AsyncSession = Depends(g
                 # understated every rate at checkout — the customer paid the small
                 # figure and the carrier billed the real one, and the difference
                 # came out of the business rather than the sale.
-                parcels=[components.ParcelCreateRequest(
+                # One parcel per carton. The carrier prices every one of them,
+                # which is what the business is actually billed for.
+                parcels=[
+                    components.ParcelCreateRequest(
+                        length=_BOX_L,
+                        width=_BOX_W,
+                        height=_BOX_H,
+                        distance_unit=DistanceUnitEnum.IN,
+                        weight=str(max(round(b.weight_lbs, 2), 0.1)),
+                        mass_unit=WeightUnitEnum.LB,
+                    )
+                    for b in boxes
+                ] if boxes else [components.ParcelCreateRequest(
                     length=_BOX_L,
                     width=_BOX_W,
                     height=_BOX_H,

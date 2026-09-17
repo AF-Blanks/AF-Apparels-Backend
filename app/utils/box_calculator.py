@@ -5,6 +5,7 @@ from dataclasses import dataclass
 FALLBACK_WEIGHT_G = 180.0  # 1 standard T-shirt unit in grams
 GRAMS_PER_LB = 453.592
 UNITS_PER_BOX = 72         # max T-shirt-equivalent units per box
+MAX_BOX_LBS = 150.0        # a carrier will not take a parcel heavier than this
 BOX_LENGTH = "20"
 BOX_WIDTH = "16"
 BOX_HEIGHT = "12"          # inches (standard apparel box)
@@ -66,9 +67,19 @@ def calculate_boxes(items, variant_weight_g: dict | None = None, override_count:
             total_weight_g += FALLBACK_WEIGHT_G * qty * mult
 
     num_boxes = max(1, math.ceil(total_units / UNITS_PER_BOX))
-    if override_count and override_count >= 1:
-        num_boxes = int(override_count)  # admin manually set how many boxes were used
     total_lbs = total_weight_g / GRAMS_PER_LB
+
+    # No carton may exceed what a carrier will carry. Packing by unit count
+    # alone, a box of heavy goods could come out over the limit — which a
+    # quote cannot be given for and a label cannot be bought for. Splitting
+    # here keeps both honest. An admin's own count still wins: they are
+    # describing how the order was actually packed.
+    if not (override_count and override_count >= 1):
+        while total_lbs / num_boxes > MAX_BOX_LBS:
+            num_boxes += 1
+    else:
+        num_boxes = int(override_count)
+
     per_box_lbs = total_lbs / num_boxes
 
     return [
