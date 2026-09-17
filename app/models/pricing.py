@@ -32,19 +32,20 @@ class PricingTier(BaseModel):
     volume_breaks: Mapped[list | None] = mapped_column(JSONB, default=list, server_default="'[]'::jsonb")
 
 
-class VariantCommissionPrice(BaseModel):
-    """The price a Tier 4 or Tier 5 sale earns commission on.
+class ProductSizeCommissionPrice(BaseModel):
+    """The price a Tier 4 or Tier 5 sale earns commission on, per size.
 
     Not a selling price. The customer pays whatever the pricing rules say they
-    pay; this is only the figure commission is worked out from, set per variant
-    from its own screen because the rate sheet it comes from is per size.
+    pay; this is only the figure commission is worked out from.
 
-    Kept apart from every other price for exactly that reason: changing what a
-    rep earns must not quietly change what a customer is charged, and changing
-    what a customer is charged must not quietly change what a rep earns.
+    Held per product and size rather than per variant because that is how the
+    rate sheet is written — one figure for S through XL, another for 2XL — and
+    because a colour added next month is then already priced, instead of
+    quietly falling off the sheet.
     """
 
-    __tablename__ = "variant_commission_prices"
+    __tablename__ = "product_size_commission_prices"
 
-    variant_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
+    product_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    size: Mapped[str] = mapped_column(String(50), nullable=False)
     price: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)

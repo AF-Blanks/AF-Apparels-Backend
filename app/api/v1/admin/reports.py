@@ -1841,8 +1841,13 @@ async def _commission_csv(db: AsyncSession, date_from, date_to, period: str):
     )
 
 
-async def _commission_prices(db: AsyncSession) -> dict[str, float]:
-    """The rate sheet: what each variant earns commission on, by variant id.
+def _size_key(size) -> str:
+    """One spelling for a size, so "2xl", "2XL" and " 2XL " are the same key."""
+    return (size or "").strip().upper()
+
+
+async def _commission_prices(db: AsyncSession) -> dict[tuple[str, str], float]:
+    """The rate sheet: what each size of each product earns commission on.
 
     Set from Special Tier 4 & 5 Commissions, and read in preference to anything
     else — a rate sheet exists precisely because commission is not meant to
@@ -1850,12 +1855,19 @@ async def _commission_prices(db: AsyncSession) -> dict[str, float]:
     customer's own agreed price, and failing that to what the line was billed,
     which is what happened before there was a sheet.
     """
-    from app.models.pricing import VariantCommissionPrice
+    from app.models.pricing import ProductSizeCommissionPrice
 
     rows = (await db.execute(
-        select(VariantCommissionPrice.variant_id, VariantCommissionPrice.price)
+        select(
+            ProductSizeCommissionPrice.product_id,
+            ProductSizeCommissionPrice.size,
+            ProductSizeCommissionPrice.price,
+        )
     )).all()
-    return {str(vid): float(p) for vid, p in rows if p is not None}
+    return {
+        (str(pid), _size_key(sz)): float(p)
+        for pid, sz, p in rows if p is not None
+    }
 
 
 async def _current_variant_prices(db: AsyncSession, company_ids: list) -> dict:
@@ -1943,6 +1955,7 @@ async def commission_total_for_period(db: AsyncSession, start: datetime, end: da
         select(
             Product.product_code, OrderItem.product_name, OrderItem.line_total,
             OrderItem.quantity, OrderItem.variant_id, Order.company_id,
+            Product.id.label("product_id"), OrderItem.size,
         )
         .select_from(OrderItem)
         .join(Order, Order.id == OrderItem.order_id)
@@ -1957,12 +1970,13 @@ async def commission_total_for_period(db: AsyncSession, start: datetime, end: da
     )).all()
 
     total = 0.0
-    for product_code, product_name, line_total, qty, variant_id, company_id in rows:
+    for (product_code, product_name, line_total, qty, variant_id, company_id,
+         product_id, item_size) in rows:
         code = _product_code_of(product_code, product_name)
         rate = COMMISSION_SPECIAL_PERCENT if code in COMMISSION_SPECIAL_CODES else COMMISSION_DEFAULT_PERCENT
         # The rate sheet first, then the customer's own agreed price, then what
         # the line was actually billed.
-        _sheet = comm_price.get(str(variant_id))
+        _sheet = comm_price.get((str(product_id), _size_key(item_size)))
         now = price_now.get((str(company_id), str(variant_id)))
         if _sheet is not None:
             base = float(_sheet) * int(qty or 0)
@@ -2087,6 +2101,7 @@ async def commission_report(
             OrderItem.line_total,
             OrderItem.size,
             OrderItem.variant_id,
+            Product.id.label("product_id"),
             Order.payment_status,
             Order.total.label("order_total"),
         )
@@ -2139,7 +2154,7 @@ async def commission_report(
         # What this line earns commission on. The rate sheet wins where the
         # variant is on it; otherwise today's price for this customer; otherwise
         # what the line was actually billed.
-        _sheet = _comm_price.get(str(r["variant_id"]))
+        _sheet = _comm_price.get((str(r["product_id"]), _size_key(r["size"])))
         _now = _price_now.get((str(r["company_id"]), str(r["variant_id"])))
         if _sheet is not None:
             base = float(_sheet) * int(r["quantity"] or 0)

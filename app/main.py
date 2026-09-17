@@ -238,17 +238,18 @@ async def _ensure_content_tables() -> None:
             # Tier 5 sale earns commission on. Nothing to do with what the
             # customer is charged.
             await conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS variant_commission_prices (
+                CREATE TABLE IF NOT EXISTS product_size_commission_prices (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    variant_id VARCHAR(36) NOT NULL UNIQUE,
+                    product_id VARCHAR(36) NOT NULL,
+                    size VARCHAR(50) NOT NULL,
                     price NUMERIC(10,2) NOT NULL,
                     created_at TIMESTAMPTZ DEFAULT now(),
                     updated_at TIMESTAMPTZ DEFAULT now()
                 )
             """))
             await conn.execute(text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ix_variant_commission_prices_variant "
-                "ON variant_commission_prices (variant_id)"
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_psc_product_size "
+                "ON product_size_commission_prices (product_id, size)"
             ))
             await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS webhook_log (

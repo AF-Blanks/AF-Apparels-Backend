@@ -287,67 +287,81 @@ async def save_variant_pricing(body: VariantPricingIn, db: AsyncSession = Depend
     return {"ok": True}
 
 
-# ── Commission rate sheet (Tier 4 & Tier 5) ───────────────────────────────────
+# ── Commission rate sheet (Tier 4 & Tier 5) ─────────────────────────────
 
 
 class CommissionPricesIn(BaseModel):
-    """variantId → price as typed. Empty or missing clears that variant."""
+    """productId → size → price as typed. An empty price clears that size."""
     prices: dict
 
 
 @router.get("/commission-prices")
 async def get_commission_prices(db: AsyncSession = Depends(get_db)):
-    """What each variant earns commission on. Absent means "not on the sheet"."""
-    from app.models.pricing import VariantCommissionPrice
+    """What each size of each product earns commission on."""
+    from app.models.pricing import ProductSizeCommissionPrice
 
-    rows = (await db.execute(select(VariantCommissionPrice))).scalars().all()
-    return {str(r.variant_id): str(r.price) for r in rows if r.price is not None}
+    rows = (await db.execute(select(ProductSizeCommissionPrice))).scalars().all()
+    out: dict = {}
+    for row in rows:
+        if row.price is None:
+            continue
+        out.setdefault(str(row.product_id), {})[str(row.size)] = str(row.price)
+    return out
 
 
 @router.post("/commission-prices")
 async def save_commission_prices(body: CommissionPricesIn, db: AsyncSession = Depends(get_db)):
-    """Set or clear the commission figure for variants.
+    """Set or clear commission figures, by product and size.
 
-    This is not a selling price and never becomes one: it is read only when
-    working out what a Tier 4 or Tier 5 sale earned. Clearing a variant drops it
-    off the sheet, and its commission goes back to being worked out from what
-    the customer was charged.
+    Never a selling price: read only when working out what a Tier 4 or Tier 5
+    sale earned. Clearing a size takes it off the sheet, and its commission goes
+    back to being worked out from what the customer was charged.
     """
-    from app.models.pricing import VariantCommissionPrice
+    from app.models.pricing import ProductSizeCommissionPrice
 
     saved = cleared = 0
-    for variant_id, raw in (body.prices or {}).items():
-        typed = str(raw or "").strip()
-        existing = (await db.execute(
-            select(VariantCommissionPrice).where(
-                VariantCommissionPrice.variant_id == str(variant_id)
-            )
-        )).scalar_one_or_none()
+    for product_id, sizes in (body.prices or {}).items():
+        for size, raw in (sizes or {}).items():
+            typed = str(raw or "").strip()
+            key = str(size or "").strip().upper()
+            if not key:
+                continue
 
-        if typed == "":
+            existing = (await db.execute(
+                select(ProductSizeCommissionPrice).where(
+                    and_(
+                        ProductSizeCommissionPrice.product_id == str(product_id),
+                        ProductSizeCommissionPrice.size == key,
+                    )
+                )
+            )).scalar_one_or_none()
+
+            if typed == "":
+                if existing is not None:
+                    await db.delete(existing)
+                    cleared += 1
+                continue
+
+            try:
+                value = float(typed)
+            except ValueError:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{typed!r} is not a price. Use figures only, or leave it empty to clear.",
+                )
+            if value <= 0:
+                raise HTTPException(
+                    status_code=422,
+                    detail="A commission price has to be above zero. Leave it empty to clear it.",
+                )
+
             if existing is not None:
-                await db.delete(existing)
-                cleared += 1
-            continue
-
-        try:
-            value = float(typed)
-        except ValueError:
-            raise HTTPException(
-                status_code=422,
-                detail=f"{typed!r} is not a price. Use figures only, or leave it empty to clear.",
-            )
-        if value <= 0:
-            raise HTTPException(
-                status_code=422,
-                detail="A commission price has to be above zero. Leave it empty to clear it.",
-            )
-
-        if existing is not None:
-            existing.price = value
-        else:
-            db.add(VariantCommissionPrice(variant_id=str(variant_id), price=value))
-        saved += 1
+                existing.price = value
+            else:
+                db.add(ProductSizeCommissionPrice(
+                    product_id=str(product_id), size=key, price=value,
+                ))
+            saved += 1
 
     await db.commit()
     logger.info("Commission rate sheet: %d set, %d cleared", saved, cleared)
