@@ -1841,6 +1841,23 @@ async def _commission_csv(db: AsyncSession, date_from, date_to, period: str):
     )
 
 
+async def _commission_prices(db: AsyncSession) -> dict[str, float]:
+    """The rate sheet: what each variant earns commission on, by variant id.
+
+    Set from Special Tier 4 & 5 Commissions, and read in preference to anything
+    else — a rate sheet exists precisely because commission is not meant to
+    follow the selling price. A variant absent from it falls back to the
+    customer's own agreed price, and failing that to what the line was billed,
+    which is what happened before there was a sheet.
+    """
+    from app.models.pricing import VariantCommissionPrice
+
+    rows = (await db.execute(
+        select(VariantCommissionPrice.variant_id, VariantCommissionPrice.price)
+    )).all()
+    return {str(vid): float(p) for vid, p in rows if p is not None}
+
+
 async def _current_variant_prices(db: AsyncSession, company_ids: list) -> dict:
     """What each of these customers pays per variant right now.
 
@@ -1920,6 +1937,7 @@ async def commission_total_for_period(db: AsyncSession, start: datetime, end: da
         return 0.0
 
     price_now = await _current_variant_prices(db, company_ids)
+    comm_price = await _commission_prices(db)
 
     rows = (await db.execute(
         select(
@@ -1942,8 +1960,16 @@ async def commission_total_for_period(db: AsyncSession, start: datetime, end: da
     for product_code, product_name, line_total, qty, variant_id, company_id in rows:
         code = _product_code_of(product_code, product_name)
         rate = COMMISSION_SPECIAL_PERCENT if code in COMMISSION_SPECIAL_CODES else COMMISSION_DEFAULT_PERCENT
+        # The rate sheet first, then the customer's own agreed price, then what
+        # the line was actually billed.
+        _sheet = comm_price.get(str(variant_id))
         now = price_now.get((str(company_id), str(variant_id)))
-        base = float(now) * int(qty or 0) if now is not None else float(line_total or 0)
+        if _sheet is not None:
+            base = float(_sheet) * int(qty or 0)
+        elif now is not None:
+            base = float(now) * int(qty or 0)
+        else:
+            base = float(line_total or 0)
         total += base * rate / 100
     return round(total, 2)
 
@@ -2045,6 +2071,7 @@ async def commission_report(
     # it would earn today. One place holds the prices; every order, old or new,
     # is measured against it.
     _price_now = await _current_variant_prices(db, _company_ids)
+    _comm_price = await _commission_prices(db)
 
     rows = (await db.execute(
         select(
@@ -2109,13 +2136,17 @@ async def commission_report(
         code = _product_code_of(r["product_code"], r["product_name"])
         is_special = code in COMMISSION_SPECIAL_CODES
 
-        # Today's price for this customer and variant, times the quantity. Falls
-        # back to what the line was billed where no price has been set for it.
+        # What this line earns commission on. The rate sheet wins where the
+        # variant is on it; otherwise today's price for this customer; otherwise
+        # what the line was actually billed.
+        _sheet = _comm_price.get(str(r["variant_id"]))
         _now = _price_now.get((str(r["company_id"]), str(r["variant_id"])))
-        base = (
-            float(_now) * int(r["quantity"] or 0)
-            if _now is not None else float(r["line_total"] or 0)
-        )
+        if _sheet is not None:
+            base = float(_sheet) * int(r["quantity"] or 0)
+        elif _now is not None:
+            base = float(_now) * int(r["quantity"] or 0)
+        else:
+            base = float(r["line_total"] or 0)
         rate = COMMISSION_SPECIAL_PERCENT if is_special else COMMISSION_DEFAULT_PERCENT
         # Deliberately not rounded here. A size is one line, an order is a dozen
         # of them, and rounding each to the cent before adding them up drifted

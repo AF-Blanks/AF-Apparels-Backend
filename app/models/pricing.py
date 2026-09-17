@@ -30,3 +30,21 @@ class PricingTier(BaseModel):
     credit_limit: Mapped[float | None] = mapped_column(Float, default=0, server_default="0")
     priority_support: Mapped[bool | None] = mapped_column(Boolean, default=False, server_default="false")
     volume_breaks: Mapped[list | None] = mapped_column(JSONB, default=list, server_default="'[]'::jsonb")
+
+
+class VariantCommissionPrice(BaseModel):
+    """The price a Tier 4 or Tier 5 sale earns commission on.
+
+    Not a selling price. The customer pays whatever the pricing rules say they
+    pay; this is only the figure commission is worked out from, set per variant
+    from its own screen because the rate sheet it comes from is per size.
+
+    Kept apart from every other price for exactly that reason: changing what a
+    rep earns must not quietly change what a customer is charged, and changing
+    what a customer is charged must not quietly change what a rep earns.
+    """
+
+    __tablename__ = "variant_commission_prices"
+
+    variant_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
+    price: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
