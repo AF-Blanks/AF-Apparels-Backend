@@ -66,8 +66,17 @@ class OrderService:
         discount_percent: Decimal,
         group_id: str | None,
     ) -> Decimal:
-        """Return unit price: VariantLevelPricingOverride > product-level VariantPricingOverride > tier discount."""
+        """Return unit price: VariantLevelPricingOverride > product-level VariantPricingOverride > tier discount.
+
+        This is the price written onto the order line, so it is the one the
+        customer is actually charged. It works from the markdown when there is
+        one, exactly as the storefront and the cart do — otherwise the page shows
+        the marked price and the order records the old one.
+        """
         from decimal import ROUND_HALF_UP
+
+        _md = getattr(variant, "markdown_price", None)
+        list_price = Decimal(str(_md)) if _md is not None else Decimal(str(variant.retail_price))
         if group_id:
             from app.models.discount_group import VariantLevelPricingOverride, VariantPricingOverride
 
@@ -94,10 +103,10 @@ class OrderService:
                 return Decimal(str(ov.price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             if ov is not None and ov.discount_percent is not None:
                 multiplier = Decimal("1") - (Decimal(str(ov.discount_percent)) / Decimal("100"))
-                return (variant.retail_price * multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                return (list_price * multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         from app.services.pricing_service import PricingService
-        return PricingService(self.db).calculate_effective_price(variant.retail_price, discount_percent)
+        return PricingService(self.db).calculate_effective_price(list_price, discount_percent)
 
     # ------------------------------------------------------------------
     # Create order (US-6)
@@ -684,8 +693,10 @@ class OrderService:
                 skipped.append({"sku": order_item.sku, "reason": "discontinued"})
                 continue
 
+            _md = getattr(variant, "markdown_price", None)
             effective_price = pricing_svc.calculate_effective_price(
-                variant.retail_price, discount_percent
+                Decimal(str(_md)) if _md is not None else variant.retail_price,
+                discount_percent,
             )
 
             cart_item = CartItem(

@@ -298,8 +298,17 @@ class CartService:
         discount_percent: Decimal,
         group_id: str | None,
     ) -> Decimal:
-        """Return price: VariantLevelPricingOverride > product-level VariantPricingOverride > tier discount."""
+        """Return price: VariantLevelPricingOverride > product-level VariantPricingOverride > tier discount.
+
+        The list price every step below works from is the markdown when there is
+        one. The storefront applied markdowns and this did not, so a customer was
+        shown the marked price and charged the old one — the product page and the
+        cart must answer the same question the same way.
+        """
         from decimal import ROUND_HALF_UP
+
+        _md = getattr(variant, "markdown_price", None)
+        list_price = Decimal(str(_md)) if _md is not None else Decimal(str(variant.retail_price))
         if group_id:
             from app.models.discount_group import VariantLevelPricingOverride, VariantPricingOverride
 
@@ -326,10 +335,10 @@ class CartService:
                 return Decimal(str(ov.price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             if ov is not None and ov.discount_percent is not None:
                 multiplier = Decimal("1") - (Decimal(str(ov.discount_percent)) / Decimal("100"))
-                return (variant.retail_price * multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                return (list_price * multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         from app.services.pricing_service import PricingService
-        return PricingService(self.db).calculate_effective_price(variant.retail_price, discount_percent)
+        return PricingService(self.db).calculate_effective_price(list_price, discount_percent)
 
     async def _load_cart_items(
         self,

@@ -250,8 +250,13 @@ async def guest_checkout(
                 f"Only {available} units available for {variant.sku}"
             )
 
-        # Guest price = MSRP if set, else retail_price
-        unit_price = Decimal(str(variant.msrp or variant.retail_price or 0))
+        # Guest price = the markdown if there is one, else MSRP, else retail.
+        # The storefront already showed guests the marked price; charging them
+        # MSRP here meant the page and the bill disagreed.
+        _md = getattr(variant, "markdown_price", None)
+        unit_price = Decimal(str(
+            _md if _md is not None else (variant.msrp or variant.retail_price or 0)
+        ))
         line_total = unit_price * cart_item.quantity
         subtotal += line_total
 
