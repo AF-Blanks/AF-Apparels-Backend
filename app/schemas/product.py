@@ -229,6 +229,9 @@ class FilterParams(BaseModel):
     in_stock: bool | None = None
     product_code: str | None = None
     is_bestseller: bool | None = None
+    #: Only products with at least one size marked below its list price — the
+    #: storefront's Markdown menu. Marked up is not a sale, so it is left out.
+    on_markdown: bool | None = None
 
 
 # ---------------------------------------------------------------------------

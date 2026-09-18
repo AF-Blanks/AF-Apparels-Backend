@@ -165,6 +165,17 @@ class ProductService:
         if params.is_bestseller is True:
             query = query.where(Product.is_bestseller == True)  # noqa: E712
 
+        if params.on_markdown is True:
+            # At least one live size priced below where it normally sits. A
+            # markdown upwards is a price rise, and a customer browsing a sale
+            # should not find one there.
+            query = query.where(exists().where(
+                ProductVariant.product_id == Product.id,
+                ProductVariant.status == "active",
+                ProductVariant.markdown_price.isnot(None),
+                ProductVariant.markdown_price < ProductVariant.retail_price,
+            ))
+
         # Count before applying order/pagination
         count_query = select(func.count()).select_from(query.subquery())
         total_result = await self.db.execute(count_query)

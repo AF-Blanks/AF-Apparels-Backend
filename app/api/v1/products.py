@@ -40,6 +40,7 @@ async def list_products(
     in_stock: bool | None = None,
     product_code: str | None = None,
     is_bestseller: bool | None = None,
+    on_markdown: bool | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     discount_percent = getattr(request.state, "tier_discount_percent", Decimal("0"))
@@ -59,6 +60,7 @@ async def list_products(
         in_stock=in_stock,
         product_code=product_code,
         is_bestseller=is_bestseller,
+        on_markdown=on_markdown,
     )
     is_guest = getattr(request.state, "company_id", None) is None and not getattr(request.state, "is_admin", False)
     svc = ProductService(db)
