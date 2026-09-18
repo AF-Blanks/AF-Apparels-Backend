@@ -251,6 +251,16 @@ async def _ensure_content_tables() -> None:
                 "CREATE UNIQUE INDEX IF NOT EXISTS ix_psc_product_size "
                 "ON product_size_commission_prices (product_id, size)"
             ))
+            # A product's own commission percentage, where it has one.
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS product_commission_rates (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    product_id VARCHAR(36) NOT NULL UNIQUE,
+                    percent NUMERIC(5,2) NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+            """))
             await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS webhook_log (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

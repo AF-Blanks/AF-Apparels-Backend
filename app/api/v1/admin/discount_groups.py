@@ -368,6 +368,63 @@ async def save_commission_prices(body: CommissionPricesIn, db: AsyncSession = De
     return {"saved": saved, "cleared": cleared}
 
 
+class CommissionRatesIn(BaseModel):
+    """productId → percentage as typed. Empty clears it."""
+    rates: dict
+
+
+@router.get("/commission-rates")
+async def get_commission_rates(db: AsyncSession = Depends(get_db)):
+    """Each product's own commission percentage, where one is set."""
+    from app.models.pricing import ProductCommissionRate
+
+    rows = (await db.execute(select(ProductCommissionRate))).scalars().all()
+    return {str(r.product_id): str(r.percent) for r in rows if r.percent is not None}
+
+
+@router.post("/commission-rates")
+async def save_commission_rates(body: CommissionRatesIn, db: AsyncSession = Depends(get_db)):
+    """Set or clear a product's commission percentage.
+
+    Clearing it puts the product back on the standing rule — 10% for 1000 and
+    1001, 18% for everything else.
+    """
+    from app.models.pricing import ProductCommissionRate
+
+    saved = cleared = 0
+    for product_id, raw in (body.rates or {}).items():
+        typed = str(raw or "").strip().rstrip("%").strip()
+        existing = (await db.execute(
+            select(ProductCommissionRate).where(
+                ProductCommissionRate.product_id == str(product_id)
+            )
+        )).scalar_one_or_none()
+
+        if typed == "":
+            if existing is not None:
+                await db.delete(existing)
+                cleared += 1
+            continue
+        try:
+            value = float(typed)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"{typed!r} is not a percentage.")
+        if value < 0 or value > 100:
+            raise HTTPException(
+                status_code=422,
+                detail="A commission rate has to be between 0 and 100 percent.",
+            )
+        if existing is not None:
+            existing.percent = value
+        else:
+            db.add(ProductCommissionRate(product_id=str(product_id), percent=value))
+        saved += 1
+
+    await db.commit()
+    logger.info("Commission rates: %d set, %d cleared", saved, cleared)
+    return {"saved": saved, "cleared": cleared}
+
+
 # ── Variant-Level Pricing Overrides ───────────────────────────────────────────
 
 class VariantLevelPricingIn(BaseModel):

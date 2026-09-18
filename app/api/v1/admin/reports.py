@@ -1790,9 +1790,9 @@ async def _commission_csv(db: AsyncSession, date_from, date_to, period: str):
     writer.writerow([
         "Customer", "Tier", "Order #", "Date", "Paid", "Order total",
         f"{'/'.join(COMMISSION_SPECIAL_CODES)} sales",
-        f"{'/'.join(COMMISSION_SPECIAL_CODES)} commission ({COMMISSION_SPECIAL_PERCENT:g}%)",
+        f"{'/'.join(COMMISSION_SPECIAL_CODES)} commission",
         "Other sales",
-        f"Other commission ({COMMISSION_DEFAULT_PERCENT:g}%)",
+        f"Other commission",
         "Total commission",
     ])
     for c in data["customers"]:
@@ -1868,6 +1868,28 @@ async def _commission_prices(db: AsyncSession) -> dict[tuple[str, str], float]:
         (str(pid), _size_key(sz)): float(p)
         for pid, sz, p in rows if p is not None
     }
+
+
+async def _commission_rates(db: AsyncSession) -> dict[str, float]:
+    """Each product's own commission percentage, where one has been set.
+
+    Replaces the standing rule for that product only. A product with no rate of
+    its own earns what it always did: 10% on 1000 and 1001, 18% on the rest.
+    """
+    from app.models.pricing import ProductCommissionRate
+
+    rows = (await db.execute(
+        select(ProductCommissionRate.product_id, ProductCommissionRate.percent)
+    )).all()
+    return {str(pid): float(p) for pid, p in rows if p is not None}
+
+
+def _rate_for(product_id, code: str, rates: dict[str, float]) -> float:
+    """The percentage this product earns: its own if set, else the standing rule."""
+    own = rates.get(str(product_id)) if product_id is not None else None
+    if own is not None:
+        return own
+    return COMMISSION_SPECIAL_PERCENT if code in COMMISSION_SPECIAL_CODES else COMMISSION_DEFAULT_PERCENT
 
 
 async def _current_variant_prices(db: AsyncSession, company_ids: list) -> dict:
@@ -1950,6 +1972,7 @@ async def commission_total_for_period(db: AsyncSession, start: datetime, end: da
 
     price_now = await _current_variant_prices(db, company_ids)
     comm_price = await _commission_prices(db)
+    comm_rates = await _commission_rates(db)
 
     rows = (await db.execute(
         select(
@@ -1973,7 +1996,7 @@ async def commission_total_for_period(db: AsyncSession, start: datetime, end: da
     for (product_code, product_name, line_total, qty, variant_id, company_id,
          product_id, item_size) in rows:
         code = _product_code_of(product_code, product_name)
-        rate = COMMISSION_SPECIAL_PERCENT if code in COMMISSION_SPECIAL_CODES else COMMISSION_DEFAULT_PERCENT
+        rate = _rate_for(product_id, code, comm_rates)
         # The rate sheet first, then the customer's own agreed price, then what
         # the line was actually billed.
         _sheet = comm_price.get((str(product_id), _size_key(item_size)))
@@ -2086,6 +2109,7 @@ async def commission_report(
     # is measured against it.
     _price_now = await _current_variant_prices(db, _company_ids)
     _comm_price = await _commission_prices(db)
+    _comm_rates = await _commission_rates(db)
 
     rows = (await db.execute(
         select(
@@ -2162,7 +2186,7 @@ async def commission_report(
             base = float(_now) * int(r["quantity"] or 0)
         else:
             base = float(r["line_total"] or 0)
-        rate = COMMISSION_SPECIAL_PERCENT if is_special else COMMISSION_DEFAULT_PERCENT
+        rate = _rate_for(r["product_id"], code, _comm_rates)
         # Deliberately not rounded here. A size is one line, an order is a dozen
         # of them, and rounding each to the cent before adding them up drifted
         # the total off what anyone checking it would get: ten percent of
@@ -2231,6 +2255,7 @@ async def commission_report(
             "special_codes": list(COMMISSION_SPECIAL_CODES),
             "special_percent": COMMISSION_SPECIAL_PERCENT,
             "default_percent": COMMISSION_DEFAULT_PERCENT,
+            "custom_rates": len(_comm_rates),
         },
         "totals": {
             "customers": len(out),

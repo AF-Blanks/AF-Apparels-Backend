@@ -49,3 +49,18 @@ class ProductSizeCommissionPrice(BaseModel):
     product_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     size: Mapped[str] = mapped_column(String(50), nullable=False)
     price: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+
+
+class ProductCommissionRate(BaseModel):
+    """The percentage a Tier 4 or Tier 5 sale of this product earns.
+
+    Set per product beside its size prices. Where it is set it replaces the
+    standing rule (10% on 1000 and 1001, 18% on everything else) for that
+    product only; where it is not, the standing rule applies as before.
+    """
+
+    __tablename__ = "product_commission_rates"
+
+    product_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
+    percent: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+
