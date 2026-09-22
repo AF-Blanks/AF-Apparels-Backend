@@ -75,8 +75,13 @@ class OrderService:
         """
         from decimal import ROUND_HALF_UP
 
+        # A marked-down variant costs the markdown for everybody: no tier %,
+        # group price or individual variant price applies on top of it or
+        # instead of it.
         _md = getattr(variant, "markdown_price", None)
-        list_price = Decimal(str(_md)) if _md is not None else Decimal(str(variant.retail_price))
+        if _md is not None:
+            return Decimal(str(_md)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        list_price = Decimal(str(variant.retail_price))
         if group_id:
             from app.models.discount_group import VariantLevelPricingOverride, VariantPricingOverride
 
@@ -694,9 +699,9 @@ class OrderService:
                 continue
 
             _md = getattr(variant, "markdown_price", None)
-            effective_price = pricing_svc.calculate_effective_price(
-                Decimal(str(_md)) if _md is not None else variant.retail_price,
-                discount_percent,
+            effective_price = (
+                Decimal(str(_md)) if _md is not None
+                else pricing_svc.calculate_effective_price(variant.retail_price, discount_percent)
             )
 
             cart_item = CartItem(

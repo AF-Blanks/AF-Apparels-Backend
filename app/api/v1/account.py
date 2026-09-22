@@ -1952,7 +1952,11 @@ async def get_price_list_report(
         )
         variants = variants_result.scalars().all()
         for v in variants:
-            unit_price = pricing_svc.calculate_effective_price(v.retail_price, discount)
+            _md = getattr(v, "markdown_price", None)
+            unit_price = (
+                Decimal(str(_md)) if _md is not None
+                else pricing_svc.calculate_effective_price(v.retail_price, discount)
+            )
             items.append({
                 "product_id": str(product.id),
                 "product_name": product.name,

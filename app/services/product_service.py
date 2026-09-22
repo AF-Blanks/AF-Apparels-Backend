@@ -342,28 +342,24 @@ class ProductService:
             for variant in product.variants:
                 vlp = vlp_map.get(str(variant.id))
 
-                # A markdown stands in for the list price — for guests and for
-                # customers priced off it. It does not reach past a price
-                # somebody has been given of their own: a customer on an agreed
-                # rate pays that rate, sale or no sale.
+                # A markdown is the price, full stop — for guests and for every
+                # customer, whatever tier, group price or individual variant
+                # price they have. The owner's rule: marked down means everyone
+                # sees and pays the marked price.
                 _md = getattr(variant, "markdown_price", None)
-                _list = (
-                    Decimal(str(_md)) if _md is not None
-                    else Decimal(str(variant.retail_price))
-                )
+                _list = Decimal(str(variant.retail_price))
 
-                if is_guest:
-                    # Guests see MSRP; a markdown undercuts it, because that is
-                    # what marking something down means.
+                if _md is not None:
+                    variant.effective_price = Decimal(str(_md)).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                elif is_guest:
+                    # Guests see MSRP.
                     msrp = getattr(variant, "msrp", None)
                     variant.effective_price = (
-                        _list.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                        if _md is not None
-                        else (
-                            Decimal(str(msrp)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                            if msrp is not None
-                            else Decimal(str(variant.retail_price))
-                        )
+                        Decimal(str(msrp)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        if msrp is not None
+                        else Decimal(str(variant.retail_price))
                     )
                 elif vlp is not None and vlp.price is not None:
                     # Per-variant price override has highest priority

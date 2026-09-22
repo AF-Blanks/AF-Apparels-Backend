@@ -72,8 +72,12 @@ def generate_price_list_task(
                         )
                     )
                     for variant in variants_result.scalars().all():
-                        effective = pricing_svc.calculate_effective_price(
-                            variant.retail_price, tier.discount_percent
+                        _md = getattr(variant, "markdown_price", None)
+                        effective = (
+                            Decimal(str(_md)) if _md is not None
+                            else pricing_svc.calculate_effective_price(
+                                variant.retail_price, tier.discount_percent
+                            )
                         )
                         rows.append(
                             {
