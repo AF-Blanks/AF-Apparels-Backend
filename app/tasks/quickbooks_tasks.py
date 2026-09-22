@@ -51,6 +51,31 @@ def _failure_status(task) -> str:
     return "failed" if task.request.retries >= max_r else "retry"
 
 
+#: Days a customer has to pay, by the credit terms they chose at checkout.
+NET_TERMS_DAYS = {"net_30": 30, "net_7": 7}
+
+
+def _net_terms_dates(order) -> dict:
+    """Invoice and due date for a Net 30 / Net 7 order, as QuickBooks dates.
+
+    Nothing sent a due date, so QuickBooks used its default of "due on receipt"
+    and order 1114 (Net 30, placed 18 Sep) was overdue the day it was invoiced.
+    Both dates are the shop's calendar day in Dallas, so an evening order is
+    not dated tomorrow. Other payment methods keep QuickBooks' own terms.
+    """
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    days = NET_TERMS_DAYS.get((getattr(order, "payment_method", None) or "").lower())
+    if not days or not order.created_at:
+        return {}
+    placed = order.created_at.astimezone(ZoneInfo("America/Chicago")).date()
+    return {
+        "txn_date": placed.isoformat(),
+        "due_date": (placed + timedelta(days=days)).isoformat(),
+    }
+
+
 def _norm_name(s: str | None) -> str:
     """A name with case, spacing and punctuation dropped, for comparing."""
     return "".join(ch for ch in (s or "").upper() if ch.isalnum())
@@ -664,6 +689,7 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                     # The customer's own PO number — how they match our invoice to
                     # their paperwork, so it belongs on the invoice they receive.
                     "po_number": getattr(order, "po_number", None),
+                    **_net_terms_dates(order),
                 }
 
             # ── 2. Load live QB tokens ────────────────────────────────────────
@@ -766,6 +792,7 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                     shipping_addr=order_data.get("shipping_addr"),
                     discount_amount=order_data.get("discount_amount", 0),
                     po_number=order_data.get("po_number"),
+                    due_date=order_data.get("due_date"),
                 )
                 logger.info(
                     "sync_order_invoice_to_qb refresh — order=%s result=%s",
@@ -802,6 +829,8 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                     shipping_addr=order_data.get("shipping_addr"),
                     discount_amount=order_data.get("discount_amount", 0),
                     po_number=order_data.get("po_number"),
+                    txn_date=order_data.get("txn_date"),
+                    due_date=order_data.get("due_date"),
                 )
                 logger.info("sync_order_invoice_to_qb success — qb_invoice_id=%s order=%s", qb_invoice_id, order_data["order_number"])
 

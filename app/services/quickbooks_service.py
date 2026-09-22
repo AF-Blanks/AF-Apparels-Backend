@@ -565,6 +565,7 @@ class QuickBooksService:
         shipping_addr: dict | None = None,
         discount_amount: float = 0.0,
         po_number: str | None = None,
+        due_date: str | None = None,
     ) -> dict[str, Any]:
         """Rewrite an existing invoice's lines so QB matches the edited order.
 
@@ -632,6 +633,10 @@ class QuickBooksService:
         # and re-dating it would move the revenue into a different month's P&L.
         if inv.get("TxnDate"):
             payload["TxnDate"] = inv["TxnDate"]
+        # Same for the due date: a full update without it lets QuickBooks fall
+        # back to "due on receipt", and a Net 30 invoice turns overdue at once.
+        if due_date or inv.get("DueDate"):
+            payload["DueDate"] = due_date or inv["DueDate"]
 
         result = self._request("POST", "invoice?minorversion=65", json=payload)
         updated = result.get("Invoice", {})
@@ -656,6 +661,7 @@ class QuickBooksService:
         shipping_addr: dict | None = None,
         discount_amount: float = 0.0,
         po_number: str | None = None,
+        txn_date: str | None = None,
     ) -> str:
         """Create a QB Invoice. Returns QB invoice Id (idempotent by DocNumber).
 
@@ -675,6 +681,8 @@ class QuickBooksService:
             # payment. NotApplicable tells QB not to compute any tax of its own.
             "GlobalTaxCalculation": "NotApplicable",
         }
+        if txn_date:
+            payload["TxnDate"] = txn_date
         if due_date:
             payload["DueDate"] = due_date
         if shipping_addr:
