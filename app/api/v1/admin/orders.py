@@ -746,6 +746,7 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
             shipped_at=order.shipped_at,
             qb_invoice_id=order.qb_invoice_id,
             qb_payment_id=getattr(order, "qb_payment_id", None),
+            qb_hold_reason=getattr(order, "qb_hold_reason", None),
             qb_echeck_status=getattr(order, "qb_echeck_status", None),
             ach_authorized_at=getattr(order, "ach_authorized_at", None),
             ach_authorized_ip=getattr(order, "ach_authorized_ip", None),
@@ -2528,6 +2529,71 @@ async def recreate_qb_invoice(order_id: UUID, db: AsyncSession = Depends(get_db)
 
     sync_order_invoice_to_qb.delay(str(order_id))
     return {"message": "Recreating the invoice in QuickBooks — it will appear shortly and the customer will be emailed the new invoice.", "order_id": str(order_id)}
+
+
+async def _held_order_company(order_id: UUID, db: AsyncSession) -> tuple[Order, Company]:
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+    company = (await db.execute(
+        select(Company).where(Company.id == order.company_id)
+    )).scalar_one_or_none() if order.company_id else None
+    if company is None:
+        raise HTTPException(status_code=400, detail="This order has no company account to link.")
+    return order, company
+
+
+@router.post("/orders/{order_id}/qb-customer/confirm", response_model=dict)
+async def confirm_qb_customer(order_id: UUID, db: AsyncSession = Depends(get_db)):
+    """The QuickBooks customer is this company after all, under another name.
+
+    Remembers that one QuickBooks name for this company, so its invoices go
+    through from now on. If the customer is renamed again, it is held again.
+    """
+    order, company = await _held_order_company(order_id, db)
+    if not company.qb_customer_id:
+        raise HTTPException(status_code=400, detail="This customer is not linked to QuickBooks yet.")
+
+    from app.services.quickbooks_service import QuickBooksService
+
+    svc = await QuickBooksService().initialize()
+    data = await asyncio.to_thread(
+        svc._request, "GET", f"customer/{company.qb_customer_id}?minorversion=65"
+    )
+    cust = data.get("Customer") or {}
+    qb_name = cust.get("DisplayName") or cust.get("CompanyName")
+    if not qb_name or cust.get("Active") is False:
+        raise HTTPException(
+            status_code=400,
+            detail="That QuickBooks customer is missing or inactive. Use \"Link to the right customer\" instead.",
+        )
+    company.qb_customer_name_ok = qb_name
+    order.qb_hold_reason = None
+    await db.commit()
+
+    from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+    sync_order_invoice_to_qb.delay(str(order_id))
+    logger.info("QB customer confirmed: company=%s qb=%s (%s)", company.id, company.qb_customer_id, qb_name)
+    return {"message": f'Confirmed — invoices for {company.name} will go to "{qb_name}". Sending this one now.'}
+
+
+@router.post("/orders/{order_id}/qb-customer/relink", response_model=dict)
+async def relink_qb_customer(order_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Drop the wrong link and find this company in QuickBooks by its exact name.
+
+    Creates the customer there if no customer carries that name. Only the link
+    changes — no existing invoice, payment or customer in QuickBooks is touched.
+    """
+    order, company = await _held_order_company(order_id, db)
+    company.qb_customer_id = None
+    company.qb_customer_name_ok = None
+    order.qb_hold_reason = None
+    await db.commit()
+
+    from app.tasks.quickbooks_tasks import sync_order_invoice_to_qb
+    sync_order_invoice_to_qb.delay(str(order_id))
+    logger.info("QB customer relink requested: company=%s order=%s", company.id, order.order_number)
+    return {"message": f'Linking {company.name} to the QuickBooks customer with that exact name, then sending the invoice.'}
 
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,9 @@ class Company(BaseModel):
 
     # QuickBooks
     qb_customer_id: Mapped[str | None] = mapped_column(String(255))
+    #: The QuickBooks name an admin confirmed is this company although it does
+    #: not match ours. Anything else under that id holds the invoice back.
+    qb_customer_name_ok: Mapped[str | None] = mapped_column(String(255), nullable=True)
     #: This company as a customer in Stripe. Separate from qb_customer_id: two
     #: providers, two sets of ids, and neither means anything to the other.
     stripe_customer_id: Mapped[str | None] = mapped_column(String(255))

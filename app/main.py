@@ -775,6 +775,15 @@ async def _ensure_content_tables() -> None:
                     END IF;
                 END$$;
             """))
+            # Why an order's invoice was held back from QuickBooks: the customer
+            # its company is linked to there is not that company. And the one
+            # QuickBooks name an admin has confirmed is right despite differing.
+            await conn.execute(text(
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS qb_hold_reason TEXT"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE companies ADD COLUMN IF NOT EXISTS qb_customer_name_ok VARCHAR(255)"
+            ))
             await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS marketing_campaigns (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -51,6 +51,101 @@ def _failure_status(task) -> str:
     return "failed" if task.request.retries >= max_r else "retry"
 
 
+def _norm_name(s: str | None) -> str:
+    """A name with case, spacing and punctuation dropped, for comparing."""
+    return "".join(ch for ch in (s or "").upper() if ch.isalnum())
+
+
+async def _qb_customer_mismatch(
+    svc, qb_customer_id: str, our_name: str | None, approved: str | None,
+) -> str | None:
+    """Why QuickBooks customer `qb_customer_id` is not the company we think it is.
+
+    None when it is. A company is linked to QuickBooks by a bare number, and
+    that number is trusted from then on. Order 1118 (St Mary's Romanian Orthodox
+    Church) was invoiced to "AMG Maximana INC" because customer 373 had become
+    AMG Maximana inside QuickBooks, and nothing here ever looked. So look,
+    every time an invoice or credit is about to be addressed to someone.
+    """
+    import httpx
+
+    try:
+        data = await asyncio.to_thread(
+            svc._request, "GET", f"customer/{qb_customer_id}?minorversion=65"
+        )
+    except httpx.HTTPStatusError as e:
+        body = (e.response.text if e.response is not None else "").lower()
+        status = e.response.status_code if e.response is not None else 0
+        if status in (400, 404) and "object not found" in body:
+            return (
+                f"{our_name} is linked to QuickBooks customer #{qb_customer_id}, "
+                f"which no longer exists in QuickBooks."
+            )
+        raise  # QuickBooks unreachable, rate-limited, etc. — retry as usual
+
+    cust = data.get("Customer") or {}
+    shown = cust.get("DisplayName") or cust.get("CompanyName") or "(no name)"
+    if cust.get("Active") is False:
+        return (
+            f'{our_name} is linked to QuickBooks customer #{qb_customer_id} '
+            f'("{shown}"), which is inactive or merged in QuickBooks.'
+        )
+    ours = _norm_name(our_name)
+    names = (cust.get("DisplayName"), cust.get("CompanyName"), cust.get("FullyQualifiedName"))
+    if ours and any(_norm_name(n) == ours for n in names):
+        return None
+    if approved and _norm_name(approved) == _norm_name(shown):
+        return None
+    return (
+        f'QuickBooks customer #{qb_customer_id} is named "{shown}", '
+        f'not "{our_name}".'
+    )
+
+
+async def _hold_for_qb_customer(
+    entity_type: str, entity_id: str, label: str, company_name: str | None, reason: str,
+) -> None:
+    """Record why a document was held back, and tell the admins once."""
+    from app.core.database import AsyncSessionLocal
+    from sqlalchemy import text as _t
+
+    newly_held = True
+    if entity_type == "order":
+        async with AsyncSessionLocal() as s:
+            changed = (await s.execute(
+                _t(
+                    "UPDATE orders SET qb_hold_reason = :r WHERE id = CAST(:oid AS UUID) "
+                    "AND qb_hold_reason IS DISTINCT FROM :r RETURNING id"
+                ),
+                {"r": reason, "oid": entity_id},
+            )).first()
+            await s.commit()
+        newly_held = changed is not None
+
+    logger.error("QB customer check held %s %s: %s", entity_type, label, reason)
+    await _log_attempt(entity_type, entity_id, "failed", f"Held — wrong QuickBooks customer. {reason}")
+
+    if newly_held:
+        try:
+            from app.tasks.email_tasks import send_admin_customer_notice
+            send_admin_customer_notice.delay(
+                f"QuickBooks: {label} held — wrong customer",
+                [
+                    ["Held", label],
+                    ["Customer here", company_name or "—"],
+                    ["Problem", reason],
+                    ["Fix", (
+                        "Open the order in admin and choose how to fix the link."
+                        if entity_type == "order" else
+                        "Fix this customer's QuickBooks link from one of their held orders, "
+                        "or correct the name in QuickBooks, then sync the return again."
+                    ) + " Nothing was sent to QuickBooks."],
+                ],
+            )
+        except Exception as _mail_exc:  # the hold stands without the email
+            logger.warning("QB hold alert email not sent: %s", _mail_exc)
+
+
 def _run_async(coro):
     """Run a coroutine in a fresh event loop. Call only ONCE per task execution.
 
@@ -553,6 +648,9 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
 
                 order_data = {
                     "company_id": str(order.company_id) if order.company_id else None,
+                    "company_name": order.company.name if order.company else None,
+                    "qb_name_ok": getattr(order.company, "qb_customer_name_ok", None) if order.company else None,
+                    "had_hold": bool(getattr(order, "qb_hold_reason", None)),
                     "order_number": order.order_number,
                     "total": float(order.total),
                     "payment_status": order.payment_status,
@@ -625,12 +723,35 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                     sync_customer_to_qb.delay(order_data["company_id"])
                 raise RuntimeError("QB customer not yet synced — retrying after company sync")
 
+            # ── 3b. Is that customer actually this company? ──────────────────
+            # Checked whenever an invoice is about to be written — created or
+            # refreshed. Held back, not retried: waiting will not change who
+            # customer #N is, only an admin can.
+            _existing_invoice_id = order_data.get("qb_invoice_id")
+            if not is_guest_no_company and (not _existing_invoice_id or refresh_lines):
+                _why = await _qb_customer_mismatch(
+                    svc, qb_customer_id, order_data.get("company_name"), order_data.get("qb_name_ok"),
+                )
+                if _why:
+                    await _hold_for_qb_customer(
+                        "order", order_id, f"Order {order_data['order_number']}",
+                        order_data.get("company_name"), _why,
+                    )
+                    return {"status": "held", "reason": _why}
+                if order_data.get("had_hold"):
+                    from sqlalchemy import text as _sql_unhold
+                    async with AsyncSessionLocal() as _us:
+                        await _us.execute(
+                            _sql_unhold("UPDATE orders SET qb_hold_reason = NULL WHERE id = CAST(:oid AS UUID)"),
+                            {"oid": order_id},
+                        )
+                        await _us.commit()
+
             # ── 4. Create invoice (sync, run in thread) ───────────────────────
             # Fast path: if qb_invoice_id is already stored in our DB (from a prior task
             # run that succeeded at create but failed at payment), skip the invoice create
             # entirely — avoids 1 CorePlus DocNumber query on every retry.
             _invoice_freshly_created = False
-            _existing_invoice_id = order_data.get("qb_invoice_id")
 
             if _existing_invoice_id and refresh_lines:
                 # The order changed after it was invoiced. Re-send the lines so
@@ -979,23 +1100,47 @@ def sync_rma_credit_memo_to_qb(self, rma_id: str):
                 is_guest = order.company_id is None
                 guest_name = order.guest_name or f"Guest {order.order_number}"
                 guest_email = order.guest_email or f"guest+{str(order.id)[:8]}@afapparels.com"
+                company_name: str | None = None
+                company_name_ok: str | None = None
                 if not is_guest:
                     company = (await session.execute(
                         select(Company).where(Company.id == order.company_id)
                     )).scalar_one_or_none()
+                    if company is None:
+                        is_guest = True  # company gone — bill as the order was placed
+                    else:
+                        company_name = company.name
+                        company_name_ok = getattr(company, "qb_customer_name_ok", None)
                     raw_qb_id = company.qb_customer_id if company else None
                     if raw_qb_id and "-" not in raw_qb_id:
                         qb_customer_id = raw_qb_id
-                    else:
-                        log = (await session.execute(
+                    elif company is not None:
+                        # Same rule as the invoice: only a link written since we
+                        # adopted the QuickBooks company we are connected to now.
+                        from sqlalchemy import text as _cut_t
+                        _cutoff = (await session.execute(
+                            _cut_t("SELECT value FROM app_settings WHERE key = 'qb_ids_realm_since'")
+                        )).scalar_one_or_none()
+                        log_q = (
                             select(QBSyncLog)
                             .where(QBSyncLog.entity_type == "company")
                             .where(QBSyncLog.entity_id == order.company_id)
                             .where(QBSyncLog.status == "success")
-                            .order_by(QBSyncLog.created_at.desc())
-                            .limit(1)
+                        )
+                        if _cutoff:
+                            from datetime import datetime as _dt
+                            log_q = log_q.where(QBSyncLog.created_at >= _dt.fromisoformat(_cutoff))
+                        log = (await session.execute(
+                            log_q.order_by(QBSyncLog.created_at.desc()).limit(1)
                         )).scalar_one_or_none()
                         qb_customer_id = log.qb_entity_id if log else None
+                    if company is not None and not qb_customer_id:
+                        # Used to fall through to creating a "Guest <order>"
+                        # customer and crediting the return to it. Link the
+                        # company properly first, then come back.
+                        if self.request.retries == 0:
+                            sync_customer_to_qb.delay(str(company.id))
+                        raise RuntimeError("QB customer not yet synced — retrying after company sync")
 
                 # ── Build credit-memo line items from RMA items ────────────────
                 line_items: list[dict] = []
@@ -1041,10 +1186,17 @@ def sync_rma_credit_memo_to_qb(self, rma_id: str):
 
             # ── Resolve customer + create credit memo (outside DB session) ─────
             svc = await QuickBooksService().initialize()
-            if is_guest or not qb_customer_id:
+            if is_guest:
                 qb_customer_id = await asyncio.to_thread(
                     svc.create_customer, guest_name, guest_email
                 )
+            else:
+                _why = await _qb_customer_mismatch(svc, qb_customer_id, company_name, company_name_ok)
+                if _why:
+                    await _hold_for_qb_customer(
+                        "rma", rma_id, f"Return {doc_number}", company_name, _why,
+                    )
+                    return {"status": "held", "reason": _why}
 
             qb_memo_id = await asyncio.to_thread(
                 svc.create_credit_memo,

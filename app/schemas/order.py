@@ -237,6 +237,8 @@ class AdminOrderDetail(OrderOut):
     # An invoice in QuickBooks does not mean the money was recorded against it.
     # Empty on a paid order means the payment never reached the books.
     qb_payment_id: str | None = None
+    # Why the invoice was held back from QuickBooks, when it was.
+    qb_hold_reason: str | None = None
     # Where a bank debit has got to. Money moves over days here, so this is the
     # difference between "asked for" and "arrived".
     qb_echeck_status: str | None = None

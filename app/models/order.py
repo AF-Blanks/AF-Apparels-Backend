@@ -122,6 +122,9 @@ class Order(BaseModel):
     # Distinct from qb_payment_charge_id (the QB Payments card charge). Set once the
     # payment is recorded so a task retry never books a duplicate payment.
     qb_payment_id: Mapped[str | None] = mapped_column(String(255))
+    # Set when the invoice was held back because the QuickBooks customer this
+    # order's company is linked to is somebody else. Cleared once it goes over.
+    qb_hold_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Payment method + ACH details (added after initial deployment — saved via raw SQL)
     payment_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
