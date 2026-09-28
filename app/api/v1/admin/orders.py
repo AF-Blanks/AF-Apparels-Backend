@@ -2388,6 +2388,293 @@ async def mark_order_paid(
     return {"message": "Order marked as paid"}
 
 
+# ── Payments taken outside the website ────────────────────────────────
+
+#: How the money arrived. Fixed and short so the figures can be grouped later;
+#: "other" carries anything that does not fit, with the reference saying what.
+PAYMENT_METHODS = ("check", "cash", "bank_transfer", "card", "other")
+
+
+class RecordPaymentIn(BaseModel):
+    """A payment the customer has already made somewhere other than the website."""
+    amount: float
+    method: str = "check"
+    reference: str | None = None
+    paid_on: date | None = None
+
+
+async def _payment_rows(order_id: UUID, db: AsyncSession) -> list[dict]:
+    from sqlalchemy import text as _pt
+
+    rows = (await db.execute(
+        _pt("SELECT id, amount, method, reference, paid_on, recorded_by, qb_payment_id, created_at "
+            "FROM order_payments WHERE order_id = CAST(:oid AS UUID) "
+            "ORDER BY COALESCE(paid_on, created_at::date), created_at"),
+        {"oid": str(order_id)},
+    )).mappings().all()
+    return [{
+        "id": str(r["id"]),
+        "amount": round(float(r["amount"] or 0), 2),
+        "method": r["method"],
+        "reference": r["reference"],
+        "paid_on": r["paid_on"].isoformat() if r["paid_on"] else None,
+        "recorded_by": r["recorded_by"],
+        "qb_payment_id": r["qb_payment_id"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+    } for r in rows]
+
+
+@router.get("/orders/{order_id}/payments", response_model=dict)
+async def list_order_payments(order_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Every payment recorded by hand against this order, and what is left."""
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+    total = round(float(order.total or 0), 2)
+    paid = round(float(order.amount_paid or 0), 2)
+    return {
+        "order_number": order.order_number,
+        "total": total,
+        "paid": paid,
+        "due": round(max(0.0, total - paid), 2),
+        "payment_status": order.payment_status,
+        "payments": await _payment_rows(order_id, db),
+    }
+
+
+@router.post("/orders/{order_id}/payments", response_model=dict)
+async def record_order_payment(
+    order_id: UUID,
+    body: RecordPaymentIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Record money received outside the website — a cheque, cash, a transfer.
+
+    Part payments were invisible: a customer who paid half by cheque still stood
+    in Outstanding Balances owing the whole invoice, and the only way to move the
+    figure was to mark the order paid in full, which was not true. This adds what
+    was actually received, leaves the rest owing, and settles the order only when
+    the balance reaches zero.
+
+    The same amount is posted against the order's QuickBooks invoice, so the
+    customer's balance there matches what this app says they owe.
+    """
+    from sqlalchemy import text as _pt
+
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+    if order.status == "cancelled":
+        raise HTTPException(status_code=422, detail="This order is cancelled — nothing is owed on it.")
+    if order.payment_status == "refunded":
+        raise HTTPException(
+            status_code=422,
+            detail="This order was refunded — record the payment on the order it belongs to.",
+        )
+
+    method = (body.method or "check").strip().lower()
+    if method not in PAYMENT_METHODS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown payment method {body.method!r}. Use one of: {', '.join(PAYMENT_METHODS)}.",
+        )
+
+    amount = round(float(body.amount or 0), 2)
+    total = round(float(order.total or 0), 2)
+    already = round(float(order.amount_paid or 0), 2)
+    due = round(max(0.0, total - already), 2)
+
+    if amount <= 0:
+        raise HTTPException(status_code=422, detail="Enter an amount above zero.")
+    if order.payment_status == "paid" and due <= 0.005:
+        raise HTTPException(status_code=422, detail="This order is already fully paid.")
+    if amount > due + 0.005:
+        raise HTTPException(
+            status_code=422,
+            detail=f"That is more than the ${due:,.2f} still due on this order. "
+                   f"Enter ${due:,.2f} or less.",
+        )
+
+    admin_name = "Admin"
+    admin_user_id = getattr(request.state, "user_id", None) if request else None
+    if admin_user_id:
+        _admin = (await db.execute(select(User).where(User.id == admin_user_id))).scalar_one_or_none()
+        if _admin:
+            admin_name = f"{_admin.first_name} {_admin.last_name}".strip() or "Admin"
+
+    paid_on = body.paid_on or datetime.now(timezone.utc).date()
+    # The id is made here rather than left to the column's default: this table is
+    # created by the startup DDL in one place and by the models in another, and
+    # only one of the two carries a default.
+    import uuid as _uuid
+    payment_id = _uuid.uuid4()
+    await db.execute(
+        _pt("INSERT INTO order_payments (id, order_id, amount, method, reference, paid_on, recorded_by) "
+            "VALUES (CAST(:pid AS UUID), CAST(:oid AS UUID), :amt, :m, :ref, :on, :by)"),
+        {"pid": str(payment_id), "oid": str(order_id), "amt": amount, "m": method,
+         "ref": (body.reference or None), "on": paid_on, "by": admin_name},
+    )
+
+    new_paid = round(already + amount, 2)
+    settled = new_paid >= total - 0.005
+    _label = method.replace("_", " ")
+    timeline = list(order.timeline or [])
+    timeline.append({
+        "status": "paid" if settled else "partial_payment",
+        "message": (
+            f"Payment received — ${amount:,.2f} by {_label}"
+            + (f" (ref {body.reference})" if body.reference else "")
+            + (" — order settled in full." if settled
+               else f" — ${round(total - new_paid, 2):,.2f} still due.")
+        ),
+        "created_by": admin_name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    # payment_status stays "unpaid" until the balance is cleared: it is what the
+    # reports, reminders and the customer's own invoice list read to decide
+    # whether an order is settled, and a part payment does not settle it.
+    if settled:
+        await db.execute(
+            _pt("""
+                UPDATE orders
+                SET payment_status = 'paid',
+                    amount_paid    = :paid,
+                    marked_paid_at = COALESCE(marked_paid_at, now()),
+                    marked_paid_by = COALESCE(marked_paid_by, :by),
+                    timeline       = CAST(:tl AS jsonb)
+                WHERE id = CAST(:oid AS UUID)
+            """),
+            {"paid": new_paid, "by": admin_name, "tl": _json.dumps(timeline), "oid": str(order_id)},
+        )
+    else:
+        await db.execute(
+            _pt("UPDATE orders SET amount_paid = :paid, timeline = CAST(:tl AS jsonb) "
+                "WHERE id = CAST(:oid AS UUID)"),
+            {"paid": new_paid, "tl": _json.dumps(timeline), "oid": str(order_id)},
+        )
+    await db.commit()
+
+    from app.tasks.quickbooks_tasks import record_offline_payment_in_qb
+    try:
+        record_offline_payment_in_qb.delay(str(order_id), str(payment_id))
+    except Exception as _q:  # the money is recorded here either way
+        logger.error("record_order_payment: QB dispatch failed for order %s: %s", order_id, _q)
+
+    logger.info(
+        "record_order_payment: order=%s amount=%.2f method=%s paid=%.2f/%.2f by=%s",
+        order.order_number, amount, method, new_paid, total, admin_name,
+    )
+    return {
+        "message": (
+            f"${amount:,.2f} recorded — this order is now settled in full."
+            if settled else
+            f"${amount:,.2f} recorded — ${round(total - new_paid, 2):,.2f} still due."
+        ),
+        "paid": new_paid,
+        "due": round(max(0.0, total - new_paid), 2),
+        "settled": settled,
+        "payment_id": str(payment_id),
+    }
+
+
+@router.delete("/orders/{order_id}/payments/{payment_id}", response_model=dict)
+async def undo_order_payment(
+    order_id: UUID,
+    payment_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Take back a payment recorded in error, in QuickBooks as well as here.
+
+    A figure typed wrongly has to be removable, or the only repair is a second
+    wrong entry. The QuickBooks payment is voided rather than deleted, so the
+    books still show that something was entered and then reversed.
+    """
+    from sqlalchemy import text as _pt
+
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+
+    row = (await db.execute(
+        _pt("SELECT amount, method, qb_payment_id FROM order_payments "
+            "WHERE id = CAST(:pid AS UUID) AND order_id = CAST(:oid AS UUID)"),
+        {"pid": str(payment_id), "oid": str(order_id)},
+    )).mappings().first()
+    if not row:
+        raise NotFoundError("That payment is not on this order.")
+
+    admin_name = "Admin"
+    admin_user_id = getattr(request.state, "user_id", None) if request else None
+    if admin_user_id:
+        _admin = (await db.execute(select(User).where(User.id == admin_user_id))).scalar_one_or_none()
+        if _admin:
+            admin_name = f"{_admin.first_name} {_admin.last_name}".strip() or "Admin"
+
+    amount = round(float(row["amount"] or 0), 2)
+    qb_note = ""
+    if row["qb_payment_id"]:
+        from app.services.quickbooks_service import QuickBooksService
+        try:
+            svc = await QuickBooksService().initialize()
+            ok = await asyncio.to_thread(svc.void_payment, str(row["qb_payment_id"]))
+            qb_note = (
+                " The QuickBooks payment was voided."
+                if ok else
+                f" QuickBooks payment #{row['qb_payment_id']} could not be voided"
+                " — remove it there by hand."
+            )
+        except Exception as _e:  # noqa: BLE001
+            logger.error("undo_order_payment: QB void failed for %s: %s", row["qb_payment_id"], _e)
+            qb_note = (
+                f" QuickBooks payment #{row['qb_payment_id']} could not be voided"
+                " — remove it there by hand."
+            )
+
+    total = round(float(order.total or 0), 2)
+    new_paid = round(max(0.0, float(order.amount_paid or 0) - amount), 2)
+    timeline = list(order.timeline or [])
+    timeline.append({
+        "status": "payment_removed",
+        "message": f"Payment of ${amount:,.2f} removed — ${round(max(0.0, total - new_paid), 2):,.2f} due.",
+        "created_by": admin_name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    await db.execute(
+        _pt("DELETE FROM order_payments WHERE id = CAST(:pid AS UUID)"), {"pid": str(payment_id)}
+    )
+    # Reopening the order is the point of this: it went back to owing money, so
+    # it belongs in Outstanding Balances again.
+    still_owing = new_paid < total - 0.005
+    await db.execute(
+        _pt("""
+            UPDATE orders
+            SET amount_paid    = :paid,
+                payment_status = CASE WHEN :owing AND payment_status = 'paid'
+                                      THEN 'unpaid' ELSE payment_status END,
+                marked_paid_at = CASE WHEN :owing THEN NULL ELSE marked_paid_at END,
+                marked_paid_by = CASE WHEN :owing THEN NULL ELSE marked_paid_by END,
+                timeline       = CAST(:tl AS jsonb)
+            WHERE id = CAST(:oid AS UUID)
+        """),
+        {"paid": new_paid, "owing": still_owing, "tl": _json.dumps(timeline), "oid": str(order_id)},
+    )
+    await db.commit()
+
+    logger.info(
+        "undo_order_payment: order=%s removed %.2f — paid now %.2f/%.2f by=%s",
+        order.order_number, amount, new_paid, total, admin_name,
+    )
+    return {
+        "message": f"${amount:,.2f} removed.{qb_note}",
+        "paid": new_paid,
+        "due": round(max(0.0, total - new_paid), 2),
+    }
+
+
 @router.post("/orders/{order_id}/sync-quickbooks", response_model=dict)
 async def sync_order_to_quickbooks(order_id: UUID, db: AsyncSession = Depends(get_db)):
     # Dispatch through the deduped helper: pressing this while an automatic sync

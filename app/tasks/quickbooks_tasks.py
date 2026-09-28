@@ -654,6 +654,7 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                         )
 
                 # Parse shipping address for QB AST (Automated Sales Tax)
+                from sqlalchemy import text as _sql_offline
                 import json as _json
                 _addr_raw: dict = {}
                 try:
@@ -689,6 +690,13 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                     # The customer's own PO number — how they match our invoice to
                     # their paperwork, so it belongs on the invoice they receive.
                     "po_number": getattr(order, "po_number", None),
+                    # Part payments already posted to QuickBooks have reduced the
+                    # invoice there. Paying "the total" on top would overpay it,
+                    # so the payment below asks QuickBooks what is left instead.
+                    "has_offline_payments": bool((await session.execute(_sql_offline(
+                        "SELECT 1 FROM order_payments WHERE order_id = CAST(:oid AS UUID) "
+                        "AND qb_payment_id IS NOT NULL LIMIT 1"
+                    ), {"oid": order_id})).first()),
                     **_net_terms_dates(order),
                 }
 
@@ -891,7 +899,10 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                         order_data["total"],
                         _pmt_method or "card",
                         order_data.get("created_at_date"),
-                        qb_customer_id,  # skip GET /invoice — saves 1 Core API call
+                        # Normally skip the GET /invoice — saves 1 Core API call.
+                        # Where part payments have already gone over, ask for the
+                        # remaining balance instead, or the invoice is overpaid.
+                        None if order_data.get("has_offline_payments") else qb_customer_id,
                     )
                     _qb_payment_id = str(payment.get("Id") or "")
                     logger.info(
@@ -968,6 +979,110 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
             # admin dashboard surfaces dead syncs; earlier attempts stay "retry".
             await _log_attempt("order", order_id, _failure_status(self), str(exc))
             raise
+
+    try:
+        return _run_async(_run_all())
+    except Exception as exc:
+        delay = _retry_delay(exc, self.request.retries)
+        raise self.retry(exc=exc, countdown=delay)
+
+
+@celery_app.task(bind=True, max_retries=5)
+def record_offline_payment_in_qb(self, order_id: str, payment_id: str):
+    """Post a payment taken outside the website against the order's QB invoice.
+
+    A cheque for part of an invoice is money the books have to show, or the
+    customer's balance in QuickBooks stays at the full amount and the next
+    statement chases what they have already paid.
+    """
+    async def _run_all():
+        from app.core.database import AsyncSessionLocal
+        from app.models.order import Order
+        from app.services.quickbooks_service import QuickBooksService
+        from sqlalchemy import select, text as _t
+
+        async with AsyncSessionLocal() as _guard:
+            _ok, _connected, _ids_realm = await _realm_matches(_guard)
+        if not _ok:
+            logger.error(
+                "record_offline_payment_in_qb: refusing to run — connected to QuickBooks "
+                "company %s but our ids belong to %s.", _connected, _ids_realm,
+            )
+            return None
+
+        async with AsyncSessionLocal() as session:
+            row = (await session.execute(
+                _t("SELECT amount, method, paid_on, qb_payment_id FROM order_payments "
+                   "WHERE id = CAST(:pid AS UUID)"),
+                {"pid": payment_id},
+            )).first()
+            if not row:
+                logger.warning("record_offline_payment_in_qb: payment %s is gone", payment_id)
+                return None
+            if row.qb_payment_id:
+                return {"status": "success", "qb_payment_id": row.qb_payment_id}
+
+            order = (await session.execute(
+                select(Order).where(Order.id == uuid.UUID(order_id))
+            )).scalar_one_or_none()
+            if not order:
+                return None
+            if order.qb_realm_id and _connected and order.qb_realm_id != _connected:
+                logger.warning(
+                    "record_offline_payment_in_qb: order %s was invoiced in QuickBooks "
+                    "company %s and we are connected to %s — leaving it alone.",
+                    order.order_number, order.qb_realm_id, _connected,
+                )
+                return None
+            invoice_id = order.qb_invoice_id
+            order_number = order.order_number
+            fully_paid = float(order.amount_paid or 0) >= float(order.total or 0) - 0.005
+            order_qb_payment_id = getattr(order, "qb_payment_id", None)
+
+        if not invoice_id:
+            # No invoice to pay yet. Raise one, then come back for the payment.
+            if self.request.retries == 0:
+                sync_order_invoice_to_qb.delay(order_id)
+            raise RuntimeError("Invoice not in QuickBooks yet — retrying after it is raised")
+
+        svc = await QuickBooksService().initialize()
+        payment = await asyncio.to_thread(
+            svc.create_payment_for_invoice,
+            invoice_id,
+            float(row.amount),
+            (row.method or "check"),
+            row.paid_on.isoformat() if row.paid_on else None,
+            None,          # fetch the invoice: pay against its real balance
+            True,          # exact_amount — the cheque, not the whole balance
+        )
+        qb_payment_id = str(payment.get("Id") or "")
+        if not qb_payment_id:
+            logger.warning(
+                "record_offline_payment_in_qb: QuickBooks recorded nothing for order %s "
+                "— its invoice may already be settled there.", order_number,
+            )
+            return {"status": "skipped"}
+
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                _t("UPDATE order_payments SET qb_payment_id = :qid WHERE id = CAST(:pid AS UUID)"),
+                {"qid": qb_payment_id, "pid": payment_id},
+            )
+            # Once the order is settled, the order's own payment id matters: it is
+            # what stops the ordinary sync booking the whole total a second time.
+            if fully_paid and not order_qb_payment_id:
+                await session.execute(
+                    _t("UPDATE orders SET qb_payment_id = :qid WHERE id = CAST(:oid AS UUID)"),
+                    {"qid": qb_payment_id, "oid": order_id},
+                )
+            await session.commit()
+
+        logger.info(
+            "record_offline_payment_in_qb: order=%s amount=%.2f qb_payment=%s",
+            order_number, float(row.amount), qb_payment_id,
+        )
+        await _log_attempt("order", order_id, "success", None, qb_entity_id=invoice_id)
+        return {"status": "success", "qb_payment_id": qb_payment_id}
 
     try:
         return _run_async(_run_all())

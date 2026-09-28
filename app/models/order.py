@@ -1,9 +1,9 @@
 """Order, OrderItem, CartItem, AbandonedCart, OrderTemplate models."""
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -337,3 +337,28 @@ class OrderTemplate(BaseModel):
 
     company: Mapped["Company"] = relationship("Company")
     created_by: Mapped["User"] = relationship("User")
+
+
+class OrderPayment(BaseModel):
+    """One payment taken against an order outside the website.
+
+    A cheque for half the invoice, cash on collection, a bank transfer: the
+    order's own amount_paid is the running total, and these are the entries it
+    is made of, kept so a part payment can be explained, questioned or undone.
+    """
+
+    __tablename__ = "order_payments"
+
+    order_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    #: check, cash, bank_transfer, card, other — how the money arrived.
+    method: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    #: Cheque number, transfer reference, anything that finds it again.
+    reference: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    paid_on: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    recorded_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    #: The matching QuickBooks payment, once it has been posted there.
+    qb_payment_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+

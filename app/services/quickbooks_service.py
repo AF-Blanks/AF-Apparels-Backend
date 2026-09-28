@@ -1068,6 +1068,7 @@ class QuickBooksService:
         payment_method: str = "card",
         payment_date: str | None = None,
         qb_customer_id: str | None = None,
+        exact_amount: bool = False,
     ) -> dict:
         """Create a QB Payment record linked to an invoice (marks it as paid).
 
@@ -1106,7 +1107,13 @@ class QuickBooksService:
             if balance <= 0:
                 logger.info("QB create_payment_for_invoice — invoice %s already fully paid, skipping", invoice_id)
                 return {}
-            pay_amount = round(balance, 2)
+            # A part payment pays what was handed over, not what is outstanding.
+            # Capped at the balance all the same: QuickBooks rejects a payment
+            # larger than the invoice, and an over-payment is a typing mistake
+            # rather than an instruction.
+            pay_amount = round(min(amount, balance), 2) if exact_amount else round(balance, 2)
+            if pay_amount <= 0:
+                return {}
             logger.info(
                 "QB create_payment_for_invoice — invoice_id=%s balance=%.2f (order_total=%.2f)",
                 invoice_id, pay_amount, amount,
@@ -1193,6 +1200,27 @@ class QuickBooksService:
         logger.info("QB create_credit_memo payload: %s", payload)
         resp = self._request("POST", "creditmemo", json=payload)
         return str(resp["CreditMemo"]["Id"])
+
+    def void_payment(self, payment_id: str) -> bool:
+        """Void a QB payment — used when a recorded payment was entered in error.
+
+        Voiding rather than deleting leaves the entry in the books at zero, which
+        is what an accountant expects to find where money was once recorded.
+        """
+        try:
+            resp = self._request("GET", f"payment/{payment_id}?minorversion=65")
+            sync_token = (resp.get("Payment") or {}).get("SyncToken", "0")
+            self._request(
+                "POST",
+                "payment",
+                params={"operation": "void"},
+                json={"Id": str(payment_id), "SyncToken": str(sync_token), "sparse": True},
+            )
+            logger.info("QB payment %s voided", payment_id)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.error("QB void_payment %s failed: %s", payment_id, e)
+            return False
 
     def void_invoice(self, invoice_id: str) -> bool:
         """Void a QB invoice by ID."""

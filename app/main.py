@@ -781,6 +781,27 @@ async def _ensure_content_tables() -> None:
             await conn.execute(text(
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS qb_hold_reason TEXT"
             ))
+            # Money taken outside the website — a cheque, cash, a bank transfer —
+            # recorded one payment at a time, so a part-paid order says what was
+            # paid, when, and by whom rather than only a running total.
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS order_payments (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    order_id UUID NOT NULL,
+                    amount NUMERIC(10,2) NOT NULL,
+                    method VARCHAR(30),
+                    reference TEXT,
+                    paid_on DATE,
+                    recorded_by VARCHAR(255),
+                    qb_payment_id VARCHAR(255),
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+            """))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_order_payments_order "
+                "ON order_payments (order_id)"
+            ))
             await conn.execute(text(
                 "ALTER TABLE companies ADD COLUMN IF NOT EXISTS qb_customer_name_ok VARCHAR(255)"
             ))
