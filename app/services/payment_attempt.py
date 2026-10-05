@@ -47,6 +47,20 @@ class AttemptInFlight(Exception):
     """This exact attempt is already being charged somewhere else, right now."""
 
 
+class AttemptAlreadyCharged(Exception):
+    """Money was taken for this attempt, and no order came of it.
+
+    The charge reference is written the moment the money moves, so a retry that
+    arrives after the first request died finds it here. Charging again would
+    take the money twice for one basket; the customer is told instead, and the
+    reference says which charge to look at.
+    """
+
+    def __init__(self, payment_reference: str):
+        super().__init__(f"Attempt already charged ({payment_reference})")
+        self.payment_reference = payment_reference
+
+
 class AttemptAlreadyDone(Exception):
     """This attempt already produced an order. Here it is again.
 
@@ -60,29 +74,65 @@ class AttemptAlreadyDone(Exception):
         self.payment_reference = payment_reference
 
 
-async def claim(db: AsyncSession, *, attempt_key: str, company_id: str | None) -> None:
+async def claim(
+    db: AsyncSession,
+    *,
+    attempt_key: str,
+    company_id: str | None,
+    reuse_completed_after: timedelta | None = None,
+) -> None:
     """Take this attempt, or say who already has it.
 
-    Raises AttemptAlreadyDone if it finished, AttemptInFlight if it is running.
-    Returning normally means the caller owns it and may charge.
+    Raises AttemptAlreadyDone if it finished, AttemptInFlight if it is running,
+    AttemptAlreadyCharged if money moved but no order came of it. Returning
+    normally means the caller owns it and may charge.
+
+    `reuse_completed_after` is for keys the server works out itself rather than
+    ones the browser sends: those repeat whenever the same basket is bought
+    again, so after this long a finished attempt stops counting as the same
+    press and a genuine second order is allowed through.
     """
     row = (await db.execute(text(
-        "SELECT status, order_id, payment_reference, created_at "
+        "SELECT status, order_id, payment_reference, created_at, completed_at "
         "FROM payment_attempts WHERE attempt_key = :k"
     ), {"k": attempt_key})).mappings().first()
 
+    def _aware(ts):
+        return ts.replace(tzinfo=timezone.utc) if (ts and ts.tzinfo is None) else ts
+
     if row:
         if row["status"] == "completed" and row["order_id"]:
-            raise AttemptAlreadyDone(str(row["order_id"]), row["payment_reference"])
+            done_at = _aware(row["completed_at"]) or _aware(row["created_at"])
+            if (
+                reuse_completed_after is not None
+                and done_at
+                and datetime.now(timezone.utc) - done_at > reuse_completed_after
+            ):
+                # Long enough ago that this is somebody buying again, not the
+                # same press arriving twice.
+                await db.execute(text(
+                    "DELETE FROM payment_attempts WHERE attempt_key = :k"
+                ), {"k": attempt_key})
+                await db.commit()
+                row = None
+            else:
+                raise AttemptAlreadyDone(str(row["order_id"]), row["payment_reference"])
+
+    if row:
         if row["status"] == "in_flight":
-            started = row["created_at"]
-            if started and started.tzinfo is None:
-                started = started.replace(tzinfo=timezone.utc)
+            started = _aware(row["created_at"])
             if started and datetime.now(timezone.utc) - started < STALE_AFTER:
                 raise AttemptInFlight()
             # Older than that and nothing came of it — the worker died, or the
-            # charge never returned. Let this request take it over rather than
-            # leaving the customer unable to buy.
+            # charge never returned. Money already taken is the one case where
+            # taking it over would charge twice for one basket, so that stops
+            # here and says so rather than quietly paying again.
+            if row["payment_reference"]:
+                logger.error(
+                    "payment attempt %s was charged (%s) but never became an order",
+                    attempt_key, row["payment_reference"],
+                )
+                raise AttemptAlreadyCharged(str(row["payment_reference"]))
             logger.warning(
                 "payment attempt %s was in flight since %s — stale, retaking",
                 attempt_key, started,
@@ -93,7 +143,15 @@ async def claim(db: AsyncSession, *, attempt_key: str, company_id: str | None) -
             ), {"k": attempt_key})
             await db.commit()
             return
-        # 'failed' — a previous try was declined. Trying again is the point.
+        # 'failed' — a previous try was declined. Trying again is the point,
+        # unless money moved before it failed: that is a charge nobody has an
+        # order for, and the answer to it is a person, not a second charge.
+        if row["payment_reference"]:
+            logger.error(
+                "payment attempt %s failed after being charged (%s)",
+                attempt_key, row["payment_reference"],
+            )
+            raise AttemptAlreadyCharged(str(row["payment_reference"]))
         await db.execute(text(
             "UPDATE payment_attempts SET status = 'in_flight', created_at = now(), "
             "failure_reason = NULL WHERE attempt_key = :k"
@@ -128,6 +186,21 @@ async def completed(
     await db.commit()
 
 
+async def charged(db: AsyncSession, *, attempt_key: str, payment_reference: str) -> None:
+    """Money has moved for this attempt, before anything else can go wrong.
+
+    Written the instant the charge comes back approved, so that if the request
+    dies between the money leaving and the order being written, the next try
+    finds the charge here instead of taking the money a second time.
+    """
+    if not attempt_key or not payment_reference:
+        return
+    await db.execute(text(
+        "UPDATE payment_attempts SET payment_reference = :p WHERE attempt_key = :k"
+    ), {"k": attempt_key, "p": str(payment_reference)[:255]})
+    await db.commit()
+
+
 async def failed(db: AsyncSession, *, attempt_key: str, reason: str) -> None:
     """Nothing was collected. The customer may try again with the same key."""
     await db.execute(text(
@@ -144,7 +217,16 @@ async def release(db: AsyncSession, *, attempt_key: str) -> None:
     cart, a bad address. Those should not consume the attempt, or correcting the
     problem and pressing Pay again would be refused as a duplicate.
     """
+    # Only an attempt nothing was charged on is given back. One that carries a
+    # charge keeps it, marked failed: a check that fails after the money moved
+    # must not wipe the only record that it did.
     await db.execute(text(
-        "DELETE FROM payment_attempts WHERE attempt_key = :k AND status = 'in_flight'"
+        "UPDATE payment_attempts SET status = 'failed', "
+        "failure_reason = 'stopped after the charge went through' "
+        "WHERE attempt_key = :k AND status = 'in_flight' AND payment_reference IS NOT NULL"
+    ), {"k": attempt_key})
+    await db.execute(text(
+        "DELETE FROM payment_attempts WHERE attempt_key = :k AND status = 'in_flight' "
+        "AND payment_reference IS NULL"
     ), {"k": attempt_key})
     await db.commit()

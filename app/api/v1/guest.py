@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.exceptions import (
-    NotFoundError, PaymentError, ValidationError, InsufficientStockError, WholesaleAccountExistsError,
+    ConflictError, NotFoundError, PaymentError, ValidationError, InsufficientStockError,
+    WholesaleAccountExistsError,
 )
 from app.services.backorder_rules import (
     check_not_mixed as _check_not_mixed,
@@ -165,11 +166,98 @@ class GuestOrderOut(BaseModel):
 # POST /api/v1/guest/checkout
 # ---------------------------------------------------------------------------
 
+def _guest_attempt_key(payload: GuestCheckoutRequest) -> str:
+    """One key for one press of Pay by a guest, worked out from the order itself.
+
+    A guest has no account and no saved basket, so the order they sent is the
+    only thing there is to recognise it by: who it is for, what is in it, how it
+    is paid and where it goes. Reloading the page and pressing Pay again sends
+    all of that unchanged, which is what makes the second press the same press.
+    """
+    import hashlib
+
+    lines = sorted(f"{i.variant_id}:{i.quantity}" for i in (payload.items or []))
+    addr = payload.shipping_address
+    parts = [
+        (payload.guest_email or "").lower().strip(),
+        payload.payment_method or "", payload.shipping_method or "",
+        payload.discount_code or "",
+        str(getattr(addr, "line1", "") or ""), str(getattr(addr, "postal_code", "") or ""),
+        "|".join(lines),
+    ]
+    return "guest:" + hashlib.sha1("~".join(parts).encode("utf-8")).hexdigest()
+
+
 @router.post("/checkout", status_code=201)
 async def guest_checkout(
     payload: GuestCheckoutRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
+) -> GuestOrderOut:
+    """Place an order as a guest — once, however many times Pay is pressed.
+
+    This endpoint had no guard at all: a guest whose page hung, who reloaded and
+    pressed Pay again, was charged twice. The signed-in checkout already claims
+    an attempt before any money moves; this does the same.
+    """
+    from datetime import timedelta
+    from app.services import payment_attempt as _attempt
+
+    _key = _guest_attempt_key(payload)
+    try:
+        await _attempt.claim(
+            db, attempt_key=_key, company_id=None,
+            reuse_completed_after=timedelta(minutes=15),
+        )
+    except _attempt.AttemptAlreadyCharged as _charged:
+        logger.error(
+            "guest checkout refused: attempt %s already carries charge %s",
+            _key, _charged.payment_reference,
+        )
+        raise ConflictError(
+            "A payment for this order already went through, so we have not taken "
+            "another. Please check your email for a confirmation, or contact us "
+            f"quoting payment reference {_charged.payment_reference}."
+        )
+    except _attempt.AttemptAlreadyDone as _done:
+        # They already paid and already have an order — hand that one back.
+        _prev = (await db.execute(
+            select(Order).where(Order.id == UUID(str(_done.order_id)))
+        )).scalar_one_or_none()
+        if _prev is not None:
+            logger.info("guest checkout %s already placed as %s", _key, _prev.order_number)
+            return GuestOrderOut(
+                order_id=str(_prev.id), order_number=_prev.order_number,
+                total=float(_prev.total), status=_prev.status,
+            )
+        raise ConflictError("This order has already been placed. Please check your email.")
+    except _attempt.AttemptInFlight:
+        raise ConflictError(
+            "This order is already being placed — give it a moment rather than "
+            "paying again. If nothing happens, check your email before retrying."
+        )
+
+    try:
+        result = await _do_guest_checkout(payload, request, db, attempt_key=_key)
+    except (PaymentError, ValidationError, InsufficientStockError, WholesaleAccountExistsError):
+        # Nothing was collected, or it was refused before it could be. Free the
+        # key so correcting the problem and pressing Pay again is not a repeat.
+        # (An attempt that carries a charge is kept — see release().)
+        await _attempt.release(db, attempt_key=_key)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        await _attempt.failed(db, attempt_key=_key, reason=str(exc))
+        raise
+
+    await _attempt.completed(db, attempt_key=_key, order_id=result.order_id)
+    return result
+
+
+async def _do_guest_checkout(
+    payload: GuestCheckoutRequest,
+    request: Request,
+    db: AsyncSession,
+    attempt_key: str | None = None,
 ) -> GuestOrderOut:
     """Place an order as a guest (retail pricing, no account required)."""
     from app.core.config import get_settings
@@ -393,6 +481,14 @@ async def guest_checkout(
 
             qb_charge_id = charge_resp.get("id")
             qb_payment_status = charge_resp.get("status", "UNKNOWN")
+            # Written the moment the money has moved, before the order exists:
+            # if this request dies now, the retry finds the charge here and
+            # refuses rather than taking it twice.
+            if attempt_key and qb_charge_id and qb_payment_status == "CAPTURED":
+                from app.services import payment_attempt as _att_mark
+                await _att_mark.charged(
+                    db, attempt_key=attempt_key, payment_reference=str(qb_charge_id),
+                )
             # The charge call not raising an exception only means QuickBooks
             # accepted the request — a declined card returns normally with
             # status="DECLINED", no exception. Without this check the order

@@ -528,6 +528,21 @@ async def pay_invoice(
             status_code=409,
             detail="This payment is already going through — please wait a moment.",
         )
+    except _attempt.AttemptAlreadyCharged as _charged:
+        # Money moved on an earlier try and no payment was recorded against the
+        # order. Taking it again is the one outcome worse than this message.
+        logger.error(
+            "pay_invoice refused for order %s — charge %s already taken",
+            order_id, _charged.payment_reference,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A payment for this invoice already went through, so we have "
+                "not taken another. Please contact us quoting payment reference "
+                f"{_charged.payment_reference}."
+            ),
+        )
 
     # ── Whoever is taking money today ─────────────────────────────────────
     #
@@ -634,6 +649,14 @@ async def pay_invoice(
             if charge_resp.get("status") != "CAPTURED":
                 raise ValueError(
                     f"Payment not captured (status={charge_resp.get('status')})"
+                )
+            # Recorded against this attempt the moment the money has actually
+            # moved, before the order is touched. If the request dies between
+            # the two, the retry finds the charge here and refuses rather than
+            # taking it a second time.
+            if charge_resp.get("id"):
+                await _attempt.charged(
+                    db, attempt_key=_akey, payment_reference=str(charge_resp["id"]),
                 )
     except (RuntimeError, ValueError) as exc:
         await _attempt.failed(db, attempt_key=_akey, reason=str(exc))

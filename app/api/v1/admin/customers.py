@@ -497,6 +497,34 @@ async def list_companies(
     )
 
 
+@router.get("/companies-by-tag")
+async def list_companies_by_tag(tag: str, db: AsyncSession = Depends(get_db)):
+    """Every customer carrying one tag — i.e. every member of a Discount Group.
+
+    The group screen used to ask for the first 200 customers and pick its members
+    out of them in the browser. With over a thousand on the books that showed a
+    handful of a group's members and hid the rest, which reads as "they are not
+    in the group" — the one thing this screen exists to answer. Asked of the
+    database instead, by the tag itself, so the answer is the whole group however
+    many customers there are.
+    """
+    import json as _json
+    from sqlalchemy import text as _tt
+
+    rows = (await db.execute(
+        _tt("SELECT id, name, company_email, status, tags FROM companies "
+            "WHERE tags @> CAST(:one AS jsonb) ORDER BY LOWER(name)"),
+        {"one": _json.dumps([tag])},
+    )).mappings().all()
+    return [{
+        "id": str(r["id"]),
+        "name": r["name"],
+        "email": r["company_email"],
+        "status": r["status"],
+        "tags": list(r["tags"] or []),
+    } for r in rows]
+
+
 @router.get("/companies/{company_id}", response_model=CompanyDetail)
 async def get_company(company_id: UUID, db: AsyncSession = Depends(get_db)):
     svc = CompanyService(db)

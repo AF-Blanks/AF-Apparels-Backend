@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -393,6 +393,50 @@ def _client_ip(request) -> str:
     return fwd or (getattr(request.client, "host", "") or "0.0.0.0")
 
 
+async def _derived_attempt_key(
+    payload: CheckoutConfirmRequest,
+    request: Request,
+    db: AsyncSession,
+) -> str:
+    """A key for this press of Pay, worked out from what is being bought.
+
+    The browser's own key is better, because it changes when the customer
+    genuinely starts again. This stands in when none arrives — an older page, a
+    client that never sent one — and it has to survive a reload, since that is
+    how the double charge happened: the page seemed stuck, it was refreshed, and
+    Pay was pressed again. So it is made of the things a reload does not change:
+    who is buying, what is in the basket, and how they are paying.
+    """
+    import hashlib
+
+    company_id = getattr(request.state, "company_id", None)
+    user_id = getattr(request.state, "user_id", None)
+
+    lines: list[str] = []
+    if company_id:
+        from sqlalchemy import select as _s
+        from app.models.order import CartItem as _CI
+
+        rows = (await db.execute(
+            _s(_CI.variant_id, _CI.quantity).where(_CI.company_id == company_id)
+        )).all()
+        lines = sorted(f"{v}:{q}" for v, q in rows)
+    elif getattr(payload, "items", None):
+        lines = sorted(
+            f"{getattr(i, 'variant_id', '')}:{getattr(i, 'quantity', 0)}"
+            for i in (payload.items or [])
+        )
+
+    parts = [
+        str(company_id or ""), str(user_id or ""),
+        (payload.payment_method or ""), (payload.shipping_method or ""),
+        (payload.discount_code or ""), (getattr(payload, "guest_email", "") or ""),
+        "|".join(lines),
+    ]
+    digest = hashlib.sha1("~".join(parts).encode("utf-8")).hexdigest()
+    return f"auto:{digest}"
+
+
 async def _confirm_checkout_inner(
     payload: CheckoutConfirmRequest,
     request: Request,
@@ -405,19 +449,39 @@ async def _confirm_checkout_inner(
     runs twice — and without the guard, charges twice. See payment_attempt.py
     for why three layers are needed rather than one.
 
-    A client that sends no attempt_key gets exactly the old behaviour, guard and
-    all bypassed. That is how the QuickBooks path runs today; nothing changes
-    for it until it starts sending one.
+    A client that sends no attempt_key used to get no guard at all, and the
+    QuickBooks path sends none — which is how one customer was charged twice for
+    one basket. So when none arrives the server works one out from the basket
+    itself, and the guard runs either way.
     """
     from app.services import payment_attempt as _attempt
 
     _key = (payload.attempt_key or "").strip()[:120]
+    #: A key the server worked out repeats whenever the same basket is bought
+    #: again, so a finished attempt stops standing in the way after this long.
+    _reuse_after = None
     if not _key:
-        return await _do_confirm_checkout(payload, request, db)
+        _key = await _derived_attempt_key(payload, request, db)
+        _reuse_after = timedelta(minutes=15)
 
     _company_for_attempt = getattr(request.state, "company_id", None)
     try:
-        await _attempt.claim(db, attempt_key=_key, company_id=str(_company_for_attempt or ""))
+        await _attempt.claim(
+            db, attempt_key=_key, company_id=str(_company_for_attempt or ""),
+            reuse_completed_after=_reuse_after,
+        )
+    except _attempt.AttemptAlreadyCharged as charged:
+        # The money went out and the order never got written. Charging again is
+        # the one thing that must not happen here.
+        _log.error(
+            "checkout refused: attempt %s already carries charge %s",
+            _key, charged.payment_reference,
+        )
+        raise ConflictError(
+            "A payment for this basket already went through, so we have not "
+            "taken another. Please check your orders, or contact us quoting "
+            f"payment reference {charged.payment_reference}."
+        )
     except _attempt.AttemptAlreadyDone as done:
         # They already paid and already have an order. Give them that one back
         # rather than an error for something that worked.
@@ -431,7 +495,7 @@ async def _confirm_checkout_inner(
         )
 
     try:
-        result = await _do_confirm_checkout(payload, request, db)
+        result = await _do_confirm_checkout(payload, request, db, attempt_key=_key)
     except (PaymentError, ValidationError, MixedOrderError, ForbiddenError) as exc:
         # Nothing was collected, or nothing should have been. Free the key so
         # fixing the problem and pressing Pay again is not refused as a repeat.
@@ -469,6 +533,7 @@ async def _do_confirm_checkout(
     payload: CheckoutConfirmRequest,
     request: Request,
     db: AsyncSession,
+    attempt_key: str | None = None,
 ):
     from app.core.config import settings as _cfg_maint
     if _cfg_maint.MAINTENANCE_MODE and not (
@@ -789,6 +854,15 @@ async def _do_confirm_checkout(
         # order in their own columns further down.
         qb_charge_id = None if _payment_provider == "stripe" else charge_resp.get("id")
         qb_payment_status = charge_resp.get("status", "UNKNOWN")
+
+        # Written before the order exists. If this request dies here — and that
+        # is exactly how a customer came to be charged twice — the retry finds
+        # the charge against this attempt and refuses rather than paying again.
+        if attempt_key and qb_payment_status in ("CAPTURED", "PENDING"):
+            from app.services import payment_attempt as _att_mark
+            _ref = qb_charge_id or (charge_resp or {}).get("id")
+            if _ref:
+                await _att_mark.charged(db, attempt_key=attempt_key, payment_reference=str(_ref))
 
         # The charge API call not raising an exception only means QuickBooks
         # accepted the request — it doesn't mean the card was approved. A
