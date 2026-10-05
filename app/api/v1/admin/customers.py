@@ -511,18 +511,58 @@ async def list_companies_by_tag(tag: str, db: AsyncSession = Depends(get_db)):
     import json as _json
     from sqlalchemy import text as _tt
 
+    # The person behind each company comes along too — the owner where there is
+    # one — because a list of group members gets downloaded and rung round, and
+    # a company name alone is not somebody to ring.
     rows = (await db.execute(
-        _tt("SELECT id, name, company_email, status, tags FROM companies "
-            "WHERE tags @> CAST(:one AS jsonb) ORDER BY LOWER(name)"),
+        _tt("""
+            SELECT c.id, c.name, c.company_email, c.phone, c.city, c.state_province,
+                   c.status, c.tags, c.created_at,
+                   u.first_name, u.last_name, u.email AS user_email
+            FROM companies c
+            LEFT JOIN LATERAL (
+                SELECT us.first_name, us.last_name, us.email
+                FROM company_users cu
+                JOIN users us ON us.id = cu.user_id
+                WHERE cu.company_id = c.id
+                ORDER BY (cu.role = 'owner') DESC
+                LIMIT 1
+            ) u ON TRUE
+            WHERE c.tags @> CAST(:one AS jsonb)
+            ORDER BY LOWER(c.name)
+        """),
         {"one": _json.dumps([tag])},
     )).mappings().all()
-    return [{
-        "id": str(r["id"]),
-        "name": r["name"],
-        "email": r["company_email"],
-        "status": r["status"],
-        "tags": list(r["tags"] or []),
-    } for r in rows]
+
+    def _real(address: str | None) -> str | None:
+        # Imported customers carry a stand-in login address; it is not one
+        # anybody can be written to, so it is left out rather than exported.
+        a = (address or "").strip()
+        return a if a and not a.lower().endswith("@afblanks-noemail.invalid") else None
+
+    out = []
+    for r in rows:
+        tags = r["tags"]
+        if isinstance(tags, str):          # never hand the page a string to treat as a list
+            try:
+                tags = _json.loads(tags)
+            except ValueError:
+                tags = []
+        out.append({
+            "id": str(r["id"]),
+            "name": r["name"],
+            "email": _real(r["company_email"]) or _real(r["user_email"]),
+            "phone": r["phone"],
+            "contact_name": " ".join(
+                p for p in [(r["first_name"] or "").strip(), (r["last_name"] or "").strip()] if p
+            ) or None,
+            "city": r["city"],
+            "state": r["state_province"],
+            "status": r["status"],
+            "customer_since": r["created_at"].date().isoformat() if r["created_at"] else None,
+            "tags": list(tags or []),
+        })
+    return out
 
 
 @router.get("/companies/{company_id}", response_model=CompanyDetail)
