@@ -34,13 +34,9 @@ class MixedOrderError(ConflictError):
 
 
 async def stock_on_hand(db: AsyncSession, ids: list[UUID]) -> dict[UUID, int]:
-    """What the shelf holds for each variant. No inventory record means 0.
-
-    The storefront has always read it that way — a variant nobody ever stocked is
-    shown as out of stock, and as "On backorder" when it is marked sellable past
-    zero. This used to treat the same variant as unlimited, so the page called a
-    line a backorder and the cart and checkout called it in stock. The two now
-    answer alike.
+    """What the shelf holds for each variant, for telling a customer how many are
+    available. No inventory record reads as 0 here — it says nothing about whether
+    a line is a backorder; backorder_flags decides that.
     """
     if not ids:
         return {}
@@ -56,10 +52,16 @@ async def stock_on_hand(db: AsyncSession, ids: list[UUID]) -> dict[UUID, int]:
 async def backorder_flags(db: AsyncSession, wants: dict[UUID, int]) -> dict[UUID, bool]:
     """Which of these lines are being sold for more than the shelf holds.
 
-    `wants` maps a variant to the quantity being ordered. A line is a backorder
-    when its variant is marked sellable past zero and the quantity is more than
-    is on the shelf — including a variant with no stock record at all, which
-    holds nothing (see stock_on_hand).
+    `wants` maps a variant to the quantity being ordered. The rule matches the
+    checkout's: a variant nobody keeps stock records for is not a backorder — it
+    is untracked, and has always been treated as unlimited — only one that is
+    genuinely short and deliberately marked sellable past zero.
+
+    It must keep matching the order writer (order_service.create_order) and the
+    guest checkout, which decide the same question for themselves. The wholesale
+    checkout asks here before taking the card and the order writer asks after;
+    if the two ever answer differently, a card can be charged for an order the
+    writer then refuses.
 
     Answered for the whole basket in two queries rather than two per line, since
     every caller here is looking at a cart, not a single item.
@@ -67,7 +69,19 @@ async def backorder_flags(db: AsyncSession, wants: dict[UUID, int]) -> dict[UUID
     if not wants:
         return {}
     ids = list(wants)
-    stock = await stock_on_hand(db, ids)
+
+    stock: dict[UUID, tuple[int, int]] = {
+        vid: (int(qty or 0), int(records or 0))
+        for vid, qty, records in (await db.execute(
+            select(
+                InventoryRecord.variant_id,
+                func.coalesce(func.sum(InventoryRecord.quantity), 0),
+                func.count(InventoryRecord.id),
+            )
+            .where(InventoryRecord.variant_id.in_(ids))
+            .group_by(InventoryRecord.variant_id)
+        )).all()
+    }
 
     allowed: dict[UUID, bool] = {
         vid: bool(flag)
@@ -79,7 +93,8 @@ async def backorder_flags(db: AsyncSession, wants: dict[UUID, int]) -> dict[UUID
 
     out: dict[UUID, bool] = {}
     for vid, qty in wants.items():
-        out[vid] = allowed.get(vid, False) and stock.get(vid, 0) < int(qty or 0)
+        on_hand, records = stock.get(vid, (0, 0))
+        out[vid] = allowed.get(vid, False) and records > 0 and on_hand < int(qty or 0)
     return out
 
 
