@@ -98,6 +98,39 @@ async def backorder_flags(db: AsyncSession, wants: dict[UUID, int]) -> dict[UUID
     return out
 
 
+async def cart_backorder_flags(db: AsyncSession, wants: dict[UUID, int]) -> dict[UUID, bool]:
+    """Which lines the CART treats as backorders — for one-kind-per-cart only.
+
+    Unlike backorder_flags, a variant with no inventory record counts as 0 on the
+    shelf, so one marked for backorder is a backorder here. That is how the
+    storefront shows it ("On backorder"), and on the live catalogue most sizes
+    sold on backorder have never had a stock record — under backorder_flags they
+    read as unlimited and the cart could not tell the two kinds apart at all.
+
+    The checkout deliberately keeps backorder_flags. Its pre-charge check and the
+    order writer must answer alike, or a card is charged for an order the writer
+    then refuses. Where the two rules disagree — an untracked backorder size in
+    the same basket as a tracked size sold short — the cart lets the basket
+    through and the checkout refuses it before any money is taken, exactly as it
+    did before this rule existed.
+    """
+    if not wants:
+        return {}
+    ids = list(wants)
+    stock = await stock_on_hand(db, ids)
+    allowed: dict[UUID, bool] = {
+        vid: bool(flag)
+        for vid, flag in (await db.execute(
+            select(ProductVariant.id, ProductVariant.allow_backorder)
+            .where(ProductVariant.id.in_(ids))
+        )).all()
+    }
+    return {
+        vid: allowed.get(vid, False) and stock.get(vid, 0) < int(qty or 0)
+        for vid, qty in wants.items()
+    }
+
+
 def describe_line(product_name: str | None, color: str | None, size: str | None, sku: str | None) -> str:
     """How a line is named back to whoever has to act on it.
 
@@ -254,8 +287,8 @@ async def check_cart_change(
     # The cart's kind is what it holds now — the line being edited included, so a
     # cart of one in-stock line still cannot be pushed past the shelf by its own
     # quantity box, nor a lone backorder line edited down into stock.
-    mode = _mode(await backorder_flags(db, current))
-    after_flags = await backorder_flags(db, after)
+    mode = _mode(await cart_backorder_flags(db, current))
+    after_flags = await cart_backorder_flags(db, after)
     changed = {vid: after_flags.get(vid, False) for vid in changes}
 
     if mode == "mixed":

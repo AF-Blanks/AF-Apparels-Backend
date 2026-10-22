@@ -808,7 +808,7 @@ async def guest_stock_check(payload: dict, db: AsyncSession = Depends(get_db)) -
     page, not after they have filled in an address and a card.
     """
     from uuid import UUID as _UUID
-    from app.services.backorder_rules import backorder_flags as _flags
+    from app.services.backorder_rules import cart_backorder_flags as _flags
 
     wants: dict = {}
     for entry in (payload.get("items") or []):

@@ -251,7 +251,7 @@ class CartService:
         # only had to decide whether to accept them; the caller still needs to know
         # what it accepted, because a list mixing in-stock and backordered SKUs
         # cannot become one order.
-        from app.services.backorder_rules import backorder_flags
+        from app.services.backorder_rules import cart_backorder_flags as backorder_flags
         from uuid import UUID as _UUID
         _flags = await backorder_flags(
             self.db, {_UUID(str(v["variant_id"])): v["quantity"] for v in valid}
@@ -373,7 +373,7 @@ class CartService:
 
         # Asked once for the whole cart, by the same rule the checkout will apply,
         # so the badge on screen and the answer at the till cannot disagree.
-        from app.services.backorder_rules import backorder_flags
+        from app.services.backorder_rules import cart_backorder_flags as backorder_flags
         backorder = await backorder_flags(
             self.db, {i.variant_id: i.quantity for i in raw_items if i.variant_id}
         )
