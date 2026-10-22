@@ -822,9 +822,14 @@ async def guest_stock_check(payload: dict, db: AsyncSession = Depends(get_db)) -
 
     flags = await _flags(db, wants)
     backordered = [str(v) for v, f in flags.items() if f]
+    # What the shelf holds, so the cart page can tell a guest how far a line can
+    # go and stay in stock (one kind of order per cart — see backorder_rules).
+    from app.services.backorder_rules import stock_on_hand as _on_hand
+    on_hand = await _on_hand(db, list(wants))
     return {
         "backordered_variant_ids": backordered,
         "mixed": bool(backordered) and len(backordered) < len(flags),
+        "on_hand": {str(v): max(int(n), 0) for v, n in on_hand.items()},
     }
 
 

@@ -7,7 +7,7 @@ Each phase adds endpoints to this router:
 """
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Body, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -1135,6 +1135,7 @@ async def load_template_to_cart(
     template_id: UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
+    acknowledge_backorder: bool = Body(False, embed=True),
 ):
     """Load a saved template into cart, applying current pricing."""
     company_id = getattr(request.state, "company_id", None)
@@ -1152,10 +1153,34 @@ async def load_template_to_cart(
     import json
     from decimal import Decimal
     items = json.loads(tpl.items)
+    # A template saved from the cart stores variant_id, not sku, but the loader
+    # below works from SKUs — so every such template failed with KeyError 'sku'.
+    # Fill the SKU in from the variant.
+    missing = [i["variant_id"] for i in items if not i.get("sku") and i.get("variant_id")]
+    if missing:
+        from app.models.product import ProductVariant
+        skus = {
+            str(vid): sku for vid, sku in (await db.execute(
+                select(ProductVariant.id, ProductVariant.sku)
+                .where(ProductVariant.id.in_([UUID(str(m)) for m in missing]))
+            )).all()
+        }
+        items = [
+            {**i, "sku": skus.get(str(i.get("variant_id")))} if not i.get("sku") else i
+            for i in items
+        ]
+        items = [i for i in items if i.get("sku")]
     from app.services.cart_service import CartService
     svc = CartService(db)
     discount = getattr(request.state, "tier_discount_percent", Decimal("0"))
     validation = await svc.validate_sku_list(items)
+    # Checked before anything is added, so a refused template leaves the cart as it was.
+    from app.services.backorder_rules import check_cart_change
+    wants: dict = {}
+    for v in validation["valid"]:
+        vid = UUID(str(v["variant_id"]))
+        wants[vid] = wants.get(vid, 0) + int(v["quantity"])
+    await check_cart_change(db, company_id, wants, acknowledged=acknowledge_backorder)
     added = await svc.bulk_add_validated_items(company_id, validation["valid"], discount)
     await db.commit()
     return {

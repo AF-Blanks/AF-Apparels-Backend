@@ -677,6 +677,7 @@ class OrderService:
 
         added = []
         skipped = []
+        to_add: list[CartItem] = []
 
         for order_item in order.items:
             stock_result = await self.db.execute(
@@ -704,15 +705,26 @@ class OrderService:
                 else pricing_svc.calculate_effective_price(variant.retail_price, discount_percent)
             )
 
-            cart_item = CartItem(
+            to_add.append(CartItem(
                 company_id=company_id,
                 variant_id=order_item.variant_id,
                 quantity=order_item.quantity,
                 unit_price=effective_price,
-            )
-            self.db.add(cart_item)
+            ))
             added.append({"sku": order_item.sku})
 
+        # Only lines the shelf can fill get this far, so a reorder never adds a
+        # backorder — but it must still not land in-stock goods in a cart that is
+        # holding a backorder. Checked before anything is added.
+        if to_add and company_id:
+            from app.services.backorder_rules import check_cart_change
+            wants: dict = {}
+            for ci in to_add:
+                wants[ci.variant_id] = wants.get(ci.variant_id, 0) + ci.quantity
+            await check_cart_change(self.db, company_id, wants, acknowledged=True)
+
+        for ci in to_add:
+            self.db.add(ci)
         await self.db.flush()
         return {"added": added, "skipped": skipped}
 

@@ -16,6 +16,8 @@ class CartItemAdd(BaseModel):
 class MatrixAddRequest(BaseModel):
     product_id: UUID
     items: list[CartItemAdd] = Field(..., min_length=1)
+    # The customer ticked that backordered lines ship when stock arrives.
+    acknowledge_backorder: bool = False
 
 
 class CartItemOut(BaseModel):
@@ -77,6 +79,8 @@ class SkuQuantityPair(BaseModel):
 
 class QuickOrderRequest(BaseModel):
     items: list[SkuQuantityPair]
+    # The customer ticked that backordered lines ship when stock arrives.
+    acknowledge_backorder: bool = False
 
 
 class ValidationResultItem(BaseModel):

@@ -87,6 +87,14 @@ async def quick_order(
     svc = CartService(db)
     validation = await svc.validate_sku_list([{"sku": i.sku, "quantity": i.quantity} for i in payload.items])
 
+    # Checked before anything is added, so a refused list leaves the cart as it was.
+    from app.services.backorder_rules import check_cart_change
+    wants: dict = {}
+    for v in validation["valid"]:
+        vid = UUID(str(v["variant_id"]))
+        wants[vid] = wants.get(vid, 0) + int(v["quantity"])
+    await check_cart_change(db, company_id, wants, acknowledged=payload.acknowledge_backorder)
+
     # Bulk-add valid items
     added = await svc.bulk_add_validated_items(company_id, validation["valid"], _discount(request), _group_id(request))
     if added:

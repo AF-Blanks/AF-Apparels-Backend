@@ -55,8 +55,16 @@ class CartService:
         group_id: str | None = None,
     ) -> CartResponse:
         from app.services.pricing_service import PricingService
+        from app.services.backorder_rules import check_cart_change
 
         pricing_svc = PricingService(self.db)
+
+        wants: dict = {}
+        for add_item in payload.items:
+            wants[add_item.variant_id] = wants.get(add_item.variant_id, 0) + add_item.quantity
+        await check_cart_change(
+            self.db, company_id, wants, acknowledged=payload.acknowledge_backorder,
+        )
 
         for add_item in payload.items:
             variant_result = await self.db.execute(
@@ -114,6 +122,13 @@ class CartService:
         item = result.scalar_one_or_none()
         if not item:
             raise NotFoundError(f"Cart item {item_id} not found")
+
+        # A line already in a backorder cart was confirmed when it went in, so an
+        # edit needs no second tick — only that it keeps the cart one kind.
+        from app.services.backorder_rules import check_cart_change
+        await check_cart_change(
+            self.db, company_id, {item.variant_id: quantity}, acknowledged=True, replace=True,
+        )
 
         item.quantity = quantity
         await self.db.flush()
