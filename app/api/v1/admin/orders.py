@@ -2270,6 +2270,85 @@ async def resend_invoice_email(order_id: UUID, db: AsyncSession = Depends(get_db
     return {"message": f"Invoice emailed to {to_email}"}
 
 
+# ── One-off email to the customer on an order ─────────────────────────────────
+#
+# The order page's Email button used to go through the order's company only, so
+# a retail or guest order — which has no company — could not be emailed at all.
+# These resolve who to write to from the order itself: the company's addresses
+# (exactly as the customer page's Email does) when there is one, otherwise the
+# retail customer's login email or the guest's email from checkout.
+
+class _OrderEmailRequest(BaseModel):
+    subject: str
+    body_html: str
+
+
+async def _resolve_order_emails(order: Order, db: AsyncSession) -> list[tuple[str, str, str]]:
+    """(identifier, email, first_name) for everyone this order's customer can be emailed at."""
+    if order.company_id:
+        from app.api.v1.admin.customers import _resolve_customer_emails
+        return await _resolve_customer_emails(order.company_id, db)
+
+    email: str | None = None
+    first_name: str | None = None
+    ident = str(order.id)
+    if order.is_guest_order:
+        email = order.guest_email
+        first_name = (order.guest_name or "").strip().split(" ")[0] or None
+    elif order.placed_by_id:
+        user = (await db.execute(select(User).where(User.id == order.placed_by_id))).scalar_one_or_none()
+        if user:
+            email, first_name, ident = user.email, user.first_name, str(user.id)
+    if not email and order.guest_email:
+        # A retail order can carry the checkout email even when no account is linked.
+        email = order.guest_email
+        first_name = first_name or ((order.guest_name or "").strip().split(" ")[0] or None)
+
+    e = (email or "").strip()
+    # Same filter as the customer page: no blanks, no import placeholders.
+    if not e or "@" not in e or e.lower().endswith("@afblanks-noemail.invalid"):
+        return []
+    return [(ident, e, (first_name or "").strip())]
+
+
+@router.get("/orders/{order_id}/email-recipients")
+async def get_order_email_recipients(order_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """Who a one-off email about this order would go to — any kind of customer."""
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+    return {"emails": [e for (_i, e, _f) in await _resolve_order_emails(order, db)]}
+
+
+@router.post("/orders/{order_id}/send-email")
+async def send_order_customer_email(
+    order_id: UUID,
+    payload: _OrderEmailRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Send an admin-composed email to this order's customer — company, retail or guest.
+    Sent the same way as the customer page's Email (one queued task per address)."""
+    subject = (payload.subject or "").strip()
+    body_html = (payload.body_html or "").strip()
+    if not subject:
+        raise HTTPException(status_code=422, detail="Subject is required.")
+    if not body_html:
+        raise HTTPException(status_code=422, detail="Message body is required.")
+
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+    recipients = await _resolve_order_emails(order, db)
+    if not recipients:
+        raise HTTPException(status_code=422, detail="This customer has no valid email address on file.")
+
+    from app.tasks.email_tasks import send_marketing_email
+    for ident, email, fn in recipients:
+        send_marketing_email.delay(ident, email, fn, subject, body_html)
+
+    return {"sent_to": [e for (_i, e, _f) in recipients], "count": len(recipients)}
+
+
 @router.post("/orders/{order_id}/send-invoice", response_model=dict)
 async def send_invoice_email(
     order_id: UUID,
