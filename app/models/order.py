@@ -63,6 +63,11 @@ class Order(BaseModel):
     # total, invoice and QuickBooks line is built from.
     discount_percent: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0, server_default="0")
     discount_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0, server_default="0")
+    # Admin-added charges, the discount's mirror image: the percent is what the
+    # admin typed, the amount is what is added on and what the QuickBooks
+    # "Additional Services Charges" line bills.
+    additional_charges_percent: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0, server_default="0")
+    additional_charges_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0, server_default="0")
     tax_rate: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True)
     tax_region: Mapped[str | None] = mapped_column(String(10), nullable=True)
     total: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)

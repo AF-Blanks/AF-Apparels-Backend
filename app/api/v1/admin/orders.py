@@ -732,6 +732,8 @@ async def get_admin_order(order_id: str, db: AsyncSession = Depends(get_db)):
             tax_amount=order.tax_amount,
             discount_percent=getattr(order, "discount_percent", 0),
             discount_amount=getattr(order, "discount_amount", 0),
+            additional_charges_percent=getattr(order, "additional_charges_percent", 0),
+            additional_charges_amount=getattr(order, "additional_charges_amount", 0),
             total=order.total,
             company_id=order.company_id,
             company_name=company_name,
@@ -1909,6 +1911,57 @@ async def set_order_discount(order_id: UUID, body: dict, db: AsyncSession = Depe
     return {
         "discount_percent": float(order.discount_percent or 0),
         "discount_amount": float(order.discount_amount or 0),
+        "subtotal": float(order.subtotal or 0),
+        "total": float(order.total or 0),
+    }
+
+
+@router.patch("/orders/{order_id}/charges", status_code=200)
+async def set_order_charges(order_id: UUID, body: dict, db: AsyncSession = Depends(get_db)) -> dict:
+    """Set (or clear) Additional Services Charges on an order that hasn't completed.
+
+    The discount endpoint in reverse, and handled exactly like it: send
+    additional_charges_percent for a percent of the subtotal that follows it as
+    items change, or additional_charges_amount for a fixed figure. Send 0 in
+    either to remove the charges.
+    """
+    order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    if not order:
+        raise NotFoundError(f"Order {order_id} not found")
+    if order.status in ("delivered", "cancelled", "refunded"):
+        raise HTTPException(status_code=422, detail="Cannot change the charges on a completed or cancelled order")
+
+    subtotal = float(order.subtotal or 0)
+    has_amount = "additional_charges_amount" in body and body.get("additional_charges_amount") is not None
+
+    if has_amount:
+        try:
+            amount = round(float(body.get("additional_charges_amount") or 0), 2)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="additional_charges_amount must be a number")
+        if amount < 0:
+            raise HTTPException(status_code=422, detail="additional_charges_amount cannot be negative")
+        if amount > 99999999.99:
+            raise HTTPException(status_code=422, detail="additional_charges_amount is too large")
+        # percent 0 marks a fixed amount, as it does for the discount.
+        order.additional_charges_percent = 0
+        order.additional_charges_amount = amount
+    else:
+        try:
+            percent = round(float(body.get("additional_charges_percent") or 0), 2)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="additional_charges_percent must be a number")
+        if percent < 0 or percent > 100:
+            raise HTTPException(status_code=422, detail="additional_charges_percent must be between 0 and 100")
+        order.additional_charges_percent = percent
+        order.additional_charges_amount = round(subtotal * percent / 100, 2)
+    _recalc_order_total(order)
+    await db.commit()
+    _refresh_qb_invoice(order)
+
+    return {
+        "additional_charges_percent": float(order.additional_charges_percent or 0),
+        "additional_charges_amount": float(order.additional_charges_amount or 0),
         "subtotal": float(order.subtotal or 0),
         "total": float(order.total or 0),
     }
@@ -3128,16 +3181,29 @@ def _recalc_order_total(order: Order) -> None:
     A percent of zero means a fixed amount was agreed instead: that figure is left
     alone as items change, which is what "$50 off" is normally taken to mean. It is
     still capped at the subtotal so an order can never total less than its shipping.
+
+    Additional charges work the same way in the other direction: a percent follows
+    the subtotal, a fixed amount stays put.
+
+    The card convenience fee is part of the total too. It was left out here, so
+    editing a card order dropped the fee from its total while the QuickBooks
+    invoice still billed it, and the two disagreed by the fee.
     """
     subtotal = float(order.subtotal or 0)
     percent = float(getattr(order, "discount_percent", 0) or 0)
     if percent > 0:
         order.discount_amount = round(subtotal * percent / 100, 2)
     discount = min(float(getattr(order, "discount_amount", 0) or 0), subtotal)
+    charges_percent = float(getattr(order, "additional_charges_percent", 0) or 0)
+    if charges_percent > 0:
+        order.additional_charges_amount = round(subtotal * charges_percent / 100, 2)
+    charges = float(getattr(order, "additional_charges_amount", 0) or 0)
     order.total = round(
         (subtotal - discount)
+        + charges
         + float(order.shipping_cost or 0)
-        + float(order.tax_amount or 0),
+        + float(order.tax_amount or 0)
+        + float(getattr(order, "convenience_fee", 0) or 0),
         2,
     )
 

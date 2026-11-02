@@ -329,11 +329,14 @@ def _items_table(order: "Order") -> list:
 def _totals_block(order: "Order") -> list:
     """Right-aligned subtotal / discount / shipping / tax / total block."""
     discount_val = float(getattr(order, "discount_amount", 0) or 0)
+    charges_val = float(getattr(order, "additional_charges_amount", 0) or 0)
     tax_val = float(getattr(order, "tax_amount", 0) or 0)
 
     rows: list = [["", "Subtotal:", f"${float(order.subtotal):.2f}"]]
     if discount_val > 0:
         rows.append(["", "Discount:", f"−${discount_val:.2f}"])
+    if charges_val > 0:
+        rows.append(["", "Additional Services Charges:", f"${charges_val:.2f}"])
     rows.append(["", "Shipping:", f"${float(order.shipping_cost or 0):.2f}"])
     if tax_val > 0:
         rows.append(["", "Tax:", f"${tax_val:.2f}"])
@@ -453,11 +456,14 @@ class PDFService:
         shipping_val = float(order.shipping_cost or 0)
         tax_val = float(order.tax_amount) if order.tax_amount else 0.0
         discount_val = float(getattr(order, "discount_amount", 0) or 0)
+        charges_val = float(getattr(order, "additional_charges_amount", 0) or 0)
         total_val = float(order.total)
 
         summary_rows: list = [["", "Subtotal:", f"${subtotal_val:.2f}"]]
         if discount_val > 0:
             summary_rows.append(["", "Discount:", f"−${discount_val:.2f}"])
+        if charges_val > 0:
+            summary_rows.append(["", "Additional Services Charges:", f"${charges_val:.2f}"])
         summary_rows.append(["", "Shipping:", f"${shipping_val:.2f}"])
         if tax_val > 0:
             summary_rows.append(["", "Tax:", f"${tax_val:.2f}"])

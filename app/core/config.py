@@ -119,6 +119,7 @@ class Settings(BaseSettings):
     QB_REFRESH_TOKEN: str = ""
     QB_SHIPPING_ITEM_ID: str = ""       # QB item ID for Shipping & Handling line
     QB_CONVENIENCE_FEE_ITEM_ID: str = ""  # QB item ID for 3% Credit Card Convenience Fee
+    QB_ADDITIONAL_CHARGES_ITEM_ID: str = ""  # QB item ID for admin-added Additional Services Charges
     # QB item ID for the "Sales Tax Collected" service item, mapped to the
     # Sales Tax Payable *liability* account. Tax charged at checkout
     # (ZipTax/manual) is posted here as an explicit line so QB's Automated Sales

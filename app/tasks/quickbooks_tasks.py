@@ -617,6 +617,33 @@ def sync_order_invoice_to_qb(self, order_id: str, force_payment: bool = False, r
                         _conv_fee, _conv_item_id,
                     )
 
+                # Admin-added Additional Services Charges. Rides in the same
+                # invoice create/update as every other line, so it costs no
+                # QuickBooks request of its own; the item id comes from settings
+                # rather than a lookup for the same reason.
+                _add_charges = float(getattr(order, "additional_charges_amount", None) or 0)
+                if _add_charges > 0:
+                    _add_item_id = settings.QB_ADDITIONAL_CHARGES_ITEM_ID or None
+                    if not _add_item_id:
+                        logger.warning(
+                            "QB invoice: additional_charges=%.2f but QB_ADDITIONAL_CHARGES_ITEM_ID"
+                            " not set — the line will bill against the fallback item."
+                            " Set QB_ADDITIONAL_CHARGES_ITEM_ID to the 'Additional Services"
+                            " Charges' service item in QB.",
+                            _add_charges,
+                        )
+                    line_items.append({
+                        "description": "Additional Services Charges",
+                        "quantity": 1,
+                        "unit_price": _add_charges,
+                        "amount": _add_charges,
+                        "qb_item_id": _add_item_id,
+                    })
+                    logger.info(
+                        "QB invoice: additional_charges=%.2f added as line item (qb_item_id=%s)",
+                        _add_charges, _add_item_id,
+                    )
+
                 # Add sales tax as an EXPLICIT line item. order.tax_amount was
                 # already calculated at checkout (ZipTax / manual tax_rates) and is
                 # exactly what the customer was charged. QB's Automated Sales Tax is

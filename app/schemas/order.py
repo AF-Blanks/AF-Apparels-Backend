@@ -287,6 +287,9 @@ class AdminOrderDetail(OrderOut):
     # Admin-granted discount (percent typed, amount taken off the subtotal)
     discount_percent: Decimal | None = None
     discount_amount: Decimal | None = None
+    # Admin-added charges (percent typed, amount added on)
+    additional_charges_percent: Decimal | None = None
+    additional_charges_amount: Decimal | None = None
     # Multi-box labels JSON string (parsed by frontend)
     all_labels: str | None = None
 
