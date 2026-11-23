@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -45,6 +45,10 @@ class VariantPricingIn(BaseModel):
     overrides: dict[str, dict[str, dict[str, str | None]]]
 
 
+class DuplicateGroupIn(BaseModel):
+    title: str
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _group_out(g: DiscountGroup) -> dict:
@@ -74,6 +78,27 @@ def _group_out(g: DiscountGroup) -> dict:
     }
 
 
+async def _assert_tag_free(db: AsyncSession, tag: str | None, own_id: UUID | None = None) -> None:
+    """Refuse a customer tag another group already uses.
+
+    A company is matched to the first enabled group carrying one of its tags,
+    in no fixed order, so two groups on one tag would price those customers
+    from either group at random.
+    """
+    tag = (tag or "").strip()
+    if not tag:
+        return
+    q = select(DiscountGroup.title).where(DiscountGroup.customer_tag == tag)
+    if own_id is not None:
+        q = q.where(DiscountGroup.id != own_id)
+    other = (await db.execute(q.limit(1))).scalar_one_or_none()
+    if other is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f'The customer tag "{tag}" is already used by "{other}". Each group needs its own tag.',
+        )
+
+
 # ── Discount Group CRUD ───────────────────────────────────────────────────────
 
 @router.get("/discount-groups")
@@ -85,6 +110,7 @@ async def list_discount_groups(db: AsyncSession = Depends(get_db)):
 
 @router.post("/discount-groups", status_code=status.HTTP_201_CREATED)
 async def create_discount_group(body: DiscountGroupIn, db: AsyncSession = Depends(get_db)):
+    await _assert_tag_free(db, body.customer_tag)
     g = DiscountGroup(
         title=body.title,
         customer_tag=body.customer_tag,
@@ -113,6 +139,10 @@ async def update_discount_group(
     if not g:
         raise HTTPException(status_code=404, detail="Group not found")
     data = body.model_dump(exclude_unset=True)
+    # Only a changed tag is checked, so a group saved before this rule existed
+    # can still be edited as it is.
+    if "customer_tag" in data and (data["customer_tag"] or "").strip() != (g.customer_tag or "").strip():
+        await _assert_tag_free(db, data["customer_tag"], own_id=g.id)
     if "applies_to_ids" in data:
         data["applies_to_ids"] = json.dumps(data["applies_to_ids"]) if data["applies_to_ids"] else None
     if "shipping_brackets" in data:
@@ -132,6 +162,78 @@ async def delete_discount_group(group_id: UUID, db: AsyncSession = Depends(get_d
         raise HTTPException(status_code=404, detail="Group not found")
     await db.delete(g)
     await db.commit()
+
+
+@router.post("/discount-groups/{group_id}/duplicate", status_code=status.HTTP_201_CREATED)
+async def duplicate_discount_group(
+    group_id: UUID, body: DuplicateGroupIn, db: AsyncSession = Depends(get_db)
+):
+    """Copy a group under a new name, with every price it carries.
+
+    Settings, the product-level "−$" prices and the per-variant prices all come
+    across. The customer tag does not: customers join a group by its tag, so a
+    copy carrying the same tag would start pricing the original's customers.
+    The copy has no customers until it is given a tag of its own.
+    """
+    src = await db.get(DiscountGroup, group_id)
+    if not src:
+        raise HTTPException(status_code=404, detail="Group not found")
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="Give the copy a name.")
+    taken = (await db.execute(
+        select(DiscountGroup.id).where(func.lower(DiscountGroup.title) == title.lower()).limit(1)
+    )).scalar_one_or_none()
+    if taken is not None:
+        raise HTTPException(status_code=409, detail=f'A group named "{title}" already exists.')
+
+    copy = DiscountGroup(
+        title=title,
+        customer_tag=None,
+        applies_to=src.applies_to,
+        applies_to_ids=src.applies_to_ids,
+        min_req_type=src.min_req_type,
+        min_req_value=src.min_req_value,
+        shipping_type=src.shipping_type,
+        shipping_amount=src.shipping_amount,
+        shipping_calc_type=src.shipping_calc_type,
+        shipping_cutoff_time=src.shipping_cutoff_time,
+        shipping_brackets_json=src.shipping_brackets_json,
+        status=src.status,
+    )
+    db.add(copy)
+    await db.flush()
+    new_id = str(copy.id)
+
+    product_rows = (await db.execute(
+        select(VariantPricingOverride).where(VariantPricingOverride.tier_id == str(src.id))
+    )).scalars().all()
+    db.add_all([
+        VariantPricingOverride(
+            product_id=r.product_id, tier_id=new_id,
+            price=r.price, discount_percent=r.discount_percent,
+        )
+        for r in product_rows
+    ])
+
+    variant_rows = (await db.execute(
+        select(VariantLevelPricingOverride).where(VariantLevelPricingOverride.group_id == str(src.id))
+    )).scalars().all()
+    db.add_all([
+        VariantLevelPricingOverride(variant_id=r.variant_id, group_id=new_id, price=r.price)
+        for r in variant_rows
+    ])
+
+    await db.commit()
+    await db.refresh(copy)
+    logger.info(
+        "Discount group %s duplicated as %s (%s): %d product prices, %d variant prices",
+        src.title, copy.title, new_id, len(product_rows), len(variant_rows),
+    )
+    out = _group_out(copy)
+    out["copied_product_prices"] = len(product_rows)
+    out["copied_variant_prices"] = len(variant_rows)
+    return out
 
 
 # ── Group shipping (bulk-apply the 4 per-customer options to the whole group) ──
