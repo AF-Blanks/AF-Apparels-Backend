@@ -4386,6 +4386,301 @@ async def send_account_reminder(
     }
 
 
+# ── Statement of account ("Send Outstanding Invoice") ────────────────────────
+
+
+async def _statement_context(company_id: UUID, db: AsyncSession) -> dict:
+    """Every open invoice on an account, with its due date and how late it is.
+
+    The orders are chosen exactly as the Outstanding Balances report chooses
+    them, so the statement a customer receives shows the figures the admin was
+    looking at when they pressed the button. Due dates follow the order's
+    terms the same way its QuickBooks invoice does: Net 7 / Net 30 from the
+    day it was placed, anything else due on receipt.
+    """
+    from zoneinfo import ZoneInfo
+    from sqlalchemy import or_
+    from app.tasks.quickbooks_tasks import _net_terms_dates
+
+    co = (await db.execute(select(Company).where(Company.id == company_id))).scalar_one_or_none()
+    if not co:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    rows = (await db.execute(
+        select(Order)
+        .where(
+            Order.company_id == company_id,
+            Order.status.notin_(["cancelled", "refunded"]),
+            Order.payment_status.notin_(["paid", "refunded"]),
+            or_(Order.is_draft.is_(False), Order.inventory_deducted.is_(True)),
+        )
+        .order_by(Order.created_at.asc())
+    )).scalars().all()
+
+    shop_tz = ZoneInfo("America/Chicago")
+    today = datetime.now(shop_tz).date()
+    invoices = []
+    total_due = overdue = 0.0
+    for o in rows:
+        total = round(float(o.total or 0), 2)
+        paid = round(float(o.amount_paid or 0), 2)
+        due = round(total - paid, 2)
+        if due <= 0.005:
+            continue
+        placed = o.created_at.astimezone(shop_tz).date() if o.created_at else today
+        terms = _net_terms_dates(o)
+        due_date = date.fromisoformat(terms["due_date"]) if terms.get("due_date") else placed
+        days_over = (today - due_date).days
+        if days_over > 0:
+            overdue += due
+            status = f"Overdue {days_over} day{'s' if days_over != 1 else ''}"
+            tone = "red" if days_over > 30 else "orange"
+        elif days_over == 0:
+            status, tone = "Due today", "orange"
+        else:
+            status = f"Due in {-days_over} day{'s' if days_over != -1 else ''}"
+            tone = "green"
+        total_due += due
+        invoices.append({
+            "order_number": o.order_number,
+            "date": placed.strftime("%d %b %Y"),
+            "due_date": due_date.strftime("%d %b %Y"),
+            "total": total,
+            "paid": paid,
+            "due": due,
+            "status": status,
+            "tone": tone,
+        })
+
+    if not invoices:
+        raise HTTPException(
+            status_code=422,
+            detail="This customer has nothing outstanding — there is nothing to send.",
+        )
+
+    # Same addressee as the account reminder: the company's own address, else
+    # whoever placed its latest order.
+    to_email = (co.company_email or "").strip() or None
+    customer_name = None
+    if not to_email:
+        last = rows[-1] if rows else None
+        if last is not None and last.placed_by_id:
+            u = (await db.execute(
+                select(User).where(User.id == last.placed_by_id)
+            )).scalar_one_or_none()
+            if u:
+                to_email = u.email
+                customer_name = f"{u.first_name or ''} {u.last_name or ''}".strip() or None
+    if not to_email:
+        raise HTTPException(status_code=422, detail="No email address on file for this customer")
+
+    return {
+        "to_email": to_email,
+        "customer_name": customer_name,
+        "company_name": co.name,
+        "as_of": today.strftime("%d %b %Y"),
+        "invoices": invoices,
+        "total_due": round(total_due, 2),
+        "overdue": round(overdue, 2),
+    }
+
+
+def _statement_draft(ctx: dict) -> tuple[str, str]:
+    """The opening words; the figures themselves are laid out below them."""
+    who = ctx["company_name"] or ctx["customer_name"] or "there"
+    message = (
+        f"Hi {who},\n\n"
+        f"Here is a summary of your open invoices with AF Apparels as of {ctx['as_of']}. "
+        "Please review the balances below."
+    )
+    return f"Statement of account — ${ctx['total_due']:,.2f} outstanding", message
+
+
+def _statement_html(ctx: dict, message: str) -> str:
+    """The statement as the customer sees it: totals first, then each invoice."""
+    from html import escape as _e
+
+    tones = {
+        "red": ("#FEE2E2", "#B91C1C"),
+        "orange": ("#FFEDD5", "#C2410C"),
+        "green": ("#DCFCE7", "#047857"),
+    }
+    money = lambda n: f"${n:,.2f}"  # noqa: E731
+    n = len(ctx["invoices"])
+
+    paras = "".join(
+        f'<p style="margin:0 0 12px;font-size:14px;color:#374151;line-height:1.6">'
+        f'{_e(p).replace(chr(10), "<br>")}</p>'
+        for p in message.split(chr(10) * 2) if p.strip()
+    )
+
+    # Inline blocks rather than table cells: side by side on a wide screen,
+    # wrapping onto the next line on a phone, with no media query needed (many
+    # mail apps ignore them).
+    def _tile(label: str, value: str, color: str) -> str:
+        return (
+            '<div style="display:inline-block;vertical-align:top;width:150px;margin:0 8px 8px 0;'
+            'border:1px solid #E5E7EB;border-radius:8px;padding:12px 14px;box-sizing:border-box">'
+            f'<div style="font-size:10px;font-weight:700;letter-spacing:.06em;color:#6B7280;'
+            f'text-transform:uppercase;white-space:nowrap">{label}</div>'
+            f'<div style="font-size:19px;font-weight:800;color:{color};margin-top:4px;white-space:nowrap">{value}</div>'
+            '</div>'
+        )
+
+    tiles = (
+        '<div style="margin:20px 0 16px;font-size:0">'
+        + _tile("Total outstanding", money(ctx["total_due"]), "#B91C1C")
+        + _tile("Open invoices", str(n), "#1B3A5C")
+        + _tile("Overdue", money(ctx["overdue"]),
+                "#B91C1C" if ctx["overdue"] > 0.005 else "#047857")
+        + '</div>'
+    )
+
+    th = ('style="font-size:10px;font-weight:700;letter-spacing:.04em;color:#6B7280;'
+          'text-transform:uppercase;padding:0 5px 8px;border-bottom:2px solid #E5E7EB;{a}"')
+    head = (
+        f'<tr><th align="left" {th.format(a="padding-left:0")}>Invoice</th>'
+        f'<th align="left" {th.format(a="")}>Date</th>'
+        f'<th align="left" {th.format(a="")}>Due date</th>'
+        f'<th align="right" {th.format(a="")}>Total</th>'
+        f'<th align="right" {th.format(a="")}>Paid</th>'
+        f'<th align="right" {th.format(a="padding-right:0")}>Balance</th></tr>'
+    )
+    td = 'style="font-size:12px;color:#374151;padding:10px 5px;border-bottom:1px solid #F0EFEA;vertical-align:top;{a}"'
+    body = ""
+    for inv in ctx["invoices"]:
+        bg, fg = tones[inv["tone"]]
+        body += (
+            f'<tr>'
+            f'<td align="left" {td.format(a="padding-left:0")}>'
+            f'<div style="font-weight:700;color:#1B3A5C">{_e(inv["order_number"])}</div>'
+            f'<div style="margin-top:4px"><span style="display:inline-block;background:{bg};color:{fg};'
+            f'font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;line-height:1.4">'
+            f'{_e(inv["status"])}</span></div></td>'
+            f'<td align="left" {td.format(a="")}>{_e(inv["date"])}</td>'
+            f'<td align="left" {td.format(a="")}>{_e(inv["due_date"])}</td>'
+            f'<td align="right" {td.format(a="")}>{money(inv["total"])}</td>'
+            f'<td align="right" {td.format(a="color:#047857")}>{money(inv["paid"])}</td>'
+            f'<td align="right" {td.format(a="padding-right:0;font-weight:800;color:#B91C1C")}>'
+            f'{money(inv["due"])}</td>'
+            f'</tr>'
+        )
+    total_row = (
+        '<tr><td colspan="5" style="font-size:13px;font-weight:800;color:#1B3A5C;padding:14px 0 0">'
+        'TOTAL OUTSTANDING</td>'
+        f'<td align="right" style="font-size:18px;font-weight:800;color:#B91C1C;padding:14px 0 0">'
+        f'{money(ctx["total_due"])}</td></tr>'
+    )
+    table = (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="border-collapse:collapse">{head}{body}{total_row}</table>'
+    )
+
+    heading = (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;margin:0 0 18px"><tr>'
+        '<td style="vertical-align:bottom">'
+        '<div style="color:#1B3A5C;font-size:20px;font-weight:800">Statement of Account</div>'
+        f'<div style="color:#6B7280;font-size:13px;margin-top:2px">{_e(ctx["company_name"] or "")}</div>'
+        '</td>'
+        f'<td align="right" style="vertical-align:bottom;color:#6B7280;font-size:12px;white-space:nowrap">'
+        f'As of {_e(ctx["as_of"])}</td>'
+        '</tr></table>'
+    )
+
+    from app.services.email_service import EmailService
+    return EmailService._base_template(heading + paras + tiles + table)
+
+
+@router.get("/customers/{company_id}/statement", response_model=dict)
+async def preview_statement(company_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    """The statement of account a customer would receive, before it is sent."""
+    ctx = await _statement_context(company_id, db)
+    subject, message = _statement_draft(ctx)
+    return {
+        "to_email": ctx["to_email"],
+        "customer_name": ctx["customer_name"],
+        "company_name": ctx["company_name"],
+        "order_count": len(ctx["invoices"]),
+        "invoices": ctx["invoices"],
+        "amount_due": ctx["total_due"],
+        "account_due": ctx["total_due"],
+        "overdue": ctx["overdue"],
+        "subject": subject,
+        "message": message,
+    }
+
+
+@router.post("/customers/{company_id}/statement", response_model=dict)
+async def send_statement(
+    company_id: UUID,
+    payload: dict,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Email the statement, in whatever opening words the admin settled on.
+
+    Sent and recorded the way the account reminder is: on every invoice it
+    lists, so whoever opens one next can see the customer has had it.
+    """
+    from sqlalchemy import text as _text
+    from app.services.email_service import EmailService
+
+    ctx = await _statement_context(company_id, db)
+    _subject, _message = _statement_draft(ctx)
+    subject = (payload.get("subject") or "").strip() or _subject
+    message = (payload.get("message") or "").strip() or _message
+    to_email = (payload.get("to_email") or "").strip() or ctx["to_email"]
+
+    ok = EmailService(db).send_raw(to_email=to_email, subject=subject, body_html=_statement_html(ctx, message))
+    if not ok:
+        raise HTTPException(status_code=502, detail="The statement could not be sent — try again.")
+
+    _admin = "Admin"
+    _uid = getattr(request.state, "user_id", None) if request else None
+    if _uid:
+        _u = (await db.execute(select(User).where(User.id == _uid))).scalar_one_or_none()
+        if _u:
+            _admin = f"{_u.first_name or ''} {_u.last_name or ''}".strip() or "Admin"
+
+    _numbers = [i["order_number"] for i in ctx["invoices"]]
+    for _num in _numbers:
+        try:
+            _o = (await db.execute(
+                select(Order).where(Order.order_number == _num)
+            )).scalar_one_or_none()
+            if _o is None:
+                continue
+            _tl = list(_o.timeline or [])
+            _tl.append({
+                "status": _o.status,
+                "message": (
+                    f"Statement of account sent to {to_email} — "
+                    f"${ctx['total_due']:,.2f} across {len(_numbers)} "
+                    f"invoice{'s' if len(_numbers) != 1 else ''}"
+                ),
+                "created_by": _admin,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            await db.execute(
+                _text("UPDATE orders SET timeline = CAST(:tl AS jsonb) WHERE id = :oid"),
+                {"tl": _json.dumps(_tl), "oid": str(_o.id)},
+            )
+        except Exception as exc:  # noqa: BLE001 — the email has gone either way
+            logger.warning("Could not record statement on %s: %s", _num, exc)
+    try:
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        await db.rollback()
+
+    return {
+        "message": f"Statement sent to {to_email}",
+        "to_email": to_email,
+        "amount_due": ctx["total_due"],
+        "order_count": len(_numbers),
+    }
+
+
 @router.get("/orders/{order_id}/payment-reminder", response_model=dict)
 async def preview_payment_reminder(order_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
     """The reminder as it stands, before anyone edits it.
